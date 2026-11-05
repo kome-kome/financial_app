@@ -610,7 +610,8 @@ class TestWatchdogInstaller:
 # 健全・後者が固着という状態を作り、`plugin_tuned_params` が 50〜59日 古いまま
 # 誰にも気づかれなかった。失敗（#587）は起票・クローズされたのに穴だけが残った。
 
-M2_LABEL = "マクロ勾配ブースティング探索の結果"
+# 月次の producer の代表（#1118 で M-2 の行は周回の行へ一本化したので、月次の窓を持つ M-3 で測る）
+M3_LABEL = "動的線形モデル探索の結果"
 FRESH_PRODUCERS = {p.label: 1.0 for p in bf.PRODUCERS}
 
 
@@ -635,14 +636,14 @@ class TestProducerThresholdIsDerived:
 
     def test_windows_come_from_the_batch_modules(self):
         """書き写すと、窓を広げたときに閾値だけが古いまま残る。"""
-        assert _by_label(M2_LABEL).window_min == run_monthly.WINDOW_MIN
+        assert _by_label(M3_LABEL).window_min == run_monthly.WINDOW_MIN
         assert _by_label("マクロ・ベータの推論結果").window_min == run_monthly_beta.WINDOW_MIN
         assert _by_label("マクロ×リスク-リターン探索の結果").window_min == run_monthly_m1.WINDOW_MIN
         # 唯一、月次ではなく夜間バッチが更新する producer（#632）
         assert _by_label("JPX 業種マスタ").window_min == run_nightly.WINDOW_MIN
 
     def test_widening_the_window_widens_the_threshold(self):
-        p = _by_label(M2_LABEL)
+        p = _by_label(M3_LABEL)
         widened = bf.Produced(**{**p.__dict__, "window_min": p.window_min + 60})
         assert widened.stale_h == p.stale_h + 1.0
 
@@ -681,7 +682,7 @@ class TestTuningCycleProducer:
         assert seen == [tc.state_key("macro_gbdt")]
 
     def test_the_monthly_search_row_does_not_count_as_a_cycle(self):
-        """`plugin_tuned_params` は月次も書くので、周回が止まっても前進して見える＝読まない。"""
+        """`plugin_tuned_params` はキューの `tune:macro_gbdt` も書くので、周回が止まっても前進して見える＝読まない。"""
         assert "plugin_tuned_params" not in _by_label(CYCLE_LABEL).source
 
 
@@ -695,21 +696,21 @@ class TestRunningIsNotTheSameAsProducing:
 
     def test_a_stale_producer_fires_even_when_the_batch_ran(self, settings):
         snap = _snap(settings)
-        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M3_LABEL: 50.0})
         found = cbf.problems(snap)
-        assert [f["title"] for f in found] == [_by_label(M2_LABEL).issue_title]
+        assert [f["title"] for f in found] == [_by_label(M3_LABEL).issue_title]
         assert "前進していない" in found[0]["message"]
 
     def test_a_producer_just_inside_the_threshold_is_silent(self):
         """cadence + 窓 の内側では鳴らない（実行中に鳴らないのと同じ理屈）。"""
-        p = _by_label(M2_LABEL)
-        rows = _producers({**FRESH_PRODUCERS, M2_LABEL: p.stale_h / 24.0 - 0.01})
+        p = _by_label(M3_LABEL)
+        rows = _producers({**FRESH_PRODUCERS, M3_LABEL: p.stale_h / 24.0 - 0.01})
         assert all(r["status"] == "ok" for r in rows)
 
     def test_an_empty_table_is_missing_not_stale(self, settings):
         """「一度も永続化されていない」と「止まった」を同じ顔にしない。"""
         snap = _snap(settings)
-        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: None})
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M3_LABEL: None})
         assert [f["status"] for f in cbf.problems(snap)] == ["missing"]
 
     def test_an_unreadable_producer_is_a_problem_not_a_traceback(self, settings):
@@ -805,7 +806,7 @@ class TestProducerIssuesAreNotDuplicated:
 
     def test_the_body_points_at_the_batch_that_updates_it(self, settings):
         snap = _snap(settings)
-        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M3_LABEL: 50.0})
         body = cbf.issue_body(cbf.problems(snap)[0], snap)
         assert "financial_app-monthly" in body
         assert "plugin_tuned_params" in body
@@ -1072,7 +1073,7 @@ class TestRecoveredIssuesAreClosed:
     def test_a_recovered_producer_is_closed(self, settings):
         snap = _snap(settings)
         snap["producers"] = _producers(FRESH_PRODUCERS)
-        prod = _by_label(M2_LABEL)
+        prod = _by_label(M3_LABEL)
         gh = _GhIssues({9: (prod.issue_title, _by_watchdog(), [])})
         assert self._close(gh, snap) == []
         (call,) = gh.writes()
@@ -1081,8 +1082,8 @@ class TestRecoveredIssuesAreClosed:
 
     def test_a_stale_producer_stays_open(self, settings):
         snap = _snap(settings)
-        snap["producers"] = _producers({**FRESH_PRODUCERS, M2_LABEL: 50.0})
-        assert _by_label(M2_LABEL).issue_title not in [t["title"] for t in cbf.recoveries(snap)]
+        snap["producers"] = _producers({**FRESH_PRODUCERS, M3_LABEL: 50.0})
+        assert _by_label(M3_LABEL).issue_title not in [t["title"] for t in cbf.recoveries(snap)]
 
     def test_a_dead_database_recovers_nothing(self):
         """補集合で作ると、行が空の回に全対象が「問題なし」に見えて全部閉じる。"""

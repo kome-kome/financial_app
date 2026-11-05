@@ -99,11 +99,19 @@ class TestMigrationIsComplete:
 
         **M-1 は別タスク**（`scripts/run_monthly_m1.py`・#584）なので、網羅は2本の合併で見る。
         片方だけを見ると「M-1 が消えた」ことに気づけない——移設の穴は失敗として現れない。
+        **M-2 は日中枠の探索の周回**（`scripts/run_daytime.py`・#1118）なので、3 本の合併で見る。
         """
+        from scripts import run_daytime as rd
         from scripts import run_monthly_m1 as rm1
 
-        assert set(rm.heavy_models()) | set(rm1.heavy_models()) == {
+        assert set(rm.heavy_models()) | set(rm1.heavy_models()) | {rd.CYCLE_MODEL} == {
             "macro_risk_return", "macro_gbdt", "macro_dlm"}
+
+    def test_m2_is_not_in_the_monthly_body(self):
+        """M-2 は月次本体に**居ない**（#1118・ADR-0070 決定 5）。戻すと、締切で途中まで測った結果と
+        周回の結果が同じ `plugin_tuned_params` を書き合う。"""
+        assert "macro_gbdt" not in rm.heavy_models()
+        assert "tune:macro_gbdt" not in rm.BUDGET_MIN
 
     def test_m1_is_not_in_the_monthly_body(self):
         """M-1 は月次本体に**居ない**（#584）。
@@ -214,13 +222,13 @@ class TestStepOrder:
         assert not any(name.startswith("macro_beta") for name in _names())
 
     def test_remaining_tunes_are_ordered_lightest_first(self):
-        """M-1 が別タスクへ出た後、本体に残る tune は M-3 → M-2（#584）。
+        """M-1 が別タスクへ出（#584）、M-2 が日中枠の周回へ移った（#1118）後、本体に残る tune は M-3 だけ。
 
         打ち切られても前方は当月分が揃う、という「軽い順」の思想は変わらない。
         M-1 の「止まって最も困る」優先は、専用タスクを持たせたことで満たされている。
         """
         names = [n for n in _names() if n.startswith("tune:")]
-        assert names == ["tune:macro_dlm", "tune:macro_gbdt"]
+        assert names == ["tune:macro_dlm"]
 
     def test_every_step_states_why(self):
         for s in rm.steps_for(sys.executable):
@@ -240,16 +248,11 @@ class TestArgsMatchTheWorkflowsTheyReplace:
             argv = _argv(f"tune:{model}")
             assert "--persist" in argv and "--persist-scores" in argv
 
-    def test_only_gbdt_uses_random_search(self):
-        """grid で張れないのは M-2 だけ（GHA で n_iter=200 相当が4〜8時間だった）。"""
+    def test_monthly_tunes_use_grid_search(self):
+        """random で探すのは M-2 だけで、M-2 は #1118 で日中枠へ移った（その引数は `tests/test_run_daytime.py`）。"""
         for model in rm.heavy_models():
             argv = _argv(f"tune:{model}")
-            strategy = argv[argv.index("--strategy") + 1]
-            assert strategy == ("random" if model == "macro_gbdt" else "grid")
-
-    def test_gbdt_keeps_the_workflow_n_iter(self):
-        argv = _argv("tune:macro_gbdt")
-        assert argv[argv.index("--n-iter") + 1] == "150"
+            assert argv[argv.index("--strategy") + 1] == "grid"
 
 
 
@@ -412,10 +415,7 @@ MIN_BUDGET_RATIO = 1.25
 # 先に止めるので、#633 の「その月ぶんが丸ごと消える」はこのステップでは起きない。ここでは
 # 「予算 ≥ 実測」（＝前回の所要が今の予算に収まる）だけを縛る。
 FOLDS_BY_DESIGN: dict[str, str] = {
-    "tune:macro_gbdt": (
-        "exempt: #983 で学習行が約 1.8 倍になり、探索の本体（予算 340 − 段 60 − 取り置き 15 ＝ 265分）に 150 件が"
-        "入らない（2026-11-01 の月次は 225分の締切に 73/151 件・#994。2026-11-04 の日中枠でも本体だけで約 305分・"
-        "#1112）。毎回締切で畳み、実測は予算に張り付く"),
+    # 2026-11-05 まで `tune:macro_gbdt` が居た（締切で畳み、実測が予算に張り付く）。#1118 で月次から外れたので空。
 }
 
 
@@ -476,17 +476,3 @@ class TestTuneBudgetsMatchTheMeasurement:
         bad = sorted(name for name, why in FOLDS_BY_DESIGN.items()
                      if not why.startswith("exempt:") or not why[len("exempt:"):].strip())
         assert not bad, f"理由が `exempt: <理由>` の形でない: {bad}"
-
-
-class TestConfirmStageBudget:
-    """M-2 の探索に確かめ直す段（#984）を足したぶん、予算を上乗せしてある（探索の本体の時間を削らない）。"""
-
-    def test_the_search_body_keeps_its_share(self):
-        import hyperparameter_search as hs
-        from plugins.tuning import CONFIRM_RESERVE_MIN
-
-        _model, _strategy, extra = next(t for t in rm.TUNE_MATRIX if t[0] == "macro_gbdt")
-        assert "--confirm-top" in extra and "--confirm-seeds" in extra
-        body = rm.BUDGET_MIN["tune:macro_gbdt"] - hs.FINAL_RESERVE_MIN - CONFIRM_RESERVE_MIN
-        # 2026-10-01 の探索の本体は 225分（＝当時の予算 240 − 取り置き 15）で畳んでいた。段を足しても削らない
-        assert body >= 225

@@ -14,9 +14,9 @@ heavy を GitHub Actions 上で実行し、本番 Supabase へ直接永続化す
   - `sector_ols`  → `regression_results`（`gap_ratio` の生成元・買い推奨のバランス型プリセット）
   - `macro_enet`  → `macro_enet_scores`（M-6 の μ̂・`sell_ranking` の**既定** mu_source・#402/#443）
 
-M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、月次バッチ（`scripts/run_monthly.py`
-の `TUNE_MATRIX`・旧 `tune-hyperparameters.yml`）の `--persist-scores` による更新経路が現に生きているため（載せるなら同時に tune 側から外し、
-探索 cadence と #291 の品質ゲートの関係を詰める必要がある）。M-4（`macro_ensemble`）は基底を
+M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、日中枠の探索の周回（`scripts/run_daytime.py`
+の `tune_cycle:macro_gbdt`・#1114・#1118 で月次の `TUNE_MATRIX` から移した）の `--persist-scores` による更新経路が現に生きているため
+（載せるなら同時に周回の反映と分け、探索 cadence と #291 の品質ゲートの関係を詰める必要がある）。M-4（`macro_ensemble`）は基底を
 全部回してコストが合算になるのに M-6 単体を上回らないため当面除外（+0.0006・p=0.810・ADR-0022）。
 
 設計上の約束（触る前に読むこと）:
@@ -112,7 +112,8 @@ HEAVY_AUTOMATION: dict[str, str] = {
     # 切り出した（#584）。**切り出しの判断は #638 以後も変わらない**——畳めば結果は残るが、
     # 残るのは探索空間の一部を見た結果であって、毎月それでよいわけではない。
     "macro_risk_return": "local:scripts/run_monthly_m1.py",
-    "macro_gbdt": "local:scripts/run_monthly.py",
+    # M-2 は日中枠（平日 JST 08:00 → run_daytime.ps1）の探索の周回が月 1 回回し切って反映する（#1114・#1118）。
+    "macro_gbdt": "local:scripts/run_daytime.py",
     "macro_dlm": "local:scripts/run_monthly.py",
     # 自動実行しないと決めたもの（理由をここに残す＝「後で対応」を prose に書いて終わらせない）
     "macro_ensemble":

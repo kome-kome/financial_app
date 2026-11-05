@@ -174,11 +174,28 @@ class TestArgumentsMatchTheExistingBatches:
         """`--force` はゲートを迂回する。日中枠は通常判定でなければ検証にならない。"""
         assert "--force" not in self._argv_of(rd.steps_for("py", "beta"), "macro_beta")
 
-    @pytest.mark.parametrize("key", ["tune:macro_gbdt", "tune:macro_dlm"])
+    @pytest.mark.parametrize("key", ["tune:macro_dlm"])
     def test_tune_argv_matches_run_monthly(self, key):
         here = self._argv_of(rd.steps_for("py", key), key)
         there = self._argv_of(rm.steps_for("py"), key)
         assert here == there
+
+    def test_gbdt_is_no_longer_in_the_monthly_batch(self):
+        """M-2 の固定の候補集合の唯一の源は `JOBS["tune:macro_gbdt"]`（#1118）。月次に戻すと 2 経路が書き合う。"""
+        assert "tune:macro_gbdt" not in [s.name for s in rm.steps_for("py")]
+
+    def test_gbdt_keeps_the_fixed_candidate_set(self):
+        """月次から移した M-2 の探索条件をここで縛る（#1118 まで `tests/test_run_monthly.py` が持っていた）。
+
+        grid で張れないのは M-2 だけ（GHA で n_iter=200 相当が4〜8時間）。150 件は移設時の値で、動かすと
+        探索の周回の候補集合と `plugin_tuned_params` の比較の前提が変わる。確かめ直す段（#984）も落とさない。
+        """
+        argv = rd.JOBS["tune:macro_gbdt"].argv
+        pairs = dict(zip(argv, argv[1:]))
+        assert pairs["--strategy"] == "random"
+        assert pairs["--n-iter"] == "150"
+        assert pairs["--confirm-top"] == "5" and pairs["--confirm-seeds"] == "5"
+        assert "--persist" in argv and "--persist-scores" in argv
 
 
 class TestRhatScaleSamplesLikeProduction:
@@ -2434,7 +2451,7 @@ class TestTuningCycleStep:
         db.store[tc.state_key(rd.CYCLE_MODEL)] = tc.dump(st)
 
     def test_the_argv_is_the_monthly_search_plus_cycle(self):
-        """固定の候補集合は月次の探索と同じ（`--n-iter` や種を書き写さない）。"""
+        """固定の候補集合はキューの `tune:macro_gbdt` と同じ（`--n-iter` や種を書き写さない）。"""
         assert rd.CYCLE_ARGV == rd.JOBS["tune:macro_gbdt"].argv + ("--cycle",)
         assert rd.bc.models_from_steps([rd.cycle_step(sys.executable, datetime.now(timezone.utc))]) \
             == (rd.CYCLE_MODEL,)

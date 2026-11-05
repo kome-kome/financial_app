@@ -110,7 +110,7 @@
 |---|---|---|---|
 | 08:17 | `daily-incremental` → `nightly-scores` ／ マクロ鮮度ゲート（**#876 で削除**） | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20）。鮮度ゲートはその `macro_health` ステップ |
 | 00:00 | `macro-beta-inference`（**#504 で削除**） | 同上（`macro_beta_loadings` が分岐する） | `run_monthly_beta.ps1`（#579・毎月2日 JST 01:00） |
-| 16:30 | `tune-hyperparameters`（**#504 で削除**） | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 月次本体の `tune:macro_gbdt` / `tune:macro_dlm` と `run_monthly_m1.ps1`（M-1・#584） |
+| 16:30 | `tune-hyperparameters`（**#504 で削除**） | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 月次本体の `tune:macro_dlm`（M-3）、日中枠の探索の周回 `tune_cycle:macro_gbdt`（M-2・#1114・#1118）と `run_monthly_m1.ps1`（M-1・#584） |
 | 22:00 | `recommend-factor-premia`（**#504 で削除**） | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 月次本体の `factor_premia` ステップ（先頭に置いて打ち切りに強くしてある） |
 | 土 23:30 | `vacuum-maintenance` | **2026-08-25 に停止**（#290 / #505）。断面は 2026-08-07 で凍結＝書き込みが無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない | ローカル月次の `vacuum` ステップ（#504・先頭。実測 daily 59→49MB / weekly 188→165MB / 計13.4秒） |
 
@@ -342,8 +342,9 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
 （`tune-hyperparameters.yml`）が回していた。現在はローカルのタスクスケジューラが回し、
 **yml は #504 で削除した**。GUI からの手動トリガーは Issue #293 で廃止済み。
 
-- **実行**: M-2/M-3 は月次本体（`run_monthly.ps1`・時刻は「バッチ暦」）の `tune:<model>`
-  ステップ。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
+- **実行**: M-3 は月次本体（`run_monthly.ps1`・時刻は「バッチ暦」）の `tune:macro_dlm`
+  ステップ。M-2 は日中枠の残りで固定の候補集合を回し切る探索の周回（`tune_cycle:macro_gbdt`・毎月・#1114）で、
+  #1118 で月次から外した（月次は締切で 150 件中 73 件ほどしか測れずに本番の設定を書いていた・ADR-0070 決定 5）。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
   （`run_monthly_m1.ps1`・毎月3日・#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。
   ステップ予算は `scripts/run_monthly.py::BUDGET_MIN` が持ち、**Σ予算＋マージン ≤ 窓** を CI が照合する。
 - **品質ゲート（#291 → #590 で作り直し・[ADR-0047](adr/0047-tuning-gate-compares-on-one-panel.md)）**:

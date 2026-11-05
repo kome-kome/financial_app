@@ -175,6 +175,10 @@ ADR-0047 の「プールに champion を置くので best ≥ champion」は、*
 - 決定 4・5: 周回の初回（2026-11-04 開始）は 2 日目（11/05）に 150/150 件を回し切り、確かめ直してから本番へ 1 回反映した
   （`tuning_cycle:macro_gbdt` の `last_finished_at` と `result.persisted=true`・`plugin_tuned_params` の `tuned_at` を DB で確認）。
   選ばれたのは今の本番と同じ設定で、2 段目の入れ替わりは無かった（戻す規則は 0/3 のまま）。月次の M-2 ステップの撤去は #1118
+- 決定 5 の後半（月次の M-2 ステップの撤去）は #1118 で実施した。月次の `TUNE_MATRIX` と `BUDGET_MIN` から `tune:macro_gbdt`（340 分）を外し、
+  返った 340 分は窓の余白に残した（Σ 560 ＋ 30 ≤ 960）。M-2 の固定の候補集合の唯一の源は `run_daytime.JOBS["tune:macro_gbdt"]`、
+  `HEAVY_AUTOMATION["macro_gbdt"]` は `local:scripts/run_daytime.py`。producer の見張りは周回の行（`last_finished_at`）だけにした
+  （反映できた周回だけが進めるので反映の失敗も拾える。`plugin_tuned_params` の行も残すと同じ停止に Issue が 2 本立つ）
 
 ## 関連
 
