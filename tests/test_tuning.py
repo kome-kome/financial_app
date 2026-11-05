@@ -694,10 +694,15 @@ POPULATION_MOVING_AXES = frozenset({"use_momentum", "momentum_window"})
 
 
 def _searched_models() -> set:
-    """月次で**実際に探索が走る**モデル名。列挙を二重に持たず argv から取る。"""
-    from scripts import run_monthly, run_monthly_m1
+    """月次と日中枠の探索の周回で**実際に探索が走る**モデル名。列挙を二重に持たず argv から取る。
 
-    return set(run_monthly.heavy_models()) | set(run_monthly_m1.heavy_models())
+    M-2 は #1118 で月次から日中枠の周回（`run_daytime.CYCLE_ARGV`）へ移った。周回を見落とすと M-2 が守備範囲から消える。
+    """
+    from scripts import run_daytime, run_monthly, run_monthly_m1
+
+    argv = run_daytime.CYCLE_ARGV
+    cycle = {argv[argv.index("--model") + 1]}
+    return set(run_monthly.heavy_models()) | set(run_monthly_m1.heavy_models()) | cycle
 
 
 class TestSearchAxesDoNotMovePopulations:
@@ -737,7 +742,8 @@ class TestSearchAxesDoNotMovePopulations:
         """守備範囲が空になっていないこと（モデルが取れなければ上のテストは常に通る）。"""
         models = _searched_models()
         assert "macro_risk_return" in models, "M-1 の専用タスクを見ていない（#584）"
-        assert len(models) >= 3, "月次で探索が走るモデルを取り漏らしている: {0}".format(models)
+        assert "macro_gbdt" in models, "M-2 の探索の周回を見ていない（#1118）"
+        assert len(models) >= 3, "探索が走るモデルを取り漏らしている: {0}".format(models)
 
 
 # ── 予算の手前で畳む・途中経過の通知（Issue #638・ADR-0054）──────────────────
