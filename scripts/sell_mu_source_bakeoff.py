@@ -80,8 +80,7 @@ from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
     display_risk_map, display_scores, get_producer_scores, in_layer_short_side, oof_backtest,
 )
-from plugins.sell_ranking import sell_score  # noqa: E402
-from plugins.utils import coerce_params, fit_zscore_stats  # noqa: E402
+from plugins.utils import fit_zscore_stats, normalize_transform  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
 
@@ -108,9 +107,34 @@ CANDIDATE = "macro_enet"
 # 売りの条件のキー。μ̂ の出所は BASES（基底名をそのままキーにする）、上限版はこの名前。
 UPPER = "upper_bound_with_r_macro"
 # 上限版の重み。#1073 までの既定プリセット「マクロ予測型」の式で、#1073 の規則 B で既定から −R_macro を外した
-# （2026-10-31）。既定へ追随させると上限版が μ̂ だけと同じものになり比較が消えるので、ここに残す。採点は本番と
-# 同じ `sell_score`（式は書き写さない）。
+# （2026-10-31）。既定へ追随させると上限版が μ̂ だけと同じものになり比較が消えるので、ここに残す。
+# 採点の式（`sell_score`）は sell_ranking が μ̂ だけの並びになった（ADR-0071）ので、唯一の使い手のここへ移した。
 UPPER_WEIGHTS = {"mu": 1.0, "neg_r_macro": 0.5}
+# 被覆率の下限。ADR-0071 まで sell_ranking の `min_coverage` の既定だった値（上限版の測り方を変えない）。
+UPPER_MIN_COVERAGE = 0.4
+
+
+def sell_score(raws: dict, weights: dict, stats: dict,
+               min_coverage: float) -> tuple[float | None, float]:
+    """1社の売りスコアと被覆率 `(score, coverage)`。score が大きいほど売る理由が大きい。
+
+    raws = {指標: 生の値 or None}（「高い＝売る理由が小さい」向き）。stats = {指標: (mean, sd)}
+    （`fit_zscore_stats`）。値がそろった指標を z へ変換し、Σw(−z) をそろった重みの和で割る。
+    被覆率（そろった重み / 全重み）が min_coverage 未満なら score は None。ADR-0071 まで
+    sell_ranking の本番の式だったもの（上限版の比較を同じ式で続けるために残す）。
+    """
+    total_weight = sum(weights.values())
+    weighted_sum = 0.0
+    weight_present = 0.0
+    for m, w in weights.items():
+        raw = raws.get(m)
+        if raw is not None and m in stats:
+            mean_, sd = stats[m]
+            weighted_sum += w * (-normalize_transform(float(raw), mean_, sd, "zscore"))
+            weight_present += w
+    coverage = weight_present / total_weight if total_weight else 0.0
+    score = weighted_sum / weight_present if weight_present > 0 and coverage >= min_coverage else None
+    return score, coverage
 SHORT = {"macro_risk_return": "M-1", "macro_gbdt": "M-2", "macro_enet": "M-6",
          UPPER: "M-6+R_macro(上限)"}
 # 検定する対（a − b）。μ̂ の出所どうしは主判定と同じ対、上限版は「R_macro を足して層の中の売りが
@@ -196,12 +220,11 @@ def buy_scores(name: str, pred: dict, y: dict, prices_by_co: dict, db) -> tuple[
 def upper_bound_keys(mu: dict, producer: dict) -> dict:
     """上限版の売りのキー `{(ym, ec): −売りスコア}`（低いほど先に売る）。
 
-    `UPPER_WEIGHTS`（#1073 まで既定だった μ + 0.5×−R_macro）を sell_ranking の `sell_score` で採点する。
+    `UPPER_WEIGHTS`（#1073 まで既定だった μ + 0.5×−R_macro）を `sell_score` で採点する。
     μ に M-6 の OOF μ̂、−R_macro に今の producer の R_macro を入れる。**R_macro は時点再現できない**（単一 run
     のスナップショット・#709）ので未来情報込みの上限。z の平均・標準偏差は期ごとに共通域の全社から取る（本番は
-    今の投資可能な全社）。score が None の社（被覆率が下限未満・下限は sell_ranking の既定）は入れない。
+    今の投資可能な全社）。score が None の社（被覆率が `UPPER_MIN_COVERAGE` 未満）は入れない。
     """
-    params = coerce_params(get_plugin("sell_ranking").params_schema(), {})
     weights = dict(UPPER_WEIGHTS)
     raws_by_ym: dict[str, dict] = defaultdict(dict)
     for (ym, ec), v in mu.items():
@@ -215,7 +238,7 @@ def upper_bound_keys(mu: dict, producer: dict) -> dict:
             if s is not None:
                 stats[m] = s
         for ec, r in raws.items():
-            score, _coverage = sell_score(r, weights, stats, params["min_coverage"])
+            score, _coverage = sell_score(r, weights, stats, UPPER_MIN_COVERAGE)
             if score is not None:
                 out[(ym, ec)] = -score
     return out

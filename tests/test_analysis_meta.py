@@ -79,9 +79,8 @@ class TestHiddenPlugins:
     退役は**削除ではなく非表示**で行う。よって「サイドバーから消えている」ことと
     「レジストリ・API・model_comparison には残っている」ことを**両方**縛る必要がある。
     片方だけだと、退役したつもりで実行経路まで壊す／消したつもりで UI に残る、の
-    どちらにも倒れうる。加えて `mu_source` の選択肢は sell_ranking の params_schema と
-    analysis.html の静的 select の**二重管理**なので、その一致もここで機械照合する
-    （退役したモデルが select にだけ残ると、選んだ瞬間 coerce_params が reject する）。
+    どちらにも倒れうる。加えて `mu_source` の選択肢（recommend）と sell_ranking の唯一の
+    出所（`MU_SOURCE`・ADR-0071）に退役モデルが載っていないことも縛る。
     """
 
     @staticmethod
@@ -124,9 +123,10 @@ class TestHiddenPlugins:
 
     def test_hidden_plugins_are_not_offered_as_mu_source(self):
         hidden = self._hidden_names()
-        for consumer in ("sell_ranking", "recommend"):
-            leaked = hidden & self._mu_source_options(consumer)
-            assert not leaked, f"{consumer} の mu_source に退役モデルが残っている: {sorted(leaked)}"
+        leaked = hidden & self._mu_source_options("recommend")
+        assert not leaked, f"recommend の mu_source に退役モデルが残っている: {sorted(leaked)}"
+        from plugins.sell_ranking import MU_SOURCE
+        assert MU_SOURCE not in hidden, "sell_ranking の唯一の μ̂ の出所が退役している"
 
     # `mu_source` に載る producer の期待集合（ADR-0052）。**hidden とは独立に縛る**——
     # 上の test_hidden_plugins_are_not_offered_as_mu_source は「hidden ⇒ options から
@@ -137,13 +137,17 @@ class TestHiddenPlugins:
 
     def test_mu_source_options_match_the_expected_set(self):
         """mu_source の品揃えを期待集合で直接縛る（ADR-0044 の hidden とは別軸）。"""
-        for consumer in ("sell_ranking", "recommend"):
-            assert self._mu_source_options(consumer) == self.EXPECTED_MU_SOURCES, (
-                f"{consumer} の mu_source が期待集合と食い違う"
-                f"（actual={sorted(self._mu_source_options(consumer))} / "
-                f"expected={sorted(self.EXPECTED_MU_SOURCES)}）。"
-                "M-4 は退役（ADR-0044）、M-2 は供給者から降ろした（ADR-0052）"
-            )
+        assert self._mu_source_options("recommend") == self.EXPECTED_MU_SOURCES, (
+            "recommend の mu_source が期待集合と食い違う"
+            f"（actual={sorted(self._mu_source_options('recommend'))} / "
+            f"expected={sorted(self.EXPECTED_MU_SOURCES)}）。"
+            "M-4 は退役（ADR-0044）、M-2 は供給者から降ろした（ADR-0052）"
+        )
+        # 売り候補は出所を選ばせない（M-6 だけ・ADR-0071）
+        from plugins import get_plugin
+        from plugins.sell_ranking import MU_SOURCE
+        assert MU_SOURCE == "macro_enet"
+        assert "mu_source" not in get_plugin("sell_ranking").params_schema()
 
     def test_demoted_m2_is_visible_but_not_a_supplier(self):
         """M-2 は「表示するが供給者ではない」第3の状態（ADR-0052）。
@@ -156,7 +160,8 @@ class TestHiddenPlugins:
 
         m2 = get_plugin("macro_gbdt")
         assert m2 is not None and not m2.hidden, "M-2 は退役ではない（分析タブと SHAP は残す）"
-        assert "macro_gbdt" not in self._mu_source_options("sell_ranking")
+        from plugins.sell_ranking import MU_SOURCE
+        assert MU_SOURCE != "macro_gbdt"
         assert "macro_gbdt" not in self._mu_source_options("recommend")
 
         # 比較の基準線としての役は残る（ADR-0021 の bake-off が基準線に使う）
@@ -169,18 +174,11 @@ class TestHiddenPlugins:
 
         assert "macro_gbdt" in BASE_MODELS
 
-    def test_static_select_matches_sell_ranking_options(self):
-        """analysis.html の静的 select と sell_ranking の options の二重管理を照合する。"""
-        import re
-
+    def test_sell_tab_has_no_mu_source_select(self):
+        """売り候補の画面に μ の出所の選択は無い（ADR-0071）。以前は静的 select と schema の
+        二重管理をここで照合していた。"""
         body = client.get("/analysis").text
-        m = re.search(r'<select id="sell-mu-source".*?</select>', body, re.S)
-        assert m, "sell-mu-source の select が見つからない"
-        in_html = set(re.findall(r'<option value="([^"]+)"', m.group(0)))
-        assert in_html == self._mu_source_options("sell_ranking"), (
-            "analysis.html の mu_source option と sell_ranking.params_schema() が食い違う"
-            f"（html={sorted(in_html)} / schema={sorted(self._mu_source_options('sell_ranking'))}）"
-        )
+        assert 'id="sell-mu-source"' not in body
 
 
 class TestModelStatusEndpoint:

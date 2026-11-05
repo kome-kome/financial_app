@@ -832,67 +832,11 @@ class TestProducer:
         assert result["untradable_excluded"] == {"delisted": 1, "stale": 1, "fallback": False}
         assert result["n_companies"] == n_co
 
-    def test_sell_ranking_mu_source_schema_has_macro_dlm(self):
-        """sell_ranking の mu_source に macro_dlm が含まれる。"""
-        from plugins.sell_ranking import SellRankingPlugin
-        sell = SellRankingPlugin()
-        schema = sell.params_schema()
-        opts = {o["value"] for o in schema["mu_source"]["options"]}
-        assert "macro_dlm" in opts
-
-    def test_sell_ranking_reads_macro_dlm_scores(self):
-        """sell_ranking が mu_source=macro_dlm のとき M-3 の read_producer_scores を呼ぶ。"""
-        from plugins.sell_ranking import SellRankingPlugin
-        from unittest.mock import patch as _patch, MagicMock as _MM
-
-        sell = SellRankingPlugin()
-        # 最低限の execute 引数
-        params_raw = {k: v.get("default") for k, v in sell.params_schema().items()}
-        params_raw["holdings"] = "7203"
-        params_raw["mu_source"] = "macro_dlm"
-        from plugins.utils import coerce_params
-        params = coerce_params(sell.params_schema(), params_raw)
-
-        read_called = []
-
-        class FakeDlmPlugin:
-            def produced_output(self, db):
-                return True
-
-            def read_producer_scores(self, db, macro_snapshot=None):
-                read_called.append(True)
-                return {}
-
-        db = _MM()
-        # FinancialMetric / latest_year_subq / StockPriceWeekly のモック
-        db.query.return_value.join.return_value.filter.return_value.all.return_value = []
-        db.query.return_value.join.return_value.all.return_value = []
-        db.query.return_value.filter.return_value.all.return_value = []
-
-        with _patch("plugins._registry", {"macro_dlm": FakeDlmPlugin()}), \
-             _patch("plugins.sell_ranking.SellRankingPlugin.execute",
-                    wraps=sell.execute):
-            # get_plugin がモックを返すように
-            with _patch("plugins.sell_ranking.__import__",
-                        side_effect=ImportError, create=True):
-                pass  # import は通常通り走る
-
-        # 実際に execute を呼んで macro_dlm plugin の read_producer_scores が呼ばれるか確認。
-        # `tradable_filters`（#605）は `sub.c.d < cutoff` を組むので MagicMock では
-        # TypeError になる（MagicMock に `<` が無い）。**母集団条件はこのテストの主題では
-        # ないので条件ゼロで通す**——ここを空にしても producer 呼び出しの検証は成立し、
-        # 条件そのものは tests/test_tradable_universe.py が実 DB（SQLite）で縛る。
-        with _patch("plugins.get_plugin", return_value=FakeDlmPlugin()), \
-             _patch("database.tradable_filters", return_value=[]), \
-             _patch("database.FinancialMetric", create=True), \
-             _patch("database.StockPriceWeekly", create=True), \
-             _patch("database.latest_year_subq", return_value=_MM()):
-            try:
-                sell.execute(params, db)
-            except Exception:
-                pass  # DB モックが不完全でも read_called が確認できればよい
-
-        assert read_called, "mu_source=macro_dlm のとき read_producer_scores が呼ばれなかった"
+    def test_sell_ranking_does_not_offer_macro_dlm(self):
+        """売り候補の μ̂ は M-6 だけ（ADR-0071）。M-3 は売り側spread で測られておらず出所から外した。"""
+        from plugins.sell_ranking import MU_SOURCE, plugin as sell
+        assert MU_SOURCE == "macro_enet"
+        assert "mu_source" not in sell.params_schema()
 
 
 # ── 10. AR(1) アルファ（Issue #239）───────────────────────────────────────────

@@ -223,7 +223,7 @@ class TestPlugins:
         from plugins.utils import coerce_params
 
         _seed(db, make_metric)
-        raw = {"holdings": "2002\n3001", "weights": {"roe": 1.0}, "min_coverage": 0.0}
+        raw = {"holdings": "2002\n3001"}
 
         def run():
             return plugin.execute(coerce_params(plugin.params_schema(), raw), db)
@@ -235,8 +235,8 @@ class TestPlugins:
         monkeypatch.setattr(IE, "load_ledger", lambda db=None, **kw: lg)
         monkeypatch.setattr(N, "jst_today", lambda: TODAY)
         with_ = run()
-        key = [(r["rank"], r["sec_code"], r["score"], r["action"]) for r in without["results"]]
-        assert key == [(r["rank"], r["sec_code"], r["score"], r["action"]) for r in with_["results"]]
+        key = [(r["rank"], r["sec_code"], r["mu"], r["action"]) for r in without["results"]]
+        assert key == [(r["rank"], r["sec_code"], r["mu"], r["action"]) for r in with_["results"]]
         assert {r["sec_code"]: (r["index_event"] or {}).get("label") for r in with_["results"]} == \
             {"2002": "TOPIX移行", "3001": None}
         assert with_["index_events"]["summary"].startswith("保有 2 社中、TOPIX 移行措置 1 社（母集団では 20.0%）")

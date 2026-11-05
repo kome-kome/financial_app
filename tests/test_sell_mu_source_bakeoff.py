@@ -11,7 +11,7 @@ import pytest
 import scripts.run_daytime as rd
 import scripts.sell_mu_source_bakeoff as sb
 from plugins import macro_ensemble
-from plugins.sell_ranking import sell_score
+from scripts.sell_mu_source_bakeoff import sell_score
 from scripts.ensemble_base_bakeoff import _run_config
 
 BASES = ["macro_risk_return", "macro_gbdt", "macro_enet"]
@@ -90,20 +90,20 @@ class TestUpperBound:
         assert same_mu == sorted(same_mu, reverse=True)
 
     def test_missing_r_macro_is_scored_by_mu_alone(self):
-        """R_macro が無い社は μ だけで採点される（本番の `sell_score` と同じ・被覆率 2/3 ≥ 下限 0.4）。"""
+        """R_macro が無い社は μ だけで採点される（`sell_score`・被覆率 2/3 ≥ 下限 0.4）。"""
         keys = sb.upper_bound_keys(self.MU, {})
         assert set(keys) == set(self.MU)
         order = sorted(self.MU, key=lambda k: (keys[k], k))
         assert [self.MU[k] for k in order] == sorted(self.MU.values())
 
-    def test_upper_bound_does_not_follow_the_default_preset(self):
-        """既定プリセットが μ だけになっても（#1073）、上限版は −R_macro を足した式のまま。"""
-        from plugins.sell_ranking import PRESETS
+    def test_upper_bound_keeps_the_retired_formula(self):
+        """sell_ranking が μ̂ だけの並びになっても（#1073・ADR-0071）、上限版は −R_macro を足した式と
+        当時の被覆率の下限のまま。"""
         assert sb.UPPER_WEIGHTS == {"mu": 1.0, "neg_r_macro": 0.5}
-        assert PRESETS["マクロ予測型"] != sb.UPPER_WEIGHTS
+        assert sb.UPPER_MIN_COVERAGE == 0.4
 
-    def test_same_formula_as_the_sell_ranking(self):
-        """上限版のスコアは本番の `sell_score` と同じ値（式を書き写していない）。"""
+    def test_same_formula_as_sell_score(self):
+        """上限版のスコアは `sell_score` と同じ値（式を書き写していない）。"""
         producer = {f"E{i}": {"r_macro": 0.1 + 0.02 * i} for i in range(12)}
         keys = sb.upper_bound_keys(self.MU, producer)
         from plugins.utils import fit_zscore_stats
@@ -113,6 +113,29 @@ class TestUpperBound:
         score, _cov = sell_score({"mu": self.MU[("2020-01", "E5")], "neg_r_macro": negs[5]},
                                  {"mu": 1.0, "neg_r_macro": 0.5}, stats, 0.4)
         assert keys[("2020-01", "E5")] == pytest.approx(-score)
+
+
+class TestSellScore:
+    """上限版の採点式（ADR-0071 で sell_ranking から移した `sell_score`）。"""
+    W = {"mu": 1.0, "neg_r_macro": 0.5}
+    STATS = {"mu": (0.0, 0.1), "neg_r_macro": (-0.2, 0.05)}
+
+    def test_weighted_mean_of_negative_z(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
+        # z(mu) = −1 → +1、z(neg_r_macro) = −1 → +1。Σw(−z)/Σw = 1。
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0)
+
+    def test_missing_metric_is_left_out_of_the_denominator(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": None}, self.W, self.STATS, 0.4)
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
+
+    def test_below_min_coverage_is_none(self):
+        score, cov = sell_score({"mu": None, "neg_r_macro": -0.25}, self.W, self.STATS, 0.4)
+        assert score is None and cov == pytest.approx(0.5 / 1.5)
+
+    def test_metric_without_stats_is_not_counted(self):
+        score, cov = sell_score({"mu": -0.1, "neg_r_macro": -0.25}, self.W, {"mu": (0.0, 0.1)}, 0.4)
+        assert score == pytest.approx(1.0) and cov == pytest.approx(1.0 / 1.5)
 
 
 class TestDaytimeJob:

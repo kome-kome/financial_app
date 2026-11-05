@@ -1,70 +1,37 @@
-"""売り候補ランキング（保有銘柄の売り時判定）。
+"""売り候補ランキング（保有銘柄の中から売る銘柄を選ぶ）。
 
-買い系モデル（recommend / gap_analysis 等）が全銘柄ユニバースから「買い」を探すのに対し、
-本プラグインは **ユーザーが入力した保有銘柄リスト**の中から「売るべき銘柄と売り時」を
-ランキングする。観点は買い系の「逆」:
+**手法は 1 つだけ**（ADR-0071）: 保有銘柄を M-6（`macro_enet`）の μ̂（52週先の期待リターン）の低い順に
+並べ、**下位 1/5 に「売却」**、残りに「保有継続」を付ける。μ̂ が無い保有は「データ不足」で末尾。
 
-  ① 割高度（gap_ratio が負＝割高）         … gap_analysis / sector_ols の割安スクリーニングの逆
-  ② 業績悪化（ROE・営業利益率・CF・成長率の低さ） … recommend の優良スコアの逆
-  ③ ネットキャッシュ余力の毀損（nc_ratio が低い） … 清原式ネットキャッシュ分析の逆（安全マージン消失）
-  ④ 価格モメンタム（タイミング）            … 買い系には無い「売り時」軸
+この形は実測した運用そのものに合わせてある（ADR-0071）:
+  - μ̂ の出所は売り側spread（全社・ADR-0022）で最も良い M-6。M-1 は p=0.10 で劣後、M-2 は有意に劣後
+  - 「1 つ前の期に買いの並びの上位にいた社（＝保有に近い母集団）の中で、μ̂ の下位 1/5 を売る」と
+    層の平均を下回る社を選べていた（上位層の売り側spread・#1043・ADR-0069）。下位の切り方は
+    `macro_snapshots.in_layer_short_side` と同じ（昇順の先頭 m // 5 社）
+  - −R_macro を足すと全社でも層の中でも有意に悪化した（#1073）
 
-スコア設計（スケール整合）:
-  各シグナルは「高いほど良い（売る理由が小さい）」指標なので、最新年度ユニバース全体で
-  winsorize → z 標準化し、`売りスコア = Σ w_i·(−zstd_i) / Σ w_i`（w_i ≥ 0）で合成する。
-  ユニバース平均並みの銘柄は ≈0、割高・業績不振の銘柄ほど正に大きくなる。
-  CLAUDE.md「分析モデルの次元整合性」に従い、％指標（gap_ratio・rev_growth）と無次元 z を
-  混在させず、全シグナルを同一ユニバースで標準化してから重み付けする。
-
-タイミングは別軸（trend）として算出し、アクションラベル（SELL/REDUCE/HOLD）を補正する
-（割高でも上昇中は即売りを避け、下落中は一段引き上げる）。購入単価は損益（PnL）表示のみで
-スコアには使わない。
+外したもの（どれも売りとして測られていない・または測って負けた）: 財務指標のプリセット（バランス型・
+割高警戒型・業績悪化重視）と観点ウェイト、μ の出所の切替（M-1・M-3）、売りスコアの絶対閾値と
+「一部売却」、価格トレンドによる札の補正、R3 足切り。価格トレンド（13週リターン・52週高値からの下落）と
+損益は**参考として表示するだけ**で、並びにも札にも使わない。
 """
 import re
 from collections import namedtuple
 from typing import Any
 
 from .base import AnalysisPlugin
-from .utils import fit_zscore_stats, normalize_transform
-from .net_cash_analysis import compute_net_cash, compute_nc_ratio
 
 
-# 売りシグナルに使う指標（すべて「高い＝売る理由が小さい」向き）。
-# 多くは financial_metrics VIEW 列。nc_ratio は VIEW にも同名列があるが実行時計算する
-# （_resolve_metric・理由は下記 _SELL_RUNTIME_METRICS のコメント）。
-# UI のウェイトグリッドと一致させる（static/js/analysis.js: SELL_WEIGHT_LABELS）。
-SELL_METRICS = ["gap_ratio", "roe", "op_margin", "cf_ratio", "rev_growth", "equity_ratio", "nc_ratio", "mu", "neg_r_macro"]
-
-# プリセット（ウェイトは ≥0。値が大きいほどその観点を売り判断で重視）。
-# nc_ratio = 清原式ネットキャッシュ比率の逆観点（クッション消失＝安全マージン喪失を売り軸へ）。
-# mu       = M-1 期待リターン（高い＝保有理由あり＝売る理由が小さい）。M-1 未実行なら graceful-degrade。
-# neg_r_macro = −R_macro（M-1 マクロリスク曝露の符号反転。高い＝低リスク＝売る理由が小さい）。
-PRESETS = {
-    # マクロ予測型: μ（期待リターン）だけで売り候補を判定する既定プリセット。選択 μ モデル（既定 M-6）の
-    # 実行結果に依存し、未実行なら全保有が「データ不足」になる（§10.5）。#1073 まで −Rᴹ を 0.5 で足していたが、
-    # 全社の売り側spread で μ̂ だけより有意に悪く（−2.74%・p=0.002）、計測前に固定した規則 B で外した（ADR-0069）。
-    "マクロ予測型": {"mu": 1.0},
-    "バランス型":   {"gap_ratio": 1.0, "roe": 1.0, "op_margin": 1.0, "cf_ratio": 0.8, "rev_growth": 0.6, "equity_ratio": 0.4, "nc_ratio": 0.4, "mu": 0.5, "neg_r_macro": 0.3},
-    "割高警戒型":   {"gap_ratio": 2.5, "roe": 0.5, "op_margin": 0.5, "rev_growth": 0.3, "nc_ratio": 0.8, "neg_r_macro": 0.8},
-    "業績悪化重視": {"roe": 2.0, "op_margin": 1.5, "cf_ratio": 1.0, "rev_growth": 1.5, "gap_ratio": 0.5, "nc_ratio": 0.3, "mu": 0.3},
-}
-
+# μ̂ の出所（唯一）。売り側spread で最良（ADR-0022・ADR-0071）。変えるときは ADR を添えて
+# `scripts.sell_mu_source_bakeoff` の実測で決める。
+MU_SOURCE = "macro_enet"
+# 下位 1/SELL_QUANTILES を売る。`in_layer_short_side(n_quantiles=5)` と同じ切り方（m // 5 社）。
+SELL_QUANTILES = 5
 
 # ── 転送列の契約（Issue #482）────────────────────────────────────────────────
-# financial_metrics は派生値込み97列の計算 VIEW だが、本プラグインが読むのは以下だけ。
-# ORM で全列を引くと 1リクエストあたり 3.45MB（4,430行 × 779B/行・db_egress の
-# EGRESS_COST_TABLE 実測）を転送する。`recommend.SELECT_COLS`（#441）と同じ方式で
-# 消費列から導出する＝指標を SELL_METRICS へ足せば転送列が自動追従し、二重管理しない。
-# 転送しない指標: mu / neg_r_macro は producer 由来で VIEW に列が無い。nc_ratio は VIEW にも
-# 同名列があるが、_resolve_metric は BS3列から実行時計算する（VIEW 側は ROUND(...,4) 付きで
-# 式が一致しない）ため、こちらも引かず _NC_RATIO_COLS を転送する。
-_SELL_RUNTIME_METRICS = ("nc_ratio", "mu", "neg_r_macro")
-_SELL_VIEW_METRICS = tuple(m for m in SELL_METRICS if m not in _SELL_RUNTIME_METRICS)
-_NC_RATIO_COLS = ("bs_current_assets", "bs_investment_securities", "bs_total_liabilities")  # _resolve_metric
-_SELL_DISPLAY_COLS = ("edinet_code", "sec_code", "company_name", "industry", "year",
-                      "market_cap", "stock_price", "is_active", "delisted_date")
-SELL_SELECT_COLS = tuple(dict.fromkeys(
-    _SELL_DISPLAY_COLS + _SELL_VIEW_METRICS + _NC_RATIO_COLS))
+# financial_metrics は派生値込みの計算 VIEW。ここで読むのは表示と損益のフォールバックに使う列だけ。
+SELL_SELECT_COLS = ("edinet_code", "sec_code", "company_name", "industry", "year",
+                    "stock_price", "is_active", "delisted_date")
 
 # 週次株価の転送量制御（Issue #482）。_compute_trend が読むのは week_start と close_last の
 # 2列だけで、必要な最長窓は 52週ドローダウン（closes[-52:]）＝364日。余裕1ヶ月を足して 400日
@@ -75,24 +42,10 @@ _TREND_LOOKBACK_DAYS = 400
 _TREND_CODE_BATCH = 500
 _WeeklyBar = namedtuple("_WeeklyBar", "week_start close_last")
 
-
-def _resolve_metric(r, m: str) -> float | None:
-    """売り指標の値を取り出す。多くは VIEW 列だが nc_ratio は実行時計算する。
-
-    nc_ratio = 清原式ネットキャッシュ比率（高い＝クッション厚い＝売る理由が小さい）。
-    クッション消失（低い/負）の銘柄ほど -z が大きくなり売りスコアへ加点される。
-    """
-    if m == "nc_ratio":
-        nc = compute_net_cash(getattr(r, "bs_current_assets", None),
-                              getattr(r, "bs_investment_securities", None),
-                              getattr(r, "bs_total_liabilities", None))
-        return compute_nc_ratio(nc, getattr(r, "market_cap", None))
-    return getattr(r, m, None)
-
-# トレンド判定の閾値（13週リターン）。
+# トレンド判定の閾値（13週リターン）。表示だけに使う。
 _TREND_UP   = 0.10    # +10% 以上 → 上昇
 _TREND_DOWN = -0.10   # −10% 以下 → 下落
-_MIN_WEEKS_FOR_TREND = 8   # 週次データがこれ未満なら trend=不明（補正しない）
+_MIN_WEEKS_FOR_TREND = 8   # 週次データがこれ未満なら trend=不明
 
 
 def parse_holdings(text: str) -> tuple[list[dict], list[str]]:
@@ -140,7 +93,7 @@ def parse_holdings(text: str) -> tuple[list[dict], list[str]]:
 
 
 def _compute_trend(weekly_rows: list) -> dict:
-    """週次株価から価格モメンタム（タイミング軸）を算出する。
+    """週次株価から価格トレンドを算出する（参考表示のみ・札には使わない）。
 
     weekly_rows: _WeeklyBar（同一 edinet_code・week_start と close_last の2フィールド）。
                  week_start 昇順でなくてよい。
@@ -187,66 +140,37 @@ def _compute_trend(weekly_rows: list) -> dict:
     }
 
 
-# アクションラベルの段階（昇順＝売り圧力が強い）。タイミング補正で 1 段ずらす。
-_ACTIONS = ["HOLD", "REDUCE", "SELL"]
+def n_to_sell(n_ranked: int) -> int:
+    """μ̂ がそろった保有 n_ranked 社のうち売る社数（下位 1/5・切り捨て）。
 
-
-def sell_score(raws: dict, weights: dict, stats: dict,
-               min_coverage: float) -> tuple[float | None, float]:
-    """保有1社の売りスコアと被覆率 `(score, coverage)`。score が大きいほど売る理由が大きい。
-
-    raws = {指標: 生の値 or None}（向きは SELL_METRICS のとおり「高い＝売る理由が小さい」）。stats =
-    {指標: (mean, sd)}（`fit_zscore_stats`）。値がそろった指標を母集団の z へ変換し（`normalize_transform`）、
-    Σw(−z) をそろった重みの和で割る。被覆率（そろった重み / 全重み）が min_coverage 未満なら score は
-    None（データ不足）。上位層の売り側spread の上限版（#1043）も同じ式で採点する（書き写さない）。
+    5 社未満なら 0（下位 1/5 が 1 社に満たない）。実測の切り方（`in_layer_short_side`）と同じで、
+    少ない保有に合わせて 1 社へ切り上げる規則は測っていないので足さない。
     """
-    total_weight = sum(weights.values())
-    weighted_sum = 0.0
-    weight_present = 0.0
-    for m, w in weights.items():
-        raw = raws.get(m)
-        if raw is not None and m in stats:
-            mean_, sd = stats[m]
-            zstd = normalize_transform(float(raw), mean_, sd, "zscore")
-            weighted_sum += w * (-zstd)        # 平均より下＝売り側に加点
-            weight_present += w
-    coverage = weight_present / total_weight if total_weight else 0.0
-    score = weighted_sum / weight_present if weight_present > 0 and coverage >= min_coverage else None
-    return score, coverage
+    return n_ranked // SELL_QUANTILES
 
 
-def _base_action(score: float | None, sell_th: float, reduce_th: float) -> str:
-    if score is None:
-        return "データ不足"
-    if score >= sell_th:
-        return "SELL"
-    if score >= reduce_th:
-        return "REDUCE"
-    return "HOLD"
+def assign_actions(mus: dict[str, float | None]) -> tuple[list[str], dict[str, str]]:
+    """{キー: μ̂} から（並び順, {キー: 札}）を返す。
 
-
-def _apply_timing(action: str, trend: str) -> str:
-    """トレンドでアクションを補正する。
-    下落 → 1 段引き上げ（売り圧力↑）。上昇 → SELL は REDUCE へ緩和（上昇中の即売り回避）。
+    μ̂ の昇順（同値はキーの昇順）に並べ、先頭 `n_to_sell` 社が SELL、残りが HOLD。μ̂ が None の
+    キーは「データ不足」で末尾（入力順を保つ）。
     """
-    if action not in _ACTIONS:
-        return action            # データ不足はそのまま
-    i = _ACTIONS.index(action)
-    if trend == "下落":
-        i = min(i + 1, len(_ACTIONS) - 1)
-    elif trend == "上昇" and action == "SELL":
-        i = _ACTIONS.index("REDUCE")
-    return _ACTIONS[i]
+    ranked = sorted((k for k, v in mus.items() if v is not None), key=lambda k: (mus[k], k))
+    missing = [k for k, v in mus.items() if v is None]
+    n_sell = n_to_sell(len(ranked))
+    actions = {k: ("SELL" if i < n_sell else "HOLD") for i, k in enumerate(ranked)}
+    actions.update({k: "データ不足" for k in missing})
+    return ranked + missing, actions
 
 
 class SellRankingPlugin(AnalysisPlugin):
     name = "sell_ranking"
     label = "売り候補ランキング"
     description = (
-        "保有銘柄リストの中から、割高度（回帰乖離）・業績悪化（収益性/CF/成長）・ネットキャッシュ余力の"
-        "毀損・価格モメンタムを総合して「売るべき銘柄と売り時」をランキングします。各銘柄に SELL/REDUCE/HOLD を付与します。"
+        "保有銘柄を M-6 の期待リターン（μ̂）の低い順に並べ、下位 1/5 に「売却」を付けます。"
+        "売りの当たり具合を過去のデータで測って最も良かった手法だけを使います。"
     )
-    depends_on = ["sector_ols"]   # 割高度（gap_ratio）に regression_results を使うため
+    depends_on = [MU_SOURCE]   # μ̂ が無いと並べられない（未実行なら runner が 400）
     category = "⑤ 保有を見直す"
     ui_order = 510
 
@@ -259,175 +183,46 @@ class SellRankingPlugin(AnalysisPlugin):
                 "default": "",
                 "description": "例: 7203, @1500, 2024-03-10 / 6758 @12000 / 9984",
             },
-            "preset": {
-                "type": "select",
-                "label": "プリセット",
-                "options": [{"value": k, "label": k} for k in PRESETS],
-                "default": "マクロ予測型",
-                "description": "カスタムウェイト未指定時のフォールバック",
-            },
-            "weights": {
-                "type": "weights",
-                "label": "観点ウェイト",
-                "metrics": SELL_METRICS,
-                "default": None,
-                "optional": True,
-                "description": "各観点を売り判断でどれだけ重視するか（0〜3）",
-            },
-            "sell_threshold": {
-                "type": "slider", "dtype": "float",
-                "label": "SELL 閾値（売りスコア）",
-                "min": 0.0, "max": 2.0, "step": 0.1, "default": 0.8,
-            },
-            "reduce_threshold": {
-                "type": "slider", "dtype": "float",
-                "label": "REDUCE 閾値（売りスコア）",
-                "min": 0.0, "max": 2.0, "step": 0.1, "default": 0.3,
-            },
-            "timing_adjust": {
-                "type": "checkbox", "dtype": "bool",
-                "label": "価格トレンドでラベル補正",
-                "default": True,
-                "description": "下落トレンドは売り圧力↑、上昇トレンドは即売り回避",
-            },
-            "min_coverage": {
-                "type": "slider", "dtype": "float",
-                "label": "必須指標カバレッジ（0-1）",
-                "min": 0.0, "max": 1.0, "step": 0.1, "default": 0.4,
-                "description": "値が揃う重み付き指標の比率下限。下回る銘柄は『データ不足』表示。",
-            },
-            "year": {
-                "type": "number", "dtype": "int",
-                "label": "対象年度（空=最新）",
-                "default": None, "optional": True,
-            },
-            "mu_source": {
-                "type": "select",
-                "label": "μ（期待リターン）の出所",
-                "options": [
-                    {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
-                    {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
-                    # M-4（macro_ensemble）は退役につき選択肢から除去（ADR-0044）。統合は
-                    # M-6 単体を上回らない（p=0.810・ADR-0015）。`templates/analysis.html` の
-                    # 静的 select と二重管理なので、増減は必ず両方＋テストで照合すること。
-                    # M-2（macro_gbdt）は**退役ではない**が供給者から降ろした（ADR-0052）＝
-                    # honest OOF rank-IC で M-6 に有意劣後（ADR-0021）、R1' は M-6 も持つ（#396）、
-                    # M-4 の基底という支えは #570 で弱まった。残る固有価値は SHAP による
-                    # 非線形の解釈と比較の基準線だけで、どちらも mu_source を通らない。
-                    {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
-                ],
-                "default": "macro_enet",
-                "description": "売りスコアの μ / −R_macro 観点に使う推奨モデル（既定 M-6）。未実行なら graceful-degrade（μ除外）。",
-            },
-            "r3_gate": {
-                "type": "slider", "dtype": "float",
-                "label": "R3 足切り（μ 予測の確実性）",
-                "min": 0.0, "max": 0.5, "step": 0.05, "default": 0.0,
-                "description": "μ 予測の確実性軸 r1_prime（M-1=予測SE／M-6=コンフォーマル区間半幅）がこの値を超える銘柄は SELL を出さない（0=無効・M-3選択時は無効）",
-            },
         }
 
     def execute(self, params: dict, db: Any) -> dict:
-        from database import (FinancialMetric, StockPriceWeekly, iso_week_start,
-                              latest_year_subq, tradable_filters)
+        import datetime as _dt
+
+        from database import (FinancialMetric, StockPriceWeekly, get_producer_asof,
+                              iso_week_start, latest_year_subq, tradable_filters)
+        from plugins import get_plugin
+        from plugins.utils import current_macro_snapshot
 
         holdings, invalid = parse_holdings(params["holdings"])
-        preset       = params["preset"]
-        weights_raw  = params["weights"] or PRESETS.get(preset, PRESETS["バランス型"])
-        # 既知メトリクスのみ・負ウェイトは0クリップ（売り重視度は非負）
-        weights      = {m: max(0.0, float(w)) for m, w in weights_raw.items()
-                        if m in SELL_METRICS and w}
-        sell_th      = params["sell_threshold"]
-        reduce_th    = params["reduce_threshold"]
-        timing_adj   = params["timing_adjust"]
-        min_coverage = params["min_coverage"]
-        year         = params["year"]
-        mu_source    = params.get("mu_source", "macro_enet")
-
-        total_weight = sum(weights.values())
-        if not holdings or total_weight == 0:
-            return {"count": 0, "presets": PRESETS, "metrics": SELL_METRICS,
+        if not holdings:
+            return {"count": 0, "n_sell": 0, "n_hold": 0, "n_no_data": 0,
                     "results": [], "not_found": [], "invalid": invalid,
-                    "gap_available": True, "mu_available": False,
-                    "mu_source": mu_source}
+                    "mu_source": MU_SOURCE, "mu_available": False, "mu_asof": None}
 
-        # ── ① ユニバース標準化パラメータ（最新年度の全銘柄から winsorize → mean/sd）──
-        # 標準化の基準は「現在投資可能な母集団」に合わせるため、上場廃止銘柄（#315）と
-        # 価格が止まって12週の廃止待ち行列に居る社（#605）を除く。**保有銘柄の評価では
-        # なく母集団の標準化基準**なので、他3経路と同じ tradable_filters を共有する。
-        subq = latest_year_subq(db, FinancialMetric)
-        # 転送は SELL_SELECT_COLS だけ（#482）。戻りは ORM インスタンスではなく Row タプル
-        # なので、絞っていない列を後から読むことが構造的に起きない（recommend.py と同方針）。
-        _sell_cols = [getattr(FinancialMetric, c) for c in SELL_SELECT_COLS]
-        uni_q = (db.query(*_sell_cols)
-                   .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
-                               (FinancialMetric.year == subq.c.max_year))
-                   .filter(*tradable_filters(db)))
-        if year:
-            uni_q = uni_q.filter(FinancialMetric.year == int(year))
-        universe = uni_q.all()
-
-        # ── 期待リターン μ producer スコア（mu_source で M-1/M-2 等を切替・graceful-degrade）──
-        # ADR-0004: mu_source=macro_risk_return / macro_gbdt / macro_dlm /
-        # macro_ensemble / macro_enet（既定・#402 で M-2 から切替・ADR-0022）。いずれも
-        # read_producer_scores が {edinet_code: {mu, r_macro, r1_prime}} を返す共通契約。
-        # r_macro は共有 macro_beta 由来でモデル非依存（neg_r_macro は mu_source に依らず不変）。
-        import datetime as _dt
-        from plugins import get_plugin as _get_plugin
-        _producer = _get_plugin(mu_source)
+        # ── μ̂（M-6 の producer）──────────────────────────────────────────────
+        producer = get_plugin(MU_SOURCE)
         mu_scores: dict = {}
-        if _producer and _producer.produced_output(db):
-            try:
-                from plugins.utils import current_macro_snapshot
-                mu_scores = _producer.read_producer_scores(db, current_macro_snapshot(db))
-            except Exception:
-                pass
+        if producer and producer.produced_output(db):
+            mu_scores = producer.read_producer_scores(db, current_macro_snapshot(db))
         mu_available = bool(mu_scores)
-        # producer μ̂ の as-of（代表値=中央値・最古・古い銘柄数）。μ̂ は銘柄ごとに
-        # 「その銘柄の最終週次バー」時点なので 1 個の日付には潰れない（Issue #417）。
-        mu_asof = None
-        if mu_available:
-            try:
-                from database import get_producer_asof
-                mu_asof = get_producer_asof(db, mu_source)
-            except Exception:
-                mu_asof = None
-
-        # μ̂ の標準化基準も他の指標と同じ universe（tradable）に揃える（#780）。producer は廃止・
-        # 価格停止の社にも「現在の」μ̂ を付けて保存しており、全行を基準にすると #605 が外した社が
-        # 平均・標準偏差へ戻ってくる。保有銘柄自体の μ̂ は従来どおり mu_scores から引く。
-        uni_codes = {r.edinet_code for r in universe if r.edinet_code}
-        mu_pop = [ps for ec, ps in mu_scores.items() if ec in uni_codes]
-        stats: dict[str, tuple[float, float]] = {}
-        for m in weights:
-            if m == "mu":
-                vals = [float(ps["mu"]) for ps in mu_pop if ps.get("mu") is not None]
-            elif m == "neg_r_macro":
-                vals = [-float(ps["r_macro"]) for ps in mu_pop if ps.get("r_macro") is not None]
-            else:
-                vals = [v for v in (_resolve_metric(r, m) for r in universe) if v is not None]
-            s = fit_zscore_stats(vals)
-            if s is not None:
-                stats[m] = s
-        gap_available = "gap_ratio" not in weights or "gap_ratio" in stats
+        # μ̂ の as-of（代表値=中央値・最古・古い銘柄数）。μ̂ は銘柄ごとに「その銘柄の最終週次バー」
+        # 時点なので 1 個の日付には潰れない（Issue #417）。
+        mu_asof = get_producer_asof(db, MU_SOURCE) if mu_available else None
 
         # ── 保有銘柄の最新年度レコードを sec_code で引く ──
+        subq = latest_year_subq(db, FinancialMetric)
+        _cols = [getattr(FinancialMetric, c) for c in SELL_SELECT_COLS]
         codes = [h["sec_code"] for h in holdings]
         rows = {r.sec_code: r for r in (
-            db.query(*_sell_cols)
+            db.query(*_cols)
               .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                           (FinancialMetric.year == subq.c.max_year))
               .filter(FinancialMetric.sec_code.in_(codes))
               .all()
         )}
 
-        # ── 価格モメンタム（保有 edinet_code をまとめて取得）──
-        # 3列＋400日下限＋500社チャンク（#482）。全列・全期間で引いていた頃は保有20銘柄でも
-        # 5,740行 × 74.9B/行 ≈ 0.43MB を転送していた。
-        # recommend.compute_momentum_z のような row_number() OVER は使えない——あちらは各社
-        # cutoff 以下の最終バー1本で足りるが、_compute_trend は13週前と52週高値を見るので
-        # 系列そのものが要る。macro_snapshots.load_weekly_prices_chunked も流用できない
-        # （対象が Company 全社固定・日付下限なし・week_start を返さない・volume 番兵は不要）。
+        # ── 価格トレンド（参考表示）: 保有 edinet_code をまとめて取得 ──
+        # 3列＋400日下限＋500社チャンク（#482）。
         ecodes = [r.edinet_code for r in rows.values() if r.edinet_code]
         weekly_by_ec: dict[str, list] = {}
         if ecodes:
@@ -444,100 +239,66 @@ class SellRankingPlugin(AnalysisPlugin):
                     weekly_by_ec.setdefault(ec, []).append(_WeeklyBar(ws, cl))
 
         not_found: list[str] = []
-        scored: list[dict] = []
+        by_code: dict[str, dict] = {}
         for h in holdings:
             r = rows.get(h["sec_code"])
             if r is None:
                 not_found.append(h["sec_code"])
                 continue
-
-            _ec = r.edinet_code
-            _ps = mu_scores.get(_ec) if _ec else None
-            raws: dict[str, float | None] = {}
-            for m in weights:
-                if m == "mu":
-                    raw = _ps.get("mu") if _ps else None
-                elif m == "neg_r_macro":
-                    _rm = _ps.get("r_macro") if _ps else None
-                    raw = -_rm if _rm is not None else None
-                else:
-                    raw = _resolve_metric(r, m)
-                raws[m] = raw
-            detail = {m: round(float(raw), 4) if raw is not None else None for m, raw in raws.items()}
-            score, coverage = sell_score(raws, weights, stats, min_coverage)
-
+            ps = mu_scores.get(r.edinet_code) if r.edinet_code else None
+            mu = ps.get("mu") if ps else None
             mom = _compute_trend(weekly_by_ec.get(r.edinet_code, []))
-            action = _base_action(score, sell_th, reduce_th)
-            if timing_adj and action in _ACTIONS:
-                action = _apply_timing(action, mom["trend"])
-            # R3 足切りゲート: μ 予測の確実性軸（r1_prime）が閾値超 → SELL を出さない。
-            # M-1=OLS 予測SE / M-2・M-6=コンフォーマル区間半幅（Issue #365・R3 ゲート再有効化）。
-            # mu_source=macro_dlm（M-3）/macro_ensemble（M-4）は r1_prime を持たないため無効
-            # （ADR-0004・no-op）。r1_prime が None の銘柄（列未 migration 等）はゲート素通り。
-            _r3_gate = params.get("r3_gate", 0.0)
-            if _r3_gate and action == "SELL" and _ps and mu_source not in ("macro_dlm", "macro_ensemble"):
-                _r1p = _ps.get("r1_prime")
-                if _r1p is not None and float(_r1p) > _r3_gate:
-                    action = "REDUCE"
-
             last_close = mom["last_close"] if mom["last_close"] is not None else r.stock_price
             pnl_pct = None
             if h["avg_cost"] and h["avg_cost"] > 0 and last_close:
                 pnl_pct = round((last_close - h["avg_cost"]) / h["avg_cost"] * 100, 1)
-
-            scored.append({
+            by_code[r.sec_code] = {
                 "sec_code":     r.sec_code,
                 "edinet_code":  r.edinet_code,
                 "company_name": r.company_name,
                 "industry":     r.industry,
                 "year":         r.year,
-                "score":        round(score, 4) if score is not None else None,
-                "coverage":     round(coverage, 2),
-                "action":       action,
+                "mu":           round(float(mu), 4) if mu is not None else None,
                 "trend":        mom["trend"],
                 "ret_13w":      mom["ret_13w"],
                 "drawdown_52w": mom["drawdown_52w"],
-                "gap_ratio":    r.gap_ratio,
-                "roe":          r.roe,
-                "op_margin":    r.op_margin,
-                "rev_growth":   r.rev_growth,
                 "last_close":   round(last_close, 1) if last_close else None,
                 "avg_cost":     h["avg_cost"],
                 "buy_date":     h["buy_date"],
                 "pnl_pct":      pnl_pct,
-                "market_cap":   r.market_cap,
                 # 保有銘柄はユーザー入力のため is_active では除外しないが、上場廃止済みなら
                 # 明示的に知らせる（Issue #315・ゾンビ化した保有への気付き）。
-                "is_active":      r.is_active is not False,
-                "delisted_date":  r.delisted_date.isoformat() if r.delisted_date else None,
-                "detail":       detail,
-            })
+                "is_active":     r.is_active is not False,
+                "delisted_date": r.delisted_date.isoformat() if r.delisted_date else None,
+            }
 
-        # 売りスコア降順（None=データ不足は末尾）→ rank 付与
-        scored.sort(key=lambda x: (x["score"] is not None, x["score"] or 0.0), reverse=True)
+        order, actions = assign_actions({c: s["mu"] for c, s in by_code.items()})
+        scored = [by_code[c] for c in order]
         for rank, item in enumerate(scored, 1):
             item["rank"] = rank
+            item["action"] = actions[item["sec_code"]]
 
         # TOPIX 移行措置・新規採用の事実の注記（#1013）。判定と順位を決めた後に付けるだけ。
-        # 保有だけでは比率の分母にならないので、分母は標準化に使う母集団（universe）。
+        # 保有だけでは比率の分母にならないので、分母は今投資できる全社（tradable・最新年度）。
+        universe = [ec for (ec,) in (
+            db.query(FinancialMetric.edinet_code)
+              .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
+                          (FinancialMetric.year == subq.c.max_year))
+              .filter(*tradable_filters(db))
+              .all())]
         from index_event_notes import annotate
         notes, index_events = annotate(
-            db, [s["edinet_code"] for s in scored], [r.edinet_code for r in universe], what="保有")
+            db, [s["edinet_code"] for s in scored], universe, what="保有")
         for s in scored:
             s["index_event"] = notes.get(s["edinet_code"])
 
-        n_sell   = sum(1 for s in scored if s["action"] == "SELL")
-        n_reduce = sum(1 for s in scored if s["action"] == "REDUCE")
         return {
             "count":         len(scored),
-            "n_sell":        n_sell,
-            "n_reduce":      n_reduce,
+            "n_sell":        sum(1 for s in scored if s["action"] == "SELL"),
             "n_hold":        sum(1 for s in scored if s["action"] == "HOLD"),
-            "presets":       PRESETS,
-            "metrics":       SELL_METRICS,
-            "gap_available": gap_available,
+            "n_no_data":     sum(1 for s in scored if s["action"] == "データ不足"),
+            "mu_source":     MU_SOURCE,
             "mu_available":  mu_available,
-            "mu_source":     mu_source,
             "mu_asof":       mu_asof,
             "results":       scored,
             "not_found":     not_found,

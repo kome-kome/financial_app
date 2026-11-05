@@ -19,14 +19,14 @@ from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
 MULTI_PERIODS = [3, 6, 12, 18, 24]
 
 # バックテストで検証できるスコアリング手法（ランキングを出す一次分析を as-of で再現する）。
-# 買い系（recommend/valuation/net_cash）は「スコアが高いほど買い候補」で、上位 N 社の
-# その後リターンがベンチマークを上回れば有効。sell は双対（買い系の逆観点）で、上位 N 社＝
-# 最も売り向きの銘柄。**sell は超過収益が負（＝下回る）ほど売りシグナルが有効**と解釈する。
+# どれも「スコアが高いほど買い候補」で、上位 N 社のその後リターンがベンチマークを上回れば有効。
 #   recommend : 本番の買い推奨と同じ合成スコア（plugins.recommend.weighted_score・#745）
 #   valuation : バリュエーション分析の期待総リターン（gap_ratio + 配当利回り）
 #   net_cash  : 清原式ネットキャッシュ比率
-#   sell      : 売り候補（recommend の合成スコアの符号反転＝買い系スコアの逆観点・メタ×双対）
-SCORING_SOURCES = ("recommend", "valuation", "net_cash", "sell")
+# 以前あった `sell`（recommend の合成スコアの符号反転）は外した（ADR-0071）。売り候補ランキングの
+# 手法（M-6 の μ̂ の下位）とは別物で、売りとして画面に出す手法を 1 つに絞るため。売りの評価は
+# OOF の売り側spread（`scripts.sell_mu_source_bakeoff`）で行う。
+SCORING_SOURCES = ("recommend", "valuation", "net_cash")
 
 # 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
 _DIV_YIELD_CAP = 30.0
@@ -57,7 +57,7 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None,
     """1レコードのスコア（高いほど買い候補）。算出不能なら None（候補から除外）。
 
     各 source は financial_metrics VIEW の as-of スナップショット（FinancialMetric）から
-    一次分析のランキングキーを再現する。recommend / sell は preset の重みを、本番の買い推奨と
+    一次分析のランキングキーを再現する。recommend は preset の重みを、本番の買い推奨と
     同じ `plugins.recommend.weighted_score` で合成する（値がある指標の |w| 和で割る・被覆率が
     画面の既定 `DEFAULT_MIN_COVERAGE` 未満なら None・#745）。以前は Σw·ẑ のまま（欠けた指標が
     実質 0）で被覆率でも除外せず、欠けの多い銘柄を系統的に中央へ寄せる＝本番とは別の
@@ -85,13 +85,10 @@ def score_record(r, source: str, weights: dict, momentum_z: dict | None = None,
         nc = compute_net_cash(r.bs_current_assets, r.bs_investment_securities,
                               r.bs_total_liabilities)
         return compute_nc_ratio(nc, r.market_cap)
-    # recommend（既定）: 本番の買い推奨と同じ合成スコア。sell は同じスコアの符号反転（買い系の
-    # 逆観点）。z_momentum は算出側（compute_momentum_z）で期内標準化済み＝二重に標準化しない。
-    score = weighted_score(r, weights, view_stats or {}, min_coverage=DEFAULT_MIN_COVERAGE,
-                           runtime={"z_momentum": momentum_z or {}}).score
-    if score is None:
-        return None
-    return -score if source == "sell" else score
+    # recommend（既定）: 本番の買い推奨と同じ合成スコア。
+    # z_momentum は算出側（compute_momentum_z）で期内標準化済み＝二重に標準化しない。
+    return weighted_score(r, weights, view_stats or {}, min_coverage=DEFAULT_MIN_COVERAGE,
+                          runtime={"z_momentum": momentum_z or {}}).score
 
 
 def percentile(sorted_arr: list, p: float) -> float:
@@ -181,7 +178,7 @@ def run(
     # （source="valuation"）の挙動が変わってしまう。`subq` が edinet_code ごとの max(year) で
     # join 済みなので重複行は決算期変更などの稀なケースに限られ、統計への影響は無視できる。
     view_stats = (fit_view_metric_stats(records, weights)
-                  if source in ("recommend", "sell") else {})
+                  if source == "recommend" else {})
 
     best: dict = {}
     for r in records:

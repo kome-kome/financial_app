@@ -187,27 +187,10 @@ class TestScoringSource:
         assert codes == ["E00001", "E00002"]   # 1.5 > 0.2
         assert res["results"][0]["score"] == 1.5
 
-    def test_source_sell_inverts_recommend_ranking(self, db, make_metric):
-        # sell は recommend の合成スコアの符号反転（買い系の逆観点）。スコアは値がある指標の
-        # |w| 和 4.6 で割った重み付き平均（3社では断面標準化が掛からず生値のまま）。
-        # recommend なら E00002 が首位だが、sell では最下位の買い＝最上位の売り。
-        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
-                           z_roe=1.0, z_op_margin=0.5))   # buy=1.5/4.6 → sell=-1.5/4.6
-        db.add(make_metric(edinet_code="E00002", year=2020, period_end="2020-03-31",
-                           z_roe=3.0, z_op_margin=2.0))   # buy=5.0/4.6 → sell=-5.0/4.6
-        db.add(make_metric(edinet_code="E00003", year=2020, period_end="2020-03-31",
-                           z_roe=2.0, z_op_margin=1.0))   # buy=3.0/4.6 → sell=-3.0/4.6
-        db.commit()
-        buy  = backtest.run(db, "バランス型", 6, 20, None, None, source="recommend")
-        sell = backtest.run(db, "バランス型", 6, 20, None, None, source="sell")
-        assert sell["source"] == "sell"
-        # sell ランキングは recommend の完全な逆順
-        buy_codes  = [r["edinet_code"] for r in buy["results"]]
-        sell_codes = [r["edinet_code"] for r in sell["results"]]
-        assert sell_codes == list(reversed(buy_codes))
-        # 売り候補首位＝最も買い向きでない E00001（sell score=-1.5/4.6 が最大・結果は3桁丸め）
-        assert sell_codes[0] == "E00001"
-        assert sell["results"][0]["score"] == pytest.approx(-1.5 / 4.6, abs=1e-3)
+    def test_sell_source_is_gone(self):
+        """売りとして画面に出す手法は売り候補ランキング（M-6 の μ̂）だけ（ADR-0071）。
+        recommend の符号反転の `sell` は戻さない。"""
+        assert backtest.SCORING_SOURCES == ("recommend", "valuation", "net_cash")
 
 
 # ── z_momentum（Issue #270）: as-of リークセーフなランキング ─────────────────
