@@ -45,7 +45,7 @@ python -m scripts.nightly_diag_report --model macro_enet --since 2026-10-01
 python -m scripts.check_nightly_collect             # 直近3晩・警告があれば exit 2
 python -m scripts.check_nightly_collect --nights 5
 
-# 月次バッチ（Fama-MacBeth 重み → M-1 マクロβ推論 → M-1/M-2/M-3 探索）。#504
+# 月次バッチ（Fama-MacBeth 重み → M-1 マクロβ推論 → M-1/M-3 探索）。#504。M-2 の探索は日中枠の周回（#1118）
 ./run_monthly.ps1                        # 手動で1回
 ./run_monthly.ps1 -DryRun                # 実行計画だけ
 ./run_monthly.ps1 -Steps factor_premia   # 一部だけ

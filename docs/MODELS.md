@@ -1197,7 +1197,8 @@ XGBoost は業種別の分岐や**セクター×マクロ交互作用**（素材
 
 walk-forward OOF rank-IC を目的関数とする共有の探索基盤（`plugins/tuning.py` + `hyperparameter_search.py`・
 #264〜#267・ADR-0007）で M-1 / M-2 / M-3 の既定を探す。月次の回し方は `scripts/run_monthly.py` の `TUNE_MATRIX`
-（M-1 だけ `scripts/run_monthly_m1.py`）。
+（M-1 だけ `scripts/run_monthly_m1.py`）。**M-2 は月次に居ない**: 日中枠の残りで固定の候補集合を回し切る探索の周回
+（`scripts/run_daytime.py` の `tune_cycle:macro_gbdt`・#1114）が月 1 回反映する（#1118・ADR-0070 決定 5）。
 
 - **劣化防止は保存値との比較ではなく、候補プールへの champion（本番の params）投入で担う**（#590・ADR-0047）。
   永続化済みの `objective_value` は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるので月をまたいだ比較が
@@ -1207,7 +1208,7 @@ walk-forward OOF rank-IC を目的関数とする共有の探索基盤（`plugin
   `champion_objective_value` / `n_periods` / `n_oof_samples` に残る。
 - **M-2 の探索空間の正本はコード**（`plugins/macro_gbdt.py` の `MacroGbdtPlugin.tuning_search_space`。軸と候補の
   値はここへ書き写さない）。軸は木構造・正則化の XGBoost パラメータ、符号事前知識（`use_monotone_constraints`・
-  §11.4.1）、セクター/サイズ特徴（`use_sector_features`・§11.4.2）。探索は random（件数は `TUNE_MATRIX`）。
+  §11.4.1）、セクター/サイズ特徴（`use_sector_features`・§11.4.2）。探索は random（件数は `run_daytime.JOBS["tune:macro_gbdt"]`）。
 - **固定して探索しないもの**（`base_params`。`params_schema()` からは消さないので画面では手動で動かせ、保存済みの
   調整値に残る値は `project_tuned_params()` が固定値で上書きして画面へ出す）:
   - **モメンタム2軸（`use_momentum` / `momentum_window`）は OFF**（#604・[ADR-0050](adr/0050-hyperparameter-search-must-align-populations.md)）。
@@ -1219,7 +1220,7 @@ walk-forward OOF rank-IC を目的関数とする共有の探索基盤（`plugin
   - **行の抽出の割合 `subsample` は本番の 1.0**（#987・2026-10-18）。1.0 未満は社の順への依存を持ち込み、探索に
     残すと選ばれうる（2026-10-01 の 1 位は 0.4）
 - **選び直しの段**（#984・2026-10-18・ADR-0047 の追記）: 探索の後に上位 5 候補（＋本番の候補）を種 5 個で回し
-  直し、種の平均で選び直す（`TUNE_MATRIX` の `--confirm-top` / `--confirm-seeds`）。M-2 は種だけで OOF rank-IC が
+  直し、種の平均で選び直す（`run_daytime.JOBS["tune:macro_gbdt"]` の `--confirm-top` / `--confirm-seeds`）。M-2 は種だけで OOF rank-IC が
   0.009〜0.019 動き、1 回の種で選ぶと上位どうしの差が種の揺れに埋もれる。
 - **段の中は 2 段で選ぶ**（#1113・2026-11-02・[ADR-0070](adr/0070-search-selects-in-two-stages-for-top-k-buying.md)）:
   運用は 1 モデルの画面から上位 10 社を買う（運用の K）。段の候補を共通期・種平均の系列でそろえ、①rank-IC の 1 位より

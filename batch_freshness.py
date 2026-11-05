@@ -443,16 +443,9 @@ PRODUCERS: tuple[Produced, ...] = (
         source="plugin_tuned_params.tuned_at (plugin_name='macro_risk_return')",
         read=_tuned_at("macro_risk_return"),
     ),
-    Produced(
-        label="マクロ勾配ブースティング探索の結果",
-        issue_title="[ops] マクロ勾配ブースティング探索の結果が更新されていない",
-        cadence_h=31 * 24.0,
-        window_min=run_monthly.WINDOW_MIN,
-        batch_label="月次バッチ",
-        task_name="financial_app-monthly",
-        source="plugin_tuned_params.tuned_at (plugin_name='macro_gbdt')",
-        read=_tuned_at("macro_gbdt"),
-    ),
+    # M-2（macro_gbdt）の `plugin_tuned_params` の行は #1118 で外した。月次から M-2 を外したので書き手は探索の周回
+    # （下の「マクロ勾配ブースティング探索の周回」）で、その `last_finished_at` は本番へ反映できた周回だけが進める＝
+    # 反映の失敗もそちらで拾える。両方を見ると同じ停止に Issue が 2 本立つ。
     Produced(
         label="動的線形モデル探索の結果",
         issue_title="[ops] 動的線形モデル探索の結果が更新されていない",

@@ -626,20 +626,19 @@ class TestConfirmStageWiring:
                                   confirm_top=5, confirm_seeds=5))
         assert seen["confirm_top"] == 5 and seen["confirm_seeds"] == 5
 
-    def test_cli_reads_the_monthly_arguments(self, monkeypatch):
-        """月次（`run_monthly.TUNE_MATRIX`）と同じ引数を CLI が受け取れる。"""
+    def test_cli_reads_the_daytime_arguments(self, monkeypatch):
+        """日中枠（`run_daytime.JOBS["tune:macro_gbdt"]`・#1118 で月次から移った唯一の源）と同じ引数を CLI が受け取れる。"""
         import sys
-        from scripts import run_monthly as rm
+        from scripts import run_daytime as rd
 
         got: dict = {}
 
         async def fake_run(args):
             got["args"] = args
 
-        model, strategy, extra = next(t for t in rm.TUNE_MATRIX if t[0] == "macro_gbdt")
+        argv = rd.JOBS["tune:macro_gbdt"].argv
         monkeypatch.setattr(hs, "_run", fake_run)
-        monkeypatch.setattr(sys, "argv", ["hyperparameter_search.py", "--model", model,
-                                          "--strategy", strategy, *extra])
+        monkeypatch.setattr(sys, "argv", list(argv[argv.index("hyperparameter_search.py"):]))
         hs.main()
         assert got["args"].confirm_top == 5 and got["args"].confirm_seeds == 5
 
