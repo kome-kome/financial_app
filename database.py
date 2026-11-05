@@ -497,7 +497,11 @@ class FinancialRecord(Base):
     pl_ebitda               = Column(Float)   # EBITDA（計算値=営業利益+減価償却費・派生列・tagなし）
     # ── PL 網羅性追加（C2）──
     pl_rd_expenses          = Column(Float, info={"xbrl": ["ResearchAndDevelopmentExpensesResearchAndDevelopmentActivities", "ResearchAndDevelopmentExpensesSGA"]})  # 研究開発費
-    pl_depreciation         = Column(Float, info={"xbrl": ["DepreciationAndAmortizationOpeCF", "DepreciationAndAmortizationOpeCFIFRS"]})  # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）
+    # 減価償却費及び償却費（D&A・CF add-back。EBITDA入力）。標準タグは会社ごとに名前が違う（#1145・2026-11-06 に書類で確認）:
+    # 日本基準 `DepreciationAndOtherAmortizationOpeCF`（「減価償却費及びその他の償却費」）、IFRS
+    # `DepreciationAndAmortizationOfIntangibleAssetsOpeCFIFRS`（日立・アステラス）・`DepreciationExpenseOpeCFIFRS`
+    # （NTT・日立建機。無形資産の償却を含まないことがあるので同点では負ける＝`_TAGS_LOSING_TIES`）。
+    pl_depreciation         = Column(Float, info={"xbrl": ["DepreciationAndAmortizationOpeCF", "DepreciationAndAmortizationOpeCFIFRS", "DepreciationAndOtherAmortizationOpeCF", "DepreciationAndAmortizationOfIntangibleAssetsOpeCFIFRS", "DepreciationExpenseOpeCFIFRS"]})
     pl_extraordinary_income = Column(Float, info={"xbrl": ["ExtraordinaryIncome"]})  # 特別利益（JGAAP概念。IFRS/US-GAAP の連結では NULL・#896）
     pl_extraordinary_loss   = Column(Float, info={"xbrl": ["ExtraordinaryLoss"]})  # 特別損失（JGAAP概念。IFRS/US-GAAP の連結では NULL・#896）
 

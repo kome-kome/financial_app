@@ -236,6 +236,28 @@ class TestParseXbrlCsv:
         assert res["pl"]["extraordinary_income"] == 445.0
         assert res["pl"]["extraordinary_loss"] == 41.0
 
+    @pytest.mark.parametrize("elem,ctx", [
+        # 書類の実物から写した要素と文脈（#1145・2026-11-06）
+        ("jppfs_cor:DepreciationAndOtherAmortizationOpeCF", "CurrentYearDuration_NonConsolidatedMember"),  # かっこ S100XTRE（単体のみの会社）
+        ("jpigp_cor:DepreciationAndAmortizationOfIntangibleAssetsOpeCFIFRS", "CurrentYearDuration"),       # 日立 S100YGBO
+        ("jpigp_cor:DepreciationExpenseOpeCFIFRS", "CurrentYearDuration"),                                 # NTT S100YCP3
+    ])
+    def test_depreciation_tag_variants(self, elem, ctx):
+        df = pd.DataFrame({"要素ID": [elem], "コンテキストID": [ctx], "値": ["1790983000000"]})
+        assert parse_xbrl_csv(df, "E00001", "2026-03-31")["pl"]["depreciation"] == 1790983000000.0
+
+    @pytest.mark.parametrize("order", [0, 1])
+    def test_depreciation_expense_only_loses_tie_to_total(self, order):
+        """減価償却費だけのタグは、償却を含む合計のタグに CSV の並び順に関わらず負ける（#1145）。"""
+        rows = [("jpigp_cor:DepreciationExpenseOpeCFIFRS", "68282000000"),
+                ("jpigp_cor:DepreciationAndAmortizationOpeCFIFRS", "77853000000")]
+        if order:
+            rows.reverse()
+        df = pd.DataFrame({"要素ID": [r[0] for r in rows],
+                           "コンテキストID": ["CurrentYearDuration"] * 2,
+                           "値": [r[1] for r in rows]})
+        assert parse_xbrl_csv(df, "E01585", "2026-03-31")["pl"]["depreciation"] == 77853000000.0
+
     def test_c2_ppe_total_ifrs_variant(self):
         df = pd.DataFrame({
             "要素ID": ["jpigp_cor:PropertyPlantAndEquipmentIFRS"],
