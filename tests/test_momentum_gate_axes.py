@@ -351,7 +351,7 @@ class TestDemeanMainWiring:
         src = inspect.getsource(momentum_gate.main)
         assert src.count("demean_target=args.demean_target") == 2   # build_conditions / mode_of
         # _build へ渡す（#938 で後ろに fin_nan_ok が続く形になった）
-        assert "c.demean_target, fin_nan_ok=c.fin_nan_ok)" in src
+        assert "c.demean_target, fin_nan_ok=c.fin_nan_ok, fin_drop=c.fin_drop)" in src
         assert "demean_reach_problems(" in src
         assert "DEMEAN_MODELS" in src
 
@@ -680,7 +680,7 @@ class TestOutputNamesTheModeThatWasMeasured:
                                     "fin_rows", "demean_target", "risk_axis", "fin_nan",
                                     "de_exclude", "fin_fill", "size_neutral",
                                     "valid_split", "inner_cv_purge", "subsample", "train_exclude_index",
-                                    "earnings_yield", "inner_cv_score"}
+                                    "earnings_yield", "inner_cv_score", "fin_drop"}
 
     def test_demean_mode_writes_its_own_file(self):
         """既定の `momentum_gate.json` を上書きしない（どの軸の結果かがファイル名で分かる）。"""
