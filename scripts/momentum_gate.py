@@ -825,7 +825,8 @@ RISK_BASE_COND = "r2"
 # なので本番の並びは `mu_only` であり、#1040 より前の M-1（λ=1.0・r2）と分母が違った。分母が違うモデルは
 # 同時に測れない（`risk_base_cond` が止める）ので、M-6 を既定へ足すと `--models` を渡さない
 # `gate:risk-axis` が止まる。M-6 は `--models elasticnet --lambdas … --risk-scale raw` で別に回す（#808）。
-# M-2 も分母が `r_macro@1.0`（画面の既定 λ=1.0 × R_macro）で、`--models xgb_m2` で別に回す（#814）。
+# M-2 も分母が `r_macro@1.0`（当時の画面の既定 λ=1.0 × R_macro）で、`--models xgb_m2` で別に回す（#814）。
+# #1112（2026-11-06）で M-2 の既定 λ も 0 になり、いまは M-1・M-2・M-6 の分母がすべて `mu_only`。
 RISK_MODELS = ["risk_return"]
 # U を画面へ出すプラグイン（λ と横軸の既定の唯一の源）。**`MODEL_SPECS` の設定元とは別物**——
 # M-6 のパネル設定は M-2（`macro_gbdt`）から借りているので、そちらから λ を取ると M-6 を

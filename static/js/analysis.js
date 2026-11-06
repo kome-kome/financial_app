@@ -2611,10 +2611,11 @@ document.addEventListener('input',  (e) => { const w = e.target && e.target.id &
 document.addEventListener('change', (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
 
 // ── M-2 マクロ×財務 勾配ブースティング レンダラ ─────────────────────────────
-// λ の既定は 1.0・横軸の既定は R2（#816 で R_macro から変更・ADR-0050 の 2026-10-06 追記）。
+// λ の既定は 0（#1112 で 1.0 から変更・ADR-0069 の 2026-11-06）・横軸の既定は R2（#816 で R_macro から変更・ADR-0050 の 2026-10-06 追記）。
 // #814 で λ=0.1/0.3/1.0 × R2/R_macro と μ̂ だけの並びを旧既定（R_macro・λ=1.0）を分母に測り、
 // 旧既定は7条件で rank-IC が最も低く（−0.048）、R2 の λ=0.3/1.0 は旧既定より両指標で有意に良かった。
 // #816 で R2@1.0 を μ̂ だけの並びと比べ、有意差なし（rank-IC 差 −0.010・p=0.83）だったので既定を R2 へ。
+// #1112 で本番の設定の上位10社超過リターンを比べ、R2@1.0 は μ̂ の順より有意に悪かった（−20.9%・p=0.001）ので既定の λ を 0 へ。
 
 // 測った λ の上限（#814・#816）。これを超える λ は測っていない。
 const _MG_RISK_MEASURED_MAX = 1.0;
@@ -2628,11 +2629,11 @@ function _mgLambdaNoteHTML(v) {
   if (v.axis === 'r_macro') {
     return `<div style="${warn}">R_macro で並べると、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど成績が下がり、λ=1.0 では順位とその後のリターンの相関（rank-IC）が負で、μ だけの並びより売り側の成績が有意に劣りました。このため既定の横軸は R2 にしています（#814・#816）。</div>`;
   }
-  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で並べると、測った λ のうち 0.3 と 1.0 で R_macro（λ=1.0）より有意に良く、既定の λ=1.0 は μ だけの並び（λ=0）と有意な差がありませんでした（#814・#816）。</div>`;
+  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが（#814・#816）、本番の設定の上位10社の超過リターンは μ の順より有意に悪くなりました（−20.9%・#1112）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
 }
 
 const _mgView = _riskReturnView({
-  tabId: 'macro_gbdt', prefix: 'mg', yKey: 'mu_raw', defaultLambda: 1.0,
+  tabId: 'macro_gbdt', prefix: 'mg', yKey: 'mu_raw', defaultLambda: 0.0,
   yLabel: '期待リターン μ（52週先対数リターン・年率）',
   headerHTML: _mgHeaderHTML,
   // SHAP バー（署名付き重要度＝棒長は重要度・左右は学習方向・#371）

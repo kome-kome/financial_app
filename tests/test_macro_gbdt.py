@@ -471,14 +471,15 @@ class TestCoerce:
         with pytest.raises(ValueError, match="risk_axis"):
             self._coerce(raw)
 
-    def test_screen_default_ordering_is_r2_at_lambda_one(self):
-        """画面の既定の並びは λ=1.0 × R2（#816・ADR-0050 の 2026-10-06 追記）。
+    def test_screen_default_ordering_is_mu_with_r2_axis(self):
+        """画面の既定の並びは λ=0（μ̂ の順・#1112・ADR-0069 の 2026-11-06）で、横軸の既定は R2（#816）。
 
-        旧既定の R_macro × 1.0 は測った7つの並びで rank-IC が最も低く（#814）、R2 × 1.0 は旧既定より
-        有意に良く μ̂ だけの並びとは有意差が無かった。戻すなら測り直してからにする。
+        旧既定の R_macro × 1.0 は測った7つの並びで rank-IC が最も低く（#814）、R2 × 1.0 は μ̂ だけの並びと
+        全体の順位では有意差が無かったが、本番の設定の上位10社では有意に悪かった（−20.9%・p=0.001）。
+        戻すなら測り直してからにする。
         """
         p = self._coerce({})
-        assert (p["lambda_risk"], p["risk_axis"]) == (1.0, "r2")
+        assert (p["lambda_risk"], p["risk_axis"]) == (0.0, "r2")
         labels = {o["value"]: o["label"] for o in self.schema["risk_axis"]["options"]}
         assert "既定" in labels["r2"] and "既定" not in labels["r_macro"]
 
@@ -931,19 +932,36 @@ class TestObjectiveOnlyMode:
 
         assert result_full["oof_backtest"] == result_skip["oof_backtest"]
 
+    def test_display_ordering_is_skipped_at_the_zero_default(self):
+        """既定の λ=0（#1112）では U = μ̂ なので、画面の並びの採点は出さない（#1042 の λ=0 の規則）。"""
+        _db, prices_by_co, fin_by_co, companies = self._make_db()
+        params = self._make_params(use_macro=False)
+        assert plugin.params_schema()["lambda_risk"]["default"] == 0.0
+        with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
+             patch("plugins.macro_gbdt.preload_macro", return_value={}), \
+             patch("plugins.macro_gbdt.get_producer_scores", return_value={}):
+            result = plugin.execute(params, MagicMock())
+        assert result["oof_backtest_display"] is None
+
     def test_display_ordering_scoring_follows_the_switch(self):
-        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。"""
+        """画面の並びの採点（#1042）: 通常の実行は出し、探索中は出さず、モデル比較のスイッチで出す。
+
+        既定の λ は 0（#1112）なので、λ>0 の画面（λ=1.0・R2）に差し替えて確かめる。
+        """
         import database
 
         from contextlib import ExitStack
 
         _db, prices_by_co, fin_by_co, companies = self._make_db()
         params = self._make_params(use_macro=False)
+        schema = plugin.params_schema()
+        schema["lambda_risk"] = {**schema["lambda_risk"], "default": 1.0}
 
         def run(*contexts):
             with patch("plugins.macro_gbdt.load_data", return_value=(prices_by_co, fin_by_co, companies)), \
                  patch("plugins.macro_gbdt.preload_macro", return_value={}), \
                  patch("plugins.macro_gbdt.get_producer_scores", return_value={}), \
+                 patch.object(plugin, "params_schema", lambda: schema), \
                  ExitStack() as stack:
                 for ctx in contexts:
                     stack.enter_context(ctx)
