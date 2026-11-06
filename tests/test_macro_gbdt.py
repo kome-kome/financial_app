@@ -1708,6 +1708,15 @@ class TestMonotoneConstraints:
         assert _build_monotone_constraints(["equity_ratio", "cpi_yoy", "momentum_12m1"]) == (0, 0, 0)
         assert _build_monotone_constraints([]) == ()
 
+    def test_per_sign_flips_when_the_column_is_earnings_yield(self, monkeypatch):
+        """#950: per の列が E/P（高いほど割安）なら +1。反転しないと「割安ほど下がる」を木に強制する。"""
+        import plugins.macro_snapshots as ms
+        monkeypatch.setattr(ms, "FIN_EARNINGS_YIELD", True)
+        assert _build_monotone_constraints(["per", "pbr", "div_yield"]) == (+1, -1, +1)
+        monkeypatch.setattr(ms, "FIN_EARNINGS_YIELD", False)
+        assert _build_monotone_constraints(["per", "pbr", "div_yield"]) == (-1, -1, +1)
+        assert _MONOTONE_SIGN["per"] == -1        # 表そのものは書き換えない
+
     def test_schema_has_checkbox_default_off(self):
         """params_schema に use_monotone_constraints（checkbox・既定 OFF）が追加されている。"""
         schema = MacroGbdtPlugin().params_schema()

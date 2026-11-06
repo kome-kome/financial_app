@@ -550,7 +550,8 @@ from plugins.macro_snapshots import (  # noqa: E402
 )
 from plugins.macro_snapshots import FIN_FILL as _M2M6_FIN_FILL  # noqa: E402
 from plugins.macro_snapshots import OPERATIONAL_TOP_K  # noqa: E402
-from plugins.macro_snapshots import load_earnings_yields, to_date_str  # noqa: E402
+from plugins.macro_snapshots import FIN_EARNINGS_YIELD as _M2M6_EARNINGS_YIELD  # noqa: E402
+from plugins.macro_snapshots import load_earnings_yields, swap_per_for_earnings_yield, to_date_str  # noqa: E402,F401
 from plugins.macro_enet import _INNER_CV as _M6_INNER_CV  # noqa: E402
 from plugins.macro_enet import _INNER_SCORE as _M6_INNER_SCORE  # noqa: E402
 from plugins.macro_enet import _SIZE_NEUTRAL as _M6_SIZE_NEUTRAL  # noqa: E402
@@ -656,8 +657,9 @@ class Cond(NamedTuple):
     valid_split: str = _M2_VALID_SPLIT
     subsample: float = _M2_SUBSAMPLE
     train_exclude_index: bool = False
-    # PER の列を益利回り E/P（`financial_metrics.earnings_yield`）に差し替えるか（#1082）。本番は False
-    earnings_yield: bool = False
+    # PER の列を益利回り E/P（`financial_metrics.earnings_yield`）に差し替えるか（#1082）。既定は本番の構成
+    # （`plugins.macro_snapshots.FIN_EARNINGS_YIELD`・#950 で True）＝どのモードでも M-2 / M-6 は本番の財務で回る
+    earnings_yield: bool = _M2M6_EARNINGS_YIELD
     # 財務特徴量から外す列（#1145）。本番は `()`。M-2 / M-6 のパネルにだけ効く（`_build`）
     fin_drop: tuple[str, ...] = ()
 
@@ -752,7 +754,8 @@ FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
 # 差し替える。赤字の行（per が入らない）にも値が入るので `ep` 側のパネルは広がる＝共通域で読み、広がった社は raw の
 # 水準で読む（`--fin-fill` と同じ形）。列の名前は `per` のままで、値の向きは逆（大きいほど割安）。
 EARNINGS_YIELD_CONDS: dict[str, bool] = {"per": False, "ep": True}
-EARNINGS_YIELD_BASE_COND = "per"
+# 分母は本番の構成（#950 で `ep`）。`FIN_FILL_BASE_COND` と同じく本番の値から引く（書き写さない）。
+EARNINGS_YIELD_BASE_COND = next(name for name, flag in EARNINGS_YIELD_CONDS.items() if flag == _M2M6_EARNINGS_YIELD)
 EARNINGS_YIELD_MODELS = ["xgb_m2", "elasticnet"]
 
 # 財務特徴量の列を外すモード（`--fin-drop`・#1145）。条件名は {名前: 外す列}。**基準は本番の構成**（`keep`・25 列）。
@@ -1298,8 +1301,10 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 共通域は埋める前から財務が揃っていた行だけ（drop 側 ⊂ fill 側）。広がった社の効果は raw で読む（#950）。
     # 分母は本番（#983 で `fill`）。分母が入れ替わったので、`subsample` と同じくどちらの向きでも読める形にした。
     # 共通域は差し替える前から per が入っていた行だけ（per 側 ⊂ ep 側）。広がった赤字の社の効果は raw で読む（#1082）。
+    # 分母は本番（#950 で `ep`）。分母が入れ替わったので、`fin_fill` と同じくどちらの向きでも読める形にした。
     "earnings_yield": ("EARNINGS YIELD AXIS [common domain = rows with per; read raw for loss-making rows]",
-                       "replacing per with the split-adjusted earnings yield did not beat per"),
+                       "the other handling of per (raw per vs the split-adjusted earnings yield) "
+                       "did not beat the production one"),
     # 共通域は 25 列が揃った行だけ（keep 側 ⊂ 外す側）。広がった社の効果は raw の水準と社数で読む（#1145）。
     "fin_drop": ("FIN DROP AXIS [common domain = rows complete on all 25 columns; read raw and companies for added rows]",
                  "dropping the op / da feature columns did not beat keeping all 25"),
@@ -2114,22 +2119,7 @@ def fin_source_key(c: Cond, kind: str) -> tuple:
     return (c.fin_rows, c.de_null_industries, c.fin_fill and kind != "m1", c.earnings_yield and kind != "m1")
 
 
-def swap_per_for_earnings_yield(fin_by_co: dict, ey: dict) -> tuple[dict, int, int]:
-    """財務の写しの `per` を益利回り E/P に差し替える（#1082）。戻り値は (写し, 差し替えた行数, per が空欄だった行のうち
-    値が入った行数)。E/P の無い行は `per` を空欄にする（per だけ残すと 2 つの量が混ざる）。元の dict と行は書き換えない。
-    """
-    out: dict = {}
-    n_swap = n_new = 0
-    for ec, recs in fin_by_co.items():
-        new_recs = []
-        for rec in recs:
-            v = ey.get((ec, to_date_str(rec.period_end)))
-            if v is not None and rec.per is None:
-                n_new += 1
-            n_swap += 1
-            new_recs.append(rec._replace(per=v))
-        out[ec] = new_recs
-    return out, n_swap, n_new
+# `swap_per_for_earnings_yield` は本番と共有するので `plugins.macro_snapshots` に置く（#950）。
 
 
 def build_fin_sources(conds: dict[str, Cond], kinds: list[str], fins: dict[str, dict],

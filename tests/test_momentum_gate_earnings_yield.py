@@ -15,13 +15,20 @@ Row = namedtuple("Row", ["period_end", "per", "roe"])
 
 
 class TestConditions:
-    def test_two_conditions_with_production_per_as_base(self):
+    def test_two_conditions_with_production_ep_as_base(self):
+        """#950 で本番が E/P になった＝分母は `ep`（`plugins.macro_snapshots.FIN_EARNINGS_YIELD` から引く）。"""
         conds = G.build_conditions(earnings_yield=True)
         assert list(conds) == ["per", "ep"]
         assert conds["per"].earnings_yield is False and conds["ep"].earnings_yield is True
-        assert G.base_of(conds) == G.EARNINGS_YIELD_BASE_COND == "per"
+        assert G.base_of(conds) == G.EARNINGS_YIELD_BASE_COND == "ep"
         # 他の軸は本番構成のまま（差は per の列だけ）
         assert conds["per"]._replace(earnings_yield=True) == conds["ep"]
+
+    def test_other_modes_run_on_the_production_e_p(self):
+        """他のモードの M-2 / M-6 も本番の財務（E/P）で回る（#983 の `fin_fill` と同じ形）。"""
+        assert G._M2M6_EARNINGS_YIELD is True       # import 時の本番の値（conftest は実行時の値だけを OFF にする）
+        assert G.Cond(False, G.MOM_WINDOW).earnings_yield is True
+        assert all(c.earnings_yield for c in G.build_conditions(fin_drop=True).values())
 
     def test_mode_name_and_suffix(self):
         assert G.mode_of(earnings_yield=True) == "earnings_yield"

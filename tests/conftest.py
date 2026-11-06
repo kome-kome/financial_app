@@ -89,6 +89,19 @@ def weekly_cache_sandbox(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fin_earnings_yield_off(monkeypatch):
+    """M-2 / M-6 の本番の PER → E/P の差し替え（#950・`FIN_EARNINGS_YIELD`）はテストでは既定 OFF。
+
+    DB を MagicMock で差し替えるテスト（test_macro_gbdt / test_macro_enet / test_macro_ensemble ほか）は
+    `financial_metrics.earnings_yield` を返せず、空の表で差し替えると全行の per が空欄になる。本番の
+    `apply_fin_fill` は空の表で止まる（#950）ので、そのテストはすべてそこで落ちる。差し替えの経路そのものは
+    tests/test_fin_fill_production.py が**明示的に ON にして**検証する（`weekly_cache_sandbox` と同じ形）。
+    """
+    import plugins.macro_snapshots as ms
+    monkeypatch.setattr(ms, "FIN_EARNINGS_YIELD", False)
+
+
+@pytest.fixture(autouse=True)
 def batch_activity_sandbox(tmp_path, monkeypatch):
     """実行中マーカー（`batch_activity`）の置き場所を tmp へ向ける。
 
