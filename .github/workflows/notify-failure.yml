@@ -60,7 +60,7 @@ jobs:
       github.event.workflow_run.conclusion == 'cancelled') &&
       github.event.workflow_run.name != '[CI] pytest 自動テスト' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     timeout-minutes: 10
 
     steps:

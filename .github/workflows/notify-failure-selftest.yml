@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   selftest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     timeout-minutes: 1   # cancel モードはこの上限超過で打ち切られ conclusion: cancelled になる
 
     steps:

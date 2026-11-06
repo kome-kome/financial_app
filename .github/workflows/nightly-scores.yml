@@ -45,7 +45,7 @@ jobs:
       (github.event.workflow_run.name == '[定常] 差分収集・毎日自動実行' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     # 実測で締めた値（Issue #446）。M-6 込みの本番実走2本:
     #   run 30954182465（2026-08-04）sector_ols 30.3分 + macro_enet 3.2分 = 総 33.5分（job 34.5分）
     #   run 31050406971（2026-08-05）sector_ols 29.4分 + macro_enet 3.2分 = 総 32.6分（job 33.5分）
