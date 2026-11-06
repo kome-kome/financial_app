@@ -49,7 +49,7 @@ permissions:
 
 jobs:
   incremental:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     timeout-minutes: 360    # 初回 Yahoo backfill（~12週分）のため一時的に延長。定常時は120分で十分。
 
     steps:

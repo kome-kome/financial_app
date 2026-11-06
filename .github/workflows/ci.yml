@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     # ハングを止めるための歯止め（#703）。ランナー割当から `Set up job` 開始までの空白も
     # この時間に入る（通常 0〜1秒・実測最大 114秒＝2026-09-19 に #702 がこれで取り消された）。
     # 当時は pytest の 86〜90% を test_collect_macro の実待機 626秒が占め、job 本体が
