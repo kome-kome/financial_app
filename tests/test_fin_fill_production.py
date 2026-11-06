@@ -154,3 +154,59 @@ class TestFillFinBlanksOnProductionRows:
         vals.update(edinet_code="E1", period_end=datetime.date(2025, 9, 30))
         out, n = ms.fill_fin_blanks({"E1": [ms._FinRow(**vals)]}, SOURCES)
         assert out["E1"][0].rd_intensity is None and sum(n.values()) == 0
+
+
+class TestEarningsYieldInProduction:
+    """M-2 / M-6 の本番の PER → 益利回り E/P の差し替え（#950）。conftest は既定で OFF にするので、ここで ON にする。
+
+    危ないのは次の形で、**どれも例外が出ない**: 差し替えが execute に届かない（赤字の社が外れたまま）・M-1 まで
+    差し替わる・`load_data` の財務を書き換える・E/P の表が空のまま差し替えて全行の per が空欄になる。
+    """
+    EY = {("E1", "2025-03-31"): -0.04}
+
+    @pytest.fixture(autouse=True)
+    def _on(self, monkeypatch):
+        monkeypatch.setattr(ms, "FIN_EARNINGS_YIELD", True)
+
+    def test_production_swaps(self):
+        """#950 の決定（2026-10-31・ユーザー判断）: M-2 / M-6 は E/P へ差し替える。import 時の値で確かめる。"""
+        import importlib
+        src = importlib.util.find_spec("plugins.macro_snapshots").loader.get_source("plugins.macro_snapshots")
+        assert "\nFIN_EARNINGS_YIELD = True\n" in src
+
+    @pytest.mark.parametrize("name", ["macro_gbdt", "macro_enet"])
+    def test_m2_and_m6_get_the_earnings_yield(self, name):
+        fin = _fin()
+        with patch("plugins.macro_snapshots.load_earnings_yields", return_value=self.EY):
+            seen = _run_until_build(name, fin)
+        rec = seen["fin"]["E1"][0]
+        assert rec.per == -0.04, f"{name} が E/P へ差し替えた財務を build_snapshots へ渡していない"
+        assert rec.rd_intensity == 0.0, "0 埋めと重ねていない"
+        assert fin["E1"][0].per == 12.0, "load_data の財務を書き換えた"
+
+    def test_m1_is_not_swapped(self):
+        fin = _fin()
+        with patch("plugins.macro_snapshots.load_earnings_yields", return_value=self.EY) as ley:
+            seen = _run_until_build("macro_risk_return", fin)
+        assert seen["fin"] is fin
+        ley.assert_not_called()
+
+    def test_empty_table_stops(self):
+        """空の表で差し替えると全行の per が空欄になり、全社が黙って外れる。"""
+        with patch("plugins.macro_snapshots.load_fill_sources", return_value=SOURCES), \
+                patch("plugins.macro_snapshots.load_earnings_yields", return_value={}):
+            with pytest.raises(ValueError, match="E/P"):
+                ms.apply_fin_fill(MagicMock(), _fin())
+
+    def test_row_without_e_p_gets_a_blank_per(self):
+        """E/P の無い行は per も空欄（2 つの量を混ぜない）。"""
+        out, n_swap, n_new = ms.swap_per_for_earnings_yield(_fin(), {("E9", "2025-03-31"): 0.1})
+        assert out["E1"][0].per is None and (n_swap, n_new) == (1, 0)
+
+    def test_switching_off_keeps_per(self, monkeypatch):
+        monkeypatch.setattr(ms, "FIN_EARNINGS_YIELD", False)
+        with patch("plugins.macro_snapshots.load_fill_sources", return_value=SOURCES), \
+                patch("plugins.macro_snapshots.load_earnings_yields") as ley:
+            out, _n = ms.apply_fin_fill(MagicMock(), _fin())
+        assert out["E1"][0].per == 12.0
+        ley.assert_not_called()

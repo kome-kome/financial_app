@@ -1104,6 +1104,36 @@ def load_earnings_yields(db) -> dict[tuple[str, str], float]:
     return {(r[0], to_date_str(r[1])): float(r[2]) for r in rows if r[1]}
 
 
+# ── PER → 益利回り E/P（#950・#1082）───────────────────────────────────────
+# M-2 / M-6 の本番は、特徴量の `per` の列を `financial_metrics.earnings_yield`（`(pl_eps ÷ stock_price) ÷ F`・per と同じ F・
+# 赤字の行にも値が入る）に差し替えてから `build_snapshots` へ渡す。per は赤字の行で空欄になり、財務特徴量が 1 つでも
+# 空欄の行は捨てる規則なので、差し替えないと赤字の社が学習と予測から丸ごと外れる（2026-10-30 の
+# `momentum_gate --earnings-yield` で共通域で害なし・ユーザー判断で両モデルとも採用）。**列の名前は `per` のまま**で、
+# 値の向きは逆（大きいほど割安）。E/P の無い行は `per` も空欄にする（2 つの量を混ぜない）。TTM 行は通期の
+# period_end と突き合わないので per が空欄になって外れる（TTM は本番ではない）。M-1 には掛けない。
+# `FIN_FILL` と同じく `scripts/momentum_gate` の分母と `Cond.earnings_yield` の既定はこの値から取る。
+FIN_EARNINGS_YIELD = True
+
+
+def swap_per_for_earnings_yield(fin_by_co: dict, ey: dict) -> tuple[dict, int, int]:
+    """財務の写しの `per` を益利回り E/P に差し替える（#1082・#950）。戻り値は (写し, 差し替えた行数, per が空欄だった
+    行のうち値が入った行数)。E/P の無い行は `per` を空欄にする（per だけ残すと 2 つの量が混ざる）。元の dict と行は
+    書き換えない。
+    """
+    out: dict = {}
+    n_swap = n_new = 0
+    for ec, recs in fin_by_co.items():
+        new_recs = []
+        for rec in recs:
+            v = ey.get((ec, to_date_str(rec.period_end)))
+            if v is not None and rec.per is None:
+                n_new += 1
+            n_swap += 1
+            new_recs.append(rec._replace(per=v))
+        out[ec] = new_recs
+    return out, n_swap, n_new
+
+
 def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int]]:
     """「無い」と確かめた空欄を 0 で埋めた財務の写しと、列ごとに埋めた行数を返す（#950）。
 
@@ -1138,21 +1168,33 @@ def fill_fin_blanks(fin_by_co: dict, sources: dict) -> tuple[dict, dict[str, int
 
 
 def apply_fin_fill(db, fin_by_co: dict) -> tuple[dict, dict[str, int]]:
-    """M-2 / M-6 の execute が `build_snapshots` へ渡す前の財務に掛ける入口（#983）。
+    """M-2 / M-6 の execute が `build_snapshots` へ渡す前の財務に掛ける入口（#983・#950）。
 
-    `FIN_FILL` が False なら `fin_by_co` をそのまま返す（埋めた行数は全列 0）。
+    `FIN_FILL` が True なら「無い」と確かめた空欄を 0 で埋め、`FIN_EARNINGS_YIELD` が True なら続けて `per` を
+    益利回り E/P へ差し替える（埋める列と per は別の列なので順で結果は変わらない）。どちらも False なら
+    `fin_by_co` をそのまま返す（埋めた行数は全列 0）。**E/P を 1 行も読めなければ止める**——空の表で差し替えると
+    全行の per が空欄になり、全社が黙って外れる。
 
     `shared_snapshot_cache()` の内側では (id(db), id(fin_by_co)) で結果を持つ。**写しを毎回作ると、id で
     鍵を作る `build_snapshots` のキャッシュが M-2 と M-6・探索の候補ごとに外れ**、夜間と探索で断面を作り直す。
     値には元の `fin_by_co` も入れて生かしておく（解放されると id が別の dict に再利用され、別の財務の写しが
     返りうる）。
     """
-    if not FIN_FILL:
+    if not FIN_FILL and not FIN_EARNINGS_YIELD:
         return fin_by_co, {c: 0 for c in FIN_FILL_COLUMNS}
 
     def _compute():
-        progress.emit("財務の空欄（無配・R&D なし）を 0 で埋める")
-        filled, n = fill_fin_blanks(fin_by_co, load_fill_sources(db))
+        filled, n = fin_by_co, {c: 0 for c in FIN_FILL_COLUMNS}
+        if FIN_FILL:
+            progress.emit("財務の空欄（無配・R&D なし）を 0 で埋める")
+            filled, n = fill_fin_blanks(filled, load_fill_sources(db))
+        if FIN_EARNINGS_YIELD:
+            progress.emit("PER を益利回り E/P へ差し替える")
+            ey = load_earnings_yields(db)
+            if not ey:
+                raise ValueError("益利回り E/P を 1 行も読めませんでした（financial_metrics.earnings_yield）。"
+                                 "差し替えると全行の per が空欄になるので止めます（#950）")
+            filled, _n_swap, _n_new = swap_per_for_earnings_yield(filled, ey)
         return fin_by_co, filled, n
 
     _src, filled, n = shared_cache_get_or_compute("fin_fill", (id(db), id(fin_by_co)), _compute)

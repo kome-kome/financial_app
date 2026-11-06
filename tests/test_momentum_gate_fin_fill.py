@@ -248,7 +248,14 @@ class TestFinSourceKey:
 
     def test_the_key_keeps_the_other_axes(self):
         c = Cond(False, MOM_WINDOW, fin_rows="with_ttm", de_null_industries=("銀行業",), fin_fill=True)
-        assert fin_source_key(c, "gbdt") == ("with_ttm", ("銀行業",), True, False)
+        # 4 つ目は E/P の差し替え（#950 で本番＝既定 True・M-1 には掛けない）
+        assert fin_source_key(c, "gbdt") == ("with_ttm", ("銀行業",), True, True)
+        assert fin_source_key(c, "m1") == ("with_ttm", ("銀行業",), False, False)
+
+
+def _no_ep(conds: dict) -> dict:
+    """E/P の差し替え（#950 で本番）を外す。ここでは 0 埋めと他の軸の重ね方だけを確かめる。"""
+    return {k: c._replace(earnings_yield=False) for k, c in conds.items()}
 
 
 class TestBuildFinSources:
@@ -257,7 +264,7 @@ class TestBuildFinSources:
     def test_fill_keeps_the_row_basis(self):
         """`--fin-rows` の TTM 側が埋めた `annual` の財務に置き換わらない。"""
         fins = {"annual": {"E1": [_row()]}, "with_ttm": {"E1": [_row()], "E2": [_row()]}}
-        conds = build_conditions(fin_rows=True)
+        conds = _no_ep(build_conditions(fin_rows=True))
         srcs, _n_null, filled = build_fin_sources(conds, ["gbdt"], fins, {KEY: _src()})
         ttm = srcs[fin_source_key(conds["with_ttm"], "gbdt")]
         assert set(ttm) == {"E1", "E2"}, "TTM 側が annual の財務で組まれている"
@@ -268,7 +275,7 @@ class TestBuildFinSources:
         """`--de-exclude` の空欄化が埋めた写しで消えない。"""
         inds = DE_EXCLUDE_CONDS["exclude"]
         fins = {"annual": {"E1": [_row_ind(industry=inds[0])]}}
-        conds = build_conditions(de_exclude=True)
+        conds = _no_ep(build_conditions(de_exclude=True))
         srcs, n_null, _filled = build_fin_sources(conds, ["gbdt"], fins, {KEY: _src()})
         ex = srcs[fin_source_key(conds["exclude"], "gbdt")]["E1"][0]
         keep = srcs[fin_source_key(conds["keep"], "gbdt")]["E1"][0]
@@ -278,7 +285,7 @@ class TestBuildFinSources:
 
     def test_m1_gets_the_original_financials(self):
         fins = {"annual": {"E1": [_row()]}}
-        conds = build_conditions()
+        conds = _no_ep(build_conditions())
         srcs, _n, _f = build_fin_sources(conds, ["gbdt", "m1"], fins, {KEY: _src()})
         cond = next(iter(conds.values()))
         assert srcs[fin_source_key(cond, "m1")] is fins["annual"]
@@ -286,7 +293,7 @@ class TestBuildFinSources:
 
     def test_the_drop_side_stays_blank(self):
         fins = {"annual": {"E1": [_row()]}}
-        conds = build_conditions(fin_fill=True)
+        conds = _no_ep(build_conditions(fin_fill=True))
         srcs, _n, filled = build_fin_sources(conds, ["gbdt"], fins, {KEY: _src()})
         assert srcs[fin_source_key(conds["drop"], "gbdt")] is fins["annual"]
         assert srcs[fin_source_key(conds["fill"], "gbdt")]["E1"][0].rd_intensity == 0.0

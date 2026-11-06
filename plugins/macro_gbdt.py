@@ -67,7 +67,7 @@ from .macro_risk_return import (
 # 実際に付けた方向の「事後」診断であり、本制約の事前符号とのクロスチェックに使える。
 _MONOTONE_SIGN: dict[str, int] = {
     "pbr":       -1,   # 割高（高 PBR）→ バリュープレミアムの逆 → 将来リターン低
-    "per":       -1,   # 割高（高 PER）→ 同上
+    "per":       -1,   # 割高（高 PER）→ 同上。列が E/P のとき（#950・本番）は +1 へ反転（`_build_monotone_constraints`）
     "de_ratio":  -1,   # 高レバレッジ → 財務リスク高 → 将来リターン低
     "roe":       +1,   # 高収益性（クオリティ）→ 将来リターン高
     "roa":       +1,   # 高収益性（クオリティ）→ 将来リターン高
@@ -83,8 +83,16 @@ def _build_monotone_constraints(feat_names: list) -> tuple:
     モメンタム・px_*・交差項・セクター/サイズ）は 0。XGBoost へ列位置で渡す（numpy 入力は
     列名を持たないため位置整合が必須）。全要素 0 でも無害（制約なしと等価）。
     セクター/サイズ（log_size / sector_te）は符号が業種・レジーム依存のため制約なし。
+
+    **`per` の列が益利回り E/P のとき（#950・`macro_snapshots.FIN_EARNINGS_YIELD`）は符号を反転する**——E/P は
+    PER の逆数で「高いほど割安」なので +1（`div_yield` と同じ向き）。反転しないと「割安なほど将来リターンが低い」
+    を木に強制する（例外は出ない）。呼ぶたびに定数を読む（テストの切り替えにも追随する）。
     """
-    return tuple(_MONOTONE_SIGN.get(name, 0) for name in feat_names)
+    from . import macro_snapshots
+    signs = dict(_MONOTONE_SIGN)
+    if macro_snapshots.FIN_EARNINGS_YIELD:
+        signs["per"] = -signs["per"]
+    return tuple(signs.get(name, 0) for name in feat_names)
 
 
 # ── セクター/サイズのカテゴリ特徴量（Issue #370）──────────────────────────────
