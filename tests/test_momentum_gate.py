@@ -57,6 +57,22 @@ def _panel(yms: list[str], n_per_month: int = 8, seed: int = 0) -> dict:
     return out
 
 
+@pytest.fixture
+def m2_at_lambda_one(monkeypatch):
+    """M-2 の画面の既定を λ=1.0・R2 に差し替える。
+
+    #1112（2026-11-06）で M-2 の既定 λ も 0 になり、λ>0 を既定に持つ実物のモデルが無くなった。
+    「既定 λ>0 のモデルの分母」の挙動はこれで確かめる。
+    """
+    import scripts.momentum_gate as mg
+
+    real = mg.production_risk
+    monkeypatch.setattr(mg, "production_risk",
+                        lambda model: (1.0, "r2") if model == "xgb_m2" else real(model))
+    # テストの名前空間へ import 済みの関数も同じものを指させる
+    monkeypatch.setitem(globals(), "production_risk", mg.production_risk)
+
+
 # ── ゲートの契約（定数）────────────────────────────────────────────────────
 
 class TestGateContract:
@@ -358,7 +374,11 @@ class TestRiskLambdaSource:
         assert MODEL_SPECS["elasticnet"][0] == "macro_gbdt"     # パネル設定は M-2 から借りる
         assert RISK_LAMBDA_PLUGIN["elasticnet"] == "macro_enet"  # λ は M-6 の画面から
         assert production_risk("elasticnet")[0] == 0.0           # #807 の既定
-        assert production_risk("xgb_m2")[0] > 0                  # 取り違えると M-2 の λ で測る
+
+    def test_m6_lambda_ignores_a_positive_m2_default(self, m2_at_lambda_one):
+        """#1112 で M-2 の既定も 0 になったので、M-2 を λ>0 に差し替えて取り違えを確かめる。"""
+        assert production_risk("xgb_m2")[0] == 1.0
+        assert production_risk("elasticnet")[0] == 0.0          # 取り違えると M-2 の λ で測る
 
     def test_m6_without_lambdas_stops(self):
         with pytest.raises(ValueError, match="--lambdas"):
@@ -383,8 +403,13 @@ class TestRiskBaseCond:
         assert risk_base_cond(["risk_return"], risk_specs([0.3, 1.0])) == RISK_NO_AXIS
         assert RISK_BASE_COND == "r2"          # 9/21 の事前登録の分母（記録として残す）
 
-    def test_a_positive_default_lambda_missing_from_the_conditions_stops(self):
-        """分母の無い比較になる（既定 λ>0 の M-2 で確かめる）。"""
+    def test_m2_base_is_mu_only_since_its_default_is_zero(self):
+        """#1112 より前は `r2@1.0`。既定を λ=0 にしたので M-1・M-6 と同じ `mu_only`。"""
+        assert production_risk("xgb_m2")[0] == 0.0
+        assert risk_base_cond(["xgb_m2"], risk_specs([0.1, 0.3, 1.0])) == RISK_NO_AXIS
+
+    def test_a_positive_default_lambda_missing_from_the_conditions_stops(self, m2_at_lambda_one):
+        """分母の無い比較になる（M-2 を既定 λ>0 に差し替えて確かめる・#1112 で実物は全モデル 0）。"""
         lam, _axis = production_risk("xgb_m2")
         assert lam > 0
         with pytest.raises(ValueError, match="条件に無い"):
@@ -403,7 +428,7 @@ class TestRiskBaseCond:
         want = RISK_NO_AXIS if lam <= 0 else risk_cond_name(axis, lam)
         assert risk_base_cond(["xgb_m2"], risk_specs([0.1, 0.3, 1.0])) == want
 
-    def test_models_with_different_bases_stop(self):
+    def test_models_with_different_bases_stop(self, m2_at_lambda_one):
         """判定の向きが1本の表で混ざる。別々に回す。"""
         with pytest.raises(ValueError, match="別々に"):
             risk_base_cond(["xgb_m2", "elasticnet"], risk_specs([0.1, 1.0]))
@@ -432,7 +457,7 @@ class TestRiskBaseOverride:
         with pytest.raises(ValueError, match="条件に無い"):
             resolve_risk_base(["xgb_m2"], self.SPECS, "r2@0.3")
 
-    def test_override_tolerates_a_missing_screen_default(self):
+    def test_override_tolerates_a_missing_screen_default(self, m2_at_lambda_one):
         """上書きした run は既定を測らなくてよい（M-2 の既定 r2@1.0 が条件に無い）。"""
         base, production = resolve_risk_base(["xgb_m2"], risk_specs([0.3]), RISK_NO_AXIS)
         assert (base, production) == (RISK_NO_AXIS, None)
