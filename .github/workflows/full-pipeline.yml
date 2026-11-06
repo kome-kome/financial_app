@@ -29,7 +29,7 @@ jobs:
       fail-fast: false     # 1ステップ失敗でも後続続行（skip_existingで補完）
       matrix:
         years_back: ${{ fromJSON(inputs.year_steps) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     timeout-minutes: 355  # GitHub Actions 上限6時間。余裕を5分持たせる
 
     steps:
@@ -66,7 +66,7 @@ jobs:
   finalize:
     needs: collect
     if: ${{ !cancelled() }}   # collect が一部失敗/タイムアウトしても集計は実行
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     # Phase3(10分)+Phase4(32分)+Phase5 Yahoo補完(89分・run 31126473273 実測)
     # +J-Quants(jquants_days に比例・730日=523営業日×20秒=174分)+update_market_data(≧87分・
     # 前回はここで打ち切られ実所要は未測定) ≈ 355分を超える。**jquants_days を小さくして

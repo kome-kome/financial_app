@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   backfill-weekly:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest(26.04) には python 3.13.7 が無い（GOTCHAS.md「CI の実行環境」）
     timeout-minutes: 355  # GitHub Actions 上限6時間に対し5分の余裕
 
     steps:
