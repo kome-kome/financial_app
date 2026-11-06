@@ -353,6 +353,25 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 赤字の社は raw で読む。M-1 には渡さない（`fin_source_key`）。差し替えても per の空欄が1行も埋まらなければ CV の前に
 止まる。日中キューの名前は `gate:earnings-yield`。
 
+## 財務特徴量の列を外すモード（`--fin-drop`・#1145）
+
+本番の M-2 / M-6 は財務特徴量 25 列（`FIN_BASE_OPTIONS`）が1つでも空欄の行を外す。営業利益を開示しない IFRS の社
+（日立・ソフトバンクG）と減価償却費の取れない社は、そのせいで予測が出ない。空欄の多い列を**特徴量から外した**条件を、
+今の 25 列（`keep`・分母）と比べる:
+
+    keep        … 25 列すべて（本番の構成）＝基準
+    drop_da     … `da_intensity` を外す
+    drop_op_da  … `da_intensity` と営業利益系 5 列（`op_margin`・`op_growth`・`z_op_margin`・`delta_op_margin`・
+                  `z_op_margin_sec`）を外す
+
+    python -m scripts.momentum_gate --fin-drop                    # M-2 / M-6（8検定・alpha 0.00625）
+
+外した列は空欄の判定にも使わないので、外す側のパネルは広がる（`keep` 側 ⊂ 外す側）。共通域で測れるのは「列を
+減らしたうえで行を足すと、25 列が揃った社の予測がどう変わるか」で、広がった社の効果は raw の水準と社数で読む
+（`--fin-nan` と同じ形）。**条件は事前登録したこの3つに固定する**（足すと検定数と α が変わる）。外す列が
+`FIN_BASE_OPTIONS` に無ければ組み立てで止まり、外す側のサンプルが `keep` 側より多くなければ CV の前に止まる
+（`fin_drop_reach_problems`）。M-1 には効かせない（M-1 は BIC が列を選ぶ）。日中キューの名前は `gate:fin-drop`。
+
 **他のモードの M-2 / M-6 も埋めた財務で回る**（`Cond.fin_fill` の既定が本番の値・#983）。M-1 のパネルには
 埋めた財務を渡さない（`fin_source_key`）。#983 より前の結果とは raw の水準を比べられない。
 
@@ -639,6 +658,8 @@ class Cond(NamedTuple):
     train_exclude_index: bool = False
     # PER の列を益利回り E/P（`financial_metrics.earnings_yield`）に差し替えるか（#1082）。本番は False
     earnings_yield: bool = False
+    # 財務特徴量から外す列（#1145）。本番は `()`。M-2 / M-6 のパネルにだけ効く（`_build`）
+    fin_drop: tuple[str, ...] = ()
 
 
 CONDS: dict[str, bool] = {"off": False, "on": True}
@@ -733,6 +754,19 @@ FIN_FILL_MODELS = ["xgb_m2", "elasticnet"]
 EARNINGS_YIELD_CONDS: dict[str, bool] = {"per": False, "ep": True}
 EARNINGS_YIELD_BASE_COND = "per"
 EARNINGS_YIELD_MODELS = ["xgb_m2", "elasticnet"]
+
+# 財務特徴量の列を外すモード（`--fin-drop`・#1145）。条件名は {名前: 外す列}。**基準は本番の構成**（`keep`・25 列）。
+# 外す側は空欄の判定に使う列も減るので母集団が広がる＝共通域で読み、広がった社は raw の水準と社数で読む。
+# **条件は事前登録したこの3つに固定する**（列の組を足すと検定数と α が変わる）。営業利益系 5 列は IFRS で営業利益を
+# 開示しない社（#905）で、`da_intensity` は減価償却費のタグを持たない社（#1146 の後も残る分）で空欄になる。
+FIN_DROP_OP_COLS: tuple[str, ...] = ("op_margin", "op_growth", "z_op_margin", "delta_op_margin", "z_op_margin_sec")
+FIN_DROP_CONDS: dict[str, tuple[str, ...]] = {
+    "keep": (),
+    "drop_da": ("da_intensity",),
+    "drop_op_da": FIN_DROP_OP_COLS + ("da_intensity",),
+}
+FIN_DROP_BASE_COND = "keep"
+FIN_DROP_MODELS = ["xgb_m2", "elasticnet"]
 
 # M-6 の内側 CV に空白を入れるかを比べるモード（`--inner-cv-purge`・#979）。条件名は {名前: 区切り方}。
 # `gap` は `months_purged`（#968 で本番＝分母）、`nogap` は空白を入れない `months`（#968 の前の本番）。
@@ -896,10 +930,11 @@ def build_conditions(windows: list[int] | None = None,
                     subsample: bool = False,
                     train_exclude_index: bool = False,
                     earnings_yield: bool = False,
-                    inner_cv_score: bool = False) -> dict[str, Cond]:
+                    inner_cv_score: bool = False,
+                    fin_drop: bool = False) -> dict[str, Cond]:
     """条件集合 {名前: Cond} を作る。
 
-    18のモードがある。**同時に使えるのは1つだけ**（下記）:
+    19のモードがある。**同時に使えるのは1つだけ**（下記）:
 
       既定           … ADR-0045 の昇格ゲートと完全に同じ2条件（`off` / `on`・マクロは ON のまま）
       `windows`      … モメンタム無し ＋ 各窓（#592・ADR-0050）
@@ -919,6 +954,7 @@ def build_conditions(windows: list[int] | None = None,
       `train_exclude_index` … 全行で学習 ＋ 学習 fold だけから G22 × ラベル窓の重なりを落とす（#1068）。**パネルは2条件で同一**
       `earnings_yield` … PER の列を使う ＋ 益利回り E/P へ差し替える（#1082）。他の軸は本番構成に固定
       `inner_cv_score` … M-6 の α・l1_ratio を内側 CV の二乗誤差で選ぶ ＋ rank-IC で選ぶ（#1116）。**パネルは2条件で同一**・M-6 だけ
+      `fin_drop`     … 財務特徴量 25 列 ＋ 減価償却を外す ＋ 営業利益系と減価償却を外す（#1145）。他の軸は本番構成に固定
 
     `inner_cv_purge` / `inner_cv_score` / `valid_split` / `subsample` の `Cond` は2条件で違うが、違うのは CV へ渡す opts だけで、
     パネルの鍵からは外す（`panel_cond`）。`models` を渡したときはその軸を持つモデルだけであることを確かめる。
@@ -956,7 +992,7 @@ def build_conditions(windows: list[int] | None = None,
              ("--size-neutral", size_neutral), ("--valid-split", valid_split),
              ("--inner-cv-purge", inner_cv_purge), ("--subsample", subsample),
              ("--train-exclude-index", train_exclude_index), ("--earnings-yield", earnings_yield),
-             ("--inner-cv-score", inner_cv_score)]
+             ("--inner-cv-score", inner_cv_score), ("--fin-drop", fin_drop)]
     picked = [name for name, on in modes if on]
     if len(picked) > 1:
         raise ValueError(
@@ -1012,6 +1048,18 @@ def build_conditions(windows: list[int] | None = None,
         # 無配・R&D の無い社を外さずに 0 として通したら」を問う。
         return {name: Cond(False, MOM_WINDOW, fin_fill=flag)
                 for name, flag in FIN_FILL_CONDS.items()}
+    if fin_drop:
+        # 財務特徴量から外す列だけを差し替える。他の軸はすべて本番構成（#1145）。外す列が特徴量に無いと、
+        # 何も外さずに「差なし」だけが残るので止める。
+        names = {o["value"] for o in FIN_BASE_OPTIONS}
+        unknown = sorted({col for cols in FIN_DROP_CONDS.values() for col in cols} - names)
+        if unknown:
+            raise ValueError(f"--fin-drop の外す列 {unknown} が財務特徴量（FIN_BASE_OPTIONS）に無い")
+        others = [m for m in (models or []) if m not in FIN_DROP_MODELS]
+        if others:
+            raise ValueError(f"--fin-drop は M-2 / M-6（{', '.join(FIN_DROP_MODELS)}）だけを測る。"
+                             f"{', '.join(others)} は BIC が列を選ぶ（#1145）")
+        return {name: Cond(False, MOM_WINDOW, fin_drop=cols) for name, cols in FIN_DROP_CONDS.items()}
     if earnings_yield:
         # PER の列を E/P に差し替えるかだけ。他の軸はすべて本番構成（#1082）。
         return {name: Cond(False, MOM_WINDOW, earnings_yield=flag)
@@ -1129,7 +1177,8 @@ def base_of(conds: dict[str, Cond], default_max_features: int | None = None) -> 
                  DEMEAN_BASE_COND, RISK_BASE_COND, FIN_FILL_BASE_COND, FIN_NAN_BASE_COND,
                  DE_EXCLUDE_BASE_COND, SIZE_NEUTRAL_BASE_COND,
                  VALID_SPLIT_BASE_COND, INNER_CV_PURGE_BASE_COND, SUBSAMPLE_BASE_COND,
-                 TRAIN_EXCLUDE_INDEX_BASE_COND, EARNINGS_YIELD_BASE_COND, INNER_CV_SCORE_BASE_COND):
+                 TRAIN_EXCLUDE_INDEX_BASE_COND, EARNINGS_YIELD_BASE_COND, INNER_CV_SCORE_BASE_COND,
+                 FIN_DROP_BASE_COND):
         if cand in conds:
             return cand
     prod = maxfeat_cond_name(default_max_features) if default_max_features else None
@@ -1164,7 +1213,8 @@ MODE_SUFFIX: dict[str, str] = {"default": "", "windows": "", "macro": "_macro",
                                "subsample": "_subsample",
                                "train_exclude_index": "_train_exclude_index",
                                "earnings_yield": "_earnings_yield",
-                               "inner_cv_score": "_inner_cv_score"}
+                               "inner_cv_score": "_inner_cv_score",
+                               "fin_drop": "_fin_drop"}
 
 
 def mode_of(windows: list[int] | None = None, macro: bool = False,
@@ -1174,7 +1224,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
             fin_fill: bool = False, size_neutral: bool = False,
             valid_split: bool = False, inner_cv_purge: bool = False,
             subsample: bool = False, train_exclude_index: bool = False,
-            earnings_yield: bool = False, inner_cv_score: bool = False) -> str:
+            earnings_yield: bool = False, inner_cv_score: bool = False,
+            fin_drop: bool = False) -> str:
     """測定モードの名前を返す（`build_conditions` と同じ引数から1箇所で導出する）。
 
     **#615 で足した2モードは、ここを持たないまま別モードの名前で出力されていた**——
@@ -1203,6 +1254,8 @@ def mode_of(windows: list[int] | None = None, macro: bool = False,
         return "fin_fill"
     if earnings_yield:
         return "earnings_yield"
+    if fin_drop:
+        return "fin_drop"
     if size_neutral:
         return "size_neutral"
     if valid_split:
@@ -1247,6 +1300,9 @@ _AXIS_VERDICTS: dict[str, tuple[str, str]] = {
     # 共通域は差し替える前から per が入っていた行だけ（per 側 ⊂ ep 側）。広がった赤字の社の効果は raw で読む（#1082）。
     "earnings_yield": ("EARNINGS YIELD AXIS [common domain = rows with per; read raw for loss-making rows]",
                        "replacing per with the split-adjusted earnings yield did not beat per"),
+    # 共通域は 25 列が揃った行だけ（keep 側 ⊂ 外す側）。広がった社の効果は raw の水準と社数で読む（#1145）。
+    "fin_drop": ("FIN DROP AXIS [common domain = rows complete on all 25 columns; read raw and companies for added rows]",
+                 "dropping the op / da feature columns did not beat keeping all 25"),
     "fin_fill": ("FIN FILL AXIS [common domain = rows complete before filling; read raw for filled rows]",
                  "the other handling of no-dividend / no-R&D blanks (fill with 0 vs drop the rows) "
                  "did not beat the production one"),
@@ -1588,7 +1644,8 @@ def panel_config_mismatches(models: list[str]) -> list[str]:
 def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
            use_momentum: bool, mom_window: int, use_macro: bool = True,
            build_interactions: bool = True, max_features: int | None = None,
-           demean_target: bool = False, fin_nan_ok: bool = False) -> tuple:
+           demean_target: bool = False, fin_nan_ok: bool = False,
+           fin_drop: tuple[str, ...] = ()) -> tuple:
     """種別の本番 config のまま、条件の軸だけ差し替えて構築する。
 
     `use_macro=False` はマクロ系列名を空にする（#604）——`macro_risk_return.execute` の
@@ -1621,6 +1678,9 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
 
     `fin_nan_ok`（#938）は財務の空欄を NaN で通すか。**M-1 には効かせない**——M-1 は交差項を作り
     OLS で学習するので、NaN が入ると壊れる（`build_snapshots` の注意書き）。
+
+    `fin_drop`（#1145）は財務特徴量から外す列。外した列は空欄の判定にも使わないので母集団が広がる。
+    **M-1 には効かせない**（M-1 は BIC が列を選び、`--fin-drop` は M-2 / M-6 だけを測る）。
     """
     plugin_name = "macro_risk_return" if kind == "m1" else "macro_gbdt"
     params = coerce_params(get_plugin(plugin_name).params_schema(), {})
@@ -1629,7 +1689,7 @@ def _build(kind: str, args, prices_by_co, fin_by_co, companies, macro_cache,
         "price_features": list(params.get("price_features") or [])}
     samples_by_ym, meta_by_ym, _current, feats, ids_by_ym = build_snapshots(
         prices_by_co, fin_by_co, companies, macro_cache,
-        params["fin_features"], macro_names,
+        [f for f in params["fin_features"] if kind == "m1" or f not in fin_drop], macro_names,
         use_momentum, mom_window, params["min_coverage"],
         # M-2/M-6 は交互作用を持たないのが本番構成なので、条件が True でも入れない。
         build_interactions=(kind == "m1" and build_interactions),
@@ -1735,6 +1795,30 @@ def fin_nan_reach_problems(samples: dict[str, int], kinds: list[str]) -> list[st
             if n_nan <= n_drop:
                 problems.append(f"{cond}|{kind}: サンプル数 {n_nan} が {FIN_NAN_BASE_COND} 側の "
                                 f"{n_drop} より多くない（空欄を通しても行が増えていない）")
+    return problems
+
+
+def fin_drop_reach_problems(samples: dict[str, int], features: dict[str, list],
+                            kinds: list[str]) -> list[str]:
+    """列を外す切り替えが断面に届いていない理由を列挙する（#1145）。空リストなら健全。
+
+    外す側は `keep` 側の行をすべて含むので、**サンプル数が増えていなければ**外した列で空欄だった行が
+    1つも無いか、列が外れていない。外したはずの列が特徴量に残っていても同じく「差なし」だけが残る。
+    """
+    problems = []
+    for kind in kinds:
+        n_keep = samples.get(f"{FIN_DROP_BASE_COND}|{kind}", 0)
+        for cond, cols in FIN_DROP_CONDS.items():
+            if cond == FIN_DROP_BASE_COND:
+                continue
+            key = f"{cond}|{kind}"
+            left = sorted(set(cols) & set(features.get(key, [])))
+            if left:
+                problems.append(f"{key}: 外したはずの列 {left} が特徴量に残っている")
+            n = samples.get(key, 0)
+            if n <= n_keep:
+                problems.append(f"{key}: サンプル数 {n} が {FIN_DROP_BASE_COND} 側の {n_keep} より"
+                                "多くない（列を外しても行が増えていない）")
     return problems
 
 
@@ -2642,6 +2726,10 @@ def main() -> None:
                     help="PER → 益利回りのモード（特徴量の per を financial_metrics.earnings_yield＝per と同じ F の E/P に"
                          f"差し替える ep と、本番の per を共通域で比べる・#1082）。モデル既定は {','.join(EARNINGS_YIELD_MODELS)}。"
                          "VIEW は変えず、読み込んだ財務の行だけを差し替える。他モードと併用不可")
+    ap.add_argument("--fin-drop", dest="fin_drop", action="store_true",
+                    help="財務特徴量の列を外すモード（25 列の keep と、da_intensity を外す drop_da と、営業利益系 5 列と "
+                         f"da_intensity を外す drop_op_da を共通域で比べる・#1145）。モデル既定は {','.join(FIN_DROP_MODELS)}。"
+                         "外す側は空欄の判定に使う列も減るので母集団が広がる。他モードと併用不可")
     ap.add_argument("--valid-split", dest="valid_split", action="store_true",
                     help="M-2 の early stopping の検証集合のモード（末尾の月を丸ごと取る valid_months＝本番（#987）と、"
                          "末尾の行で取る valid_rows を共通域で比べる・#976）。パネルは2条件で同一。"
@@ -2710,6 +2798,8 @@ def main() -> None:
         default_models = FIN_FILL_MODELS
     elif args.earnings_yield:
         default_models = EARNINGS_YIELD_MODELS
+    elif args.fin_drop:
+        default_models = FIN_DROP_MODELS
     elif args.valid_split:
         default_models = VALID_SPLIT_MODELS
     elif args.inner_cv_purge:
@@ -2757,7 +2847,8 @@ def main() -> None:
                                  size_neutral=args.size_neutral,
                                  train_exclude_index=args.train_exclude_index,
                                  earnings_yield=args.earnings_yield,
-                                 inner_cv_score=args.inner_cv_score)
+                                 inner_cv_score=args.inner_cv_score,
+                                 fin_drop=args.fin_drop)
     except ValueError as e:
         raise SystemExit(str(e))
     # 列数モードの分母は本番値（プラグイン既定）。**ここで数値を書き写さない**。
@@ -2813,7 +2904,8 @@ def main() -> None:
                    size_neutral=args.size_neutral,
                    valid_split=args.valid_split, inner_cv_purge=args.inner_cv_purge,
                    subsample=args.subsample, train_exclude_index=args.train_exclude_index,
-                   earnings_yield=args.earnings_yield, inner_cv_score=args.inner_cv_score)
+                   earnings_yield=args.earnings_yield, inner_cv_score=args.inner_cv_score,
+                   fin_drop=args.fin_drop)
     default_out = f"momentum_gate{MODE_SUFFIX[mode]}.json"
     if mode == "risk_axis" and models != RISK_MODELS:
         # M-1 と M-6 は分母が違い別々に回す（#808）。同じファイルへ書くと後の run が前の結果を消す。
@@ -2923,7 +3015,7 @@ def main() -> None:
                         kind, args, prices_by_co, fin_src, companies,
                         macro_cache, c.use_momentum, c.momentum_window,
                         c.use_macro, c.build_interactions, c.max_features,
-                        c.demean_target, fin_nan_ok=c.fin_nan_ok)
+                        c.demean_target, fin_nan_ok=c.fin_nan_ok, fin_drop=c.fin_drop)
                 s, m, i, feats = built[(pc, kind)]
                 panels[(cond, kind)] = (s, m, i, feats)
                 st = _panel_stats(s, i, feats)
@@ -3009,6 +3101,21 @@ def main() -> None:
                                  + " / ".join(problems))
             print("[note] the common domain is the drop side (complete financials); the effect "
                   "of predicting companies with blank financials shows only in raw levels",
+                  flush=True)
+
+        # 列を外すモードでも、切り替えが**断面まで届いたか**を CV の前に確かめる（#1145）。
+        fin_drop_samples: dict[str, int] = {}
+        if mode == "fin_drop":
+            fin_drop_samples = {key: st["samples"] for key, st in stats.items()}
+            for key, st in stats.items():
+                print(f"[{key}] samples={st['samples']} companies={st['companies']} "
+                      f"features={st['n_features']}", flush=True)
+            problems = fin_drop_reach_problems(fin_drop_samples,
+                                               {key: st["features"] for key, st in stats.items()}, kinds)
+            if problems:
+                raise SystemExit("中止: 列を外す切り替えが断面に届いていません: " + " / ".join(problems))
+            print("[note] the common domain is the keep side (all 25 columns complete); the effect of "
+                  "predicting the added companies shows only in raw levels and the company counts",
                   flush=True)
 
         # D/E の業種除外モードでも、切り替えが**断面まで届いたか**を CV の前に確かめる（#940）。
@@ -3536,7 +3643,8 @@ def main() -> None:
                               "valid_split": c.valid_split,
                               "subsample": c.subsample,
                               "train_exclude_index": c.train_exclude_index,
-                              "earnings_yield": c.earnings_yield}
+                              "earnings_yield": c.earnings_yield,
+                              "fin_drop": list(c.fin_drop)}
                        for name, c in conds.items()},
         "mode": mode,
         "base_cond": base,
