@@ -362,8 +362,10 @@ JOBS: dict[str, Job] = {
         why="M-2 / M-6 の財務特徴量 25 列から da_intensity を外す（drop_da）・営業利益系 5 列と da_intensity を外す"
             "（drop_op_da）と、今の 25 列（keep）を共通域で比べる（#1145）。外す側は空欄の判定に使う列も減るので"
             "母集団が広がり、広がった社（営業利益を開示しない IFRS の社など）は raw の水準と社数で読む。8検定・alpha 0.00625。",
-        # 見積り: `gate:earnings-yield`（2条件）の実測 46.6 分 × 3/2。実走ログの END 行で差し替える。
-        measured_min=70.0,
+        # 2026-11-09 日中枠の実測（exit=0・#1145）。見積り 70.0（`gate:earnings-yield` の実測 46.6 分 × 3/2）から
+        # 差し替えた。3 条件とも約 21 万行（keep 206,241・drop_op_da 209,358）で、CV 1 回あたりは 10/29 の E/P 側
+        # より 15〜20% 遅い（開始時の物理メモリの空きが 926MB・10/29 は 2,404MB）。
+        measured_min=80.4,
         parallel_sensitive=True,   # 他の gate と同じ理由（採否が CI の符号で決まる）
     ),
     "gate:valid-split": Job(
