@@ -14,8 +14,10 @@ import plugins.macro_snapshots as ms
 from plugins.macro_snapshots import _spearman, oof_backtest
 
 KS = (5, 10, 30)
-NEW_KEYS = {"top_k", "top_k_excess_return_by_period", "top_decile_rank_ic"}
-EMPTY_K = {"n_periods": 0, "excess_return": None, "precision": None, "ndcg": None}
+NEW_KEYS = {"top_k", "top_k_excess_return_by_period", "top_k_pct_rank_by_period", "top_decile_rank_ic"}
+EMPTY_K = {"n_periods": 0, "excess_return": None, "precision": None, "ndcg": None,
+           "mean_pct_rank": None, "lift": None}
+TOP_K_FIELDS = ("excess_return", "precision", "ndcg", "mean_pct_rank", "lift")
 
 
 @pytest.fixture(autouse=True)
@@ -66,12 +68,23 @@ class TestHandComputed:
         idcg = sum(g * w for g, w in zip(gains[:5], d))
         assert self._o()["top_k"]["5"]["ndcg"] == pytest.approx(dcg / idcg, abs=5e-5)
 
+    def test_mean_pct_rank_averages_the_realized_rank_with_the_tied_slot(self):
+        # gain = y/9。上位4社 (9+8+7+6)/9、同点3社 (5+4+3)/9 の 1/3 ずつ → (30/9 + 4/9) / 5 = 34/45（#1156）
+        o = self._o()
+        assert o["top_k"]["5"]["mean_pct_rank"] == pytest.approx(34 / 45, abs=5e-5)
+        assert o["top_k_pct_rank_by_period"]["5"]["2020-01"] == pytest.approx(34 / 45, abs=1e-6)
+
+    def test_lift_divides_precision_by_the_base_rate(self):
+        # 期内平均 4.5 を上回るのは y=9..5 の 5 社 → 基準率 0.5。lift = (13/15) / 0.5（#1156）
+        assert self._o()["top_k"]["5"]["lift"] == pytest.approx(26 / 15, abs=5e-5)
+
     def test_larger_k_is_left_out_below_2k_rows(self):
         o = self._o()
         assert o["top_k"]["5"]["n_periods"] == 1
         for k in ("10", "30"):
             assert o["top_k"][k] == EMPTY_K
             assert o["top_k_excess_return_by_period"][k] == {}
+            assert o["top_k_pct_rank_by_period"][k] == {}
 
 
 class TestOrdering:
@@ -85,7 +98,19 @@ class TestOrdering:
             assert t["excess_return"] == pytest.approx((self.M - k) / 2, abs=1e-6)
             assert t["precision"] == 1.0
             assert t["ndcg"] == 1.0
+            # 上位 K 社の gain (M-1)/(M-1) … (M-K)/(M-1) の平均。基準率は 30/60＝0.5 なので lift は 2
+            assert t["mean_pct_rank"] == pytest.approx(1 - (k - 1) / (2 * (self.M - 1)), abs=5e-5)
+            assert t["lift"] == pytest.approx(2.0, abs=5e-5)
         assert o["top_decile_rank_ic"] == {"mean": 1.0, "n": 1}
+
+    def test_random_order_lands_near_the_middle(self):
+        """でたらめな並びの実現順位の平均は約 0.5（#1156）。lift は約 1。"""
+        ys = [float(i) for i in range(self.M)]
+        r = {f"p{seed:03d}": list(zip(_shuffled(ys, seed), ys)) for seed in range(300)}
+        t = oof_backtest(r, n_quantiles=5)["top_k"]["10"]
+        assert t["n_periods"] == 300
+        assert t["mean_pct_rank"] == pytest.approx(0.5, abs=0.03)
+        assert t["lift"] == pytest.approx(1.0, abs=0.06)
 
     def test_reverse_order_is_the_worst_case(self):
         rev = oof_backtest({"m": _ramp(self.M, sign=-1.0)}, n_quantiles=5)
@@ -97,8 +122,11 @@ class TestOrdering:
                 r, t = rev["top_k"][str(k)], other["top_k"][str(k)]
                 assert r["excess_return"] == pytest.approx(-(self.M - k) / 2, abs=1e-6)
                 assert r["precision"] == 0.0
+                assert r["lift"] == 0.0
+                assert r["mean_pct_rank"] == pytest.approx((k - 1) / (2 * (self.M - 1)), abs=5e-5)
                 assert r["excess_return"] <= t["excess_return"]
                 assert r["ndcg"] <= t["ndcg"]
+                assert r["mean_pct_rank"] <= t["mean_pct_rank"]
 
     def test_value_does_not_depend_on_row_order(self):
         """予測が同じ社が境目をまたいでも、行（社）の順を入れ替えて値が変わらない（#977 と同じ理由）。"""
@@ -108,7 +136,7 @@ class TestOrdering:
         for seed in range(3):
             o = oof_backtest({"m": _shuffled(rows, seed)}, n_quantiles=5)
             for k in KS:
-                for field in ("excess_return", "precision", "ndcg"):
+                for field in TOP_K_FIELDS:
                     assert o["top_k"][str(k)][field] == pytest.approx(
                         base["top_k"][str(k)][field], abs=1e-6), (k, field)
             assert o["top_decile_rank_ic"]["mean"] == pytest.approx(
@@ -152,6 +180,16 @@ class TestPeriodSelection:
         assert set(o["top_k_excess_return_by_period"]["30"]) == {"a"}
         # 期間平均は測れた期だけの平均
         assert o["top_k"]["5"]["excess_return"] == pytest.approx(((60 - 5) / 2 + (25 - 5) / 2) / 2, abs=1e-6)
+        assert set(o["top_k_pct_rank_by_period"]["30"]) == {"a"}
+
+    def test_flat_outcome_period_is_left_out_of_lift_only(self):
+        """実現リターンが全社同じ期は基準率が 0 なので lift だけから外す（他の指標は数える・#1156）。"""
+        flat_y = [(float(i), 0.0) for i in range(60)]
+        o = oof_backtest({"a": _ramp(60), "b": flat_y}, n_quantiles=5)
+        t = o["top_k"]["10"]
+        assert t["n_periods"] == 2
+        assert t["lift"] == pytest.approx(2.0, abs=5e-5)   # a の期だけ
+        assert set(o["top_k_pct_rank_by_period"]["10"]) == {"a", "b"}
 
     def test_empty_input_returns_the_full_shape(self):
         """M-3 は `oof_backtest({})` がフル形状を返すことに頼っている（macro_dlm.py）。"""
@@ -159,6 +197,7 @@ class TestPeriodSelection:
         for k in KS:
             assert o["top_k"][str(k)] == EMPTY_K
             assert o["top_k_excess_return_by_period"][str(k)] == {}
+            assert o["top_k_pct_rank_by_period"][str(k)] == {}
         assert o["top_decile_rank_ic"] == {"mean": None, "n": 0}
 
     def test_keys_survive_a_json_round_trip(self):
@@ -186,7 +225,7 @@ class TestAnalysisPageReadsTheSameKeys:
         body = self._js_body()
         o = oof_backtest({"m": _ramp(60)}, n_quantiles=5)
         assert ".top_k" in body and ".top_decile_rank_ic" in body
-        for field in ("excess_return", "precision", "ndcg", "n_periods"):
+        for field in TOP_K_FIELDS + ("n_periods",):
             assert f"r.{field}" in body, f"画面が {field} を読んでいない"
             assert field in o["top_k"]["5"], f"oof_backtest の top_k に {field} が無い"
         for field in ("mean", "n"):
