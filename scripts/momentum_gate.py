@@ -372,6 +372,10 @@ blank_groups`（`OOF_CSV_COLUMNS`）で、`standard` は会計基準、`blank_gr
 `FIN_BASE_OPTIONS` に無ければ組み立てで止まり、外す側のサンプルが `keep` 側より多くなければ CV の前に止まる
 （`fin_drop_reach_problems`）。M-1 には効かせない（M-1 は BIC が列を選ぶ）。日中キューの名前は `gate:fin-drop`。
 
+**2026-11-09 の結果で `drop_op_da` を採用し、M-2 / M-6 の既定から 6 列を外した**（#1145・
+`macro_snapshots.M2_M6_DROPPED_FIN_FEATURES`）。分母の `keep` は本番の既定なので、いまこのモードを回すと
+3 条件が同じ列になる。外す列が本番の既定に無ければ組み立てで止まる（測り直すなら `keep` を 25 列にする改修が先）。
+
 **他のモードの M-2 / M-6 も埋めた財務で回る**（`Cond.fin_fill` の既定が本番の値・#983）。M-1 のパネルには
 埋めた財務を渡さない（`fin_source_key`）。#983 より前の結果とは raw の水準を比べられない。
 
@@ -910,6 +914,11 @@ MODEL_SPECS: dict[str, tuple[str, str, str]] = {
 BASE_COND = "off"    # 比較の分母。窓モードでも「モメンタム無し」が基準
 
 
+def _gbdt_default_fin_features() -> list[str]:
+    """M-2 の本番の既定の財務特徴量（`params_schema()` から取り、書き写さない）。"""
+    return coerce_params(get_plugin("macro_gbdt").params_schema(), {})["fin_features"]
+
+
 def maxfeat_cond_name(n: int) -> str:
     """列数モードの条件名（`mf20` 等）。名前の作り方を1箇所に閉じる。"""
     return f"{MAXFEAT_BASE_PREFIX}{n}"
@@ -1058,6 +1067,13 @@ def build_conditions(windows: list[int] | None = None,
         unknown = sorted({col for cols in FIN_DROP_CONDS.values() for col in cols} - names)
         if unknown:
             raise ValueError(f"--fin-drop の外す列 {unknown} が財務特徴量（FIN_BASE_OPTIONS）に無い")
+        # 分母の keep は本番の既定（M-2 の params_schema）。#1145 で 6 列を既定から外したので、そのままでは
+        # 3 条件が同じ列で回って「差なし」だけが残る。測り直すなら keep を 25 列にする改修を先にする。
+        already = sorted({col for cols in FIN_DROP_CONDS.values() for col in cols}
+                         - set(_gbdt_default_fin_features()))
+        if already:
+            raise ValueError(f"--fin-drop の外す列 {already} は本番の既定の財務特徴量に無い（#1145 で外し済み）。"
+                             "keep が既に外した側なので比べても差は出ない")
         others = [m for m in (models or []) if m not in FIN_DROP_MODELS]
         if others:
             raise ValueError(f"--fin-drop は M-2 / M-6（{', '.join(FIN_DROP_MODELS)}）だけを測る。"

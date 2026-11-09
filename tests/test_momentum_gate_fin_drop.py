@@ -1,6 +1,6 @@
 """`momentum_gate --fin-drop`（#1145）: 財務特徴量から営業利益系と減価償却の列を外すモード。
 
-本番（25 列・`keep`）を分母に、`da_intensity` を外す条件と、営業利益系 5 列と `da_intensity` を外す条件を
+本番の既定（`keep`・測った時点は 25 列）を分母に、`da_intensity` を外す条件と、営業利益系 5 列と `da_intensity` を外す条件を
 共通域で比べる。DB と CV は回さず、条件・列の外し方・届いたかの検査・日中キューの登録を確かめる。
 """
 from types import SimpleNamespace
@@ -13,7 +13,44 @@ import scripts.run_daytime as rd
 OP = ("op_margin", "op_growth", "z_op_margin", "delta_op_margin", "z_op_margin_sec")
 
 
+ALL_25 = [o["value"] for o in G.FIN_BASE_OPTIONS]
+
+
+class TestProductionDefault:
+    """#1145 の採用: M-2 / M-6 の既定から 6 列を外す（選択肢には残す・M-1 は変えない）。"""
+
+    @pytest.mark.parametrize("plugin", ["macro_gbdt", "macro_enet"])
+    def test_m2_m6_default_drops_the_six(self, plugin):
+        default = G.coerce_params(G.get_plugin(plugin).params_schema(), {})["fin_features"]
+        assert default == [c for c in ALL_25 if c not in set(OP) | {"da_intensity"}]
+        assert len(default) == 19
+
+    @pytest.mark.parametrize("plugin", ["macro_gbdt", "macro_enet"])
+    def test_columns_stay_selectable(self, plugin):
+        options = {o["value"] for o in G.get_plugin(plugin).params_schema()["fin_features"]["options"]}
+        assert set(OP) | {"da_intensity"} <= options
+
+    def test_dropped_set_matches_the_adopted_condition(self):
+        from plugins.macro_snapshots import M2_M6_DROPPED_FIN_FEATURES
+        assert set(M2_M6_DROPPED_FIN_FEATURES) == set(G.FIN_DROP_CONDS["drop_op_da"])
+
+    def test_m1_default_is_unchanged(self):
+        m1 = G.coerce_params(G.get_plugin("macro_risk_return").params_schema(), {})["fin_features"]
+        from plugins.macro_snapshots import DEFAULT_FIN_FEATURES
+        assert m1 == DEFAULT_FIN_FEATURES
+
+    def test_mode_stops_once_adopted(self):
+        """本番の既定が既に外した側なので、そのまま回すと 3 条件が同じ列になる。"""
+        with pytest.raises(ValueError, match="外し済み"):
+            G.build_conditions(fin_drop=True)
+
+
 class TestConditions:
+    @pytest.fixture(autouse=True)
+    def _keep_is_all_25(self, monkeypatch):
+        """組み立ての検査だけを見るため、分母を採用前の 25 列に戻す。"""
+        monkeypatch.setattr(G, "_gbdt_default_fin_features", lambda: list(ALL_25))
+
     def test_three_preregistered_conditions_with_production_as_base(self):
         conds = G.build_conditions(fin_drop=True)
         assert list(conds) == ["keep", "drop_da", "drop_op_da"]
@@ -79,10 +116,10 @@ class TestBuild:
         assert not set(cols) & set(seen["fin_features"])
         assert len(seen["fin_features"]) == len(G.FIN_BASE_OPTIONS) - len(cols)
 
-    def test_keep_passes_all_25(self, monkeypatch):
+    def test_keep_passes_the_production_default(self, monkeypatch):
         seen = self._capture(monkeypatch)
         G._build("gbdt", SimpleNamespace(stride=1), {}, {}, {}, {}, False, G.MOM_WINDOW)
-        assert len(seen["fin_features"]) == len(G.FIN_BASE_OPTIONS)
+        assert seen["fin_features"] == G._gbdt_default_fin_features()
 
     def test_m1_ignores_the_drop(self, monkeypatch):
         seen = self._capture(monkeypatch)

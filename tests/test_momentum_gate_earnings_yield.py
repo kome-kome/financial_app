@@ -28,7 +28,7 @@ class TestConditions:
         """他のモードの M-2 / M-6 も本番の財務（E/P）で回る（#983 の `fin_fill` と同じ形）。"""
         assert G._M2M6_EARNINGS_YIELD is True       # import 時の本番の値（conftest は実行時の値だけを OFF にする）
         assert G.Cond(False, G.MOM_WINDOW).earnings_yield is True
-        assert all(c.earnings_yield for c in G.build_conditions(fin_drop=True).values())
+        assert all(c.earnings_yield for c in G.build_conditions(fin_fill=True).values())
 
     def test_mode_name_and_suffix(self):
         assert G.mode_of(earnings_yield=True) == "earnings_yield"

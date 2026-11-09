@@ -72,7 +72,7 @@ DEFAULT_ORDER = ["xgb_m2", "elasticnet", "extratrees", "fama_macbeth",
 
 # ── 小テーブルのローカルキャッシュ（Issue #355 の Egress 恒久対策を本スクリプトにも適用）──
 # build_snapshots が財務レコードに要求する属性だけを軽量 namedtuple で持つ（ORM を pickle
-# しない）。fin_features は M-2 既定＝FIN_BASE_OPTIONS 全選択なので、全候補列を収録する。
+# しない）。fin_features は M-2 既定（#1145 以降は FIN_BASE_OPTIONS から 6 列を外した部分集合）なので、全候補列を収録すれば足りる。
 #
 # **pickle には素の tuple だけを載せる**（namedtuple クラス自体は載せない）。本スクリプトは
 # `python -m scripts.candidate_bakeoff` で走るためモジュール名が `__main__` になり、namedtuple を
