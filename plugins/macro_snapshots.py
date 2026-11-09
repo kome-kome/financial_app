@@ -2552,9 +2552,16 @@ def in_layer_short_side(buy: dict, sells: dict, y: dict, n_quantiles: int = 5) -
 
     戻り値:
       by_condition[名] = {mean, hit_rate（正だった期の割合）, n_periods, by_period（{ym: 値}・
-        `model_stats.paired_ic_significance` の入力形）}
+        `model_stats.paired_ic_significance` の入力形）, 参考の 5 キー（下）}
       periods[ym] = {prev_ym, n_common（共通域の社数）, n_ranked（t−1 に順位を付けた社数）, n_layer}
       n_common_rows = 共通域の (ym, 社) の行数
+
+    参考（#1156・判定には使わない）。平均の差だけでは「何割当たったか」「外したときにいくら損したか」が
+    見えないので、売った社（層の中の下位 1/n）ごとに数える。期の選別は by_period と同じ:
+      precision / precision_by_period = 売った社のうち y が層の平均を下回った割合（期ごと → 期の平均）
+      mis_sell_loss / mis_sell_loss_by_period = 売ったのに y が層の平均を上回った社の「y − 層の平均」の平均
+        （外したときの大きさ・正の値）。外した社が 0 の期は数えない（期の平均は外した社がいた期だけ）
+      n_mis_sell_periods = 外した社がいた期の数
     """
     keys = set(y)
     for sell in sells.values():
@@ -2567,20 +2574,34 @@ def in_layer_short_side(buy: dict, sells: dict, y: dict, n_quantiles: int = 5) -
     by_condition: dict[str, dict] = {}
     for name, sell in sells.items():
         by_period: dict[str, float] = {}
+        precision_by_period: dict[str, float] = {}
+        mis_sell_loss_by_period: dict[str, float] = {}
         for ym, layer in layers.items():
             rows = sorted((sell[(ym, ec)], ec, y[(ym, ec)]) for ec in layer["members"])
             if not quantile_period_ok(rows, n_quantiles):
                 continue
             m = len(rows)
             bottom = rows[:m // n_quantiles]
-            by_period[ym] = (sum(r[2] for r in rows) / m
-                             - sum(r[2] for r in bottom) / len(bottom))
+            layer_mean = sum(r[2] for r in rows) / m
+            by_period[ym] = layer_mean - sum(r[2] for r in bottom) / len(bottom)
+            # 参考（#1156）: 売った社ごとの当たり・外れ。同値（y == 層の平均）はどちらにも数えない
+            precision_by_period[ym] = sum(r[2] < layer_mean for r in bottom) / len(bottom)
+            missed = [r[2] - layer_mean for r in bottom if r[2] > layer_mean]
+            if missed:
+                mis_sell_loss_by_period[ym] = sum(missed) / len(missed)
         vals = list(by_period.values())
+        precisions = list(precision_by_period.values())
+        losses = list(mis_sell_loss_by_period.values())
         by_condition[name] = {
             "mean":      round(statistics.mean(vals), 6) if vals else None,
             "hit_rate":  round(sum(v > 0 for v in vals) / len(vals), 4) if vals else None,
             "n_periods": len(vals),
             "by_period": by_period,
+            "precision":               round(statistics.mean(precisions), 4) if precisions else None,
+            "precision_by_period":     precision_by_period,
+            "mis_sell_loss":           round(statistics.mean(losses), 6) if losses else None,
+            "mis_sell_loss_by_period": mis_sell_loss_by_period,
+            "n_mis_sell_periods":      len(losses),
         }
     periods = {ym: {"prev_ym": layer["prev_ym"], "n_common": len(domain[ym]),
                     "n_ranked": layer["n_ranked"], "n_layer": len(layer["members"])}
