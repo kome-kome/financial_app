@@ -1425,6 +1425,7 @@ def build_snapshots(
     return_stock_ids: bool = False,
     price_features: list[str] | None = None,
     fin_nan_ok: bool = False,
+    return_no_future: bool = False,
 ) -> tuple:
     """M-1/M-2 共有スナップショット構築。
 
@@ -1454,6 +1455,13 @@ def build_snapshots(
       測るために使う。**本番のプラグインはまだ渡さない**（採るかは #916 の実測で決める）。
       macro_nan_ok と同じく **build_interactions=False と併用すること**（交差項の OLS が壊れる）。
 
+    return_no_future=False（既定・本番の全モデル）: 戻り値は従来どおり。
+    return_no_future=True（計測専用・#1154）: 末尾に `no_future_by_ym: dict[str, list[str]]` を足す。
+      特徴量の条件（財務・マクロ・momentum・min_coverage）を**すべて通った**のに、52 週先の終値が無い
+      （または終値が正でない）ために答えを作れず捨てた行の edinet_code。直近 52 週の月末と、系列が途中で
+      終わった社（上場廃止・売買停止）の両方が入る。見分けは呼び出し側が株価の日付で行う
+      （`scripts/measure_label_audit.py`）。条件を書き写さずに数えるため、ここで記録する。
+
     行の並び: 各月の行（samples_by_ym / sample_meta_by_ym / stock_ids_by_ym）は edinet_code の
       昇順で、`prices_by_co` の挿入順に依らない（Issue #954）。M-2 は行の並びで木が変わるので、
       読み出し順のままだと同じパネルでも run ごとに結果が動いた。
@@ -1469,14 +1477,15 @@ def build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
-            fin_nan_ok=fin_nan_ok,
+            fin_nan_ok=fin_nan_ok, return_no_future=return_no_future,
         )
-    # fin_nan_ok もキーに入れる。入れないと、空欄を通した条件と通さない条件が同じ結果を共有する（#938）
+    # fin_nan_ok もキーに入れる。入れないと、空欄を通した条件と通さない条件が同じ結果を共有する（#938）。
+    # return_no_future も戻り値の形を変えるのでキーに入れる（#1154）
     key = (
         id(prices_by_co), id(fin_by_co), id(companies), id(macro_cache),
         tuple(fin_features), tuple(macro_names), use_momentum, mom_window,
         min_coverage, build_interactions, macro_nan_ok, return_stock_ids,
-        tuple(price_features), fin_nan_ok,
+        tuple(price_features), fin_nan_ok, return_no_future,
     )
     return _cached_or_computed(
         cache["build_snapshots"], key,
@@ -1484,7 +1493,7 @@ def build_snapshots(
             prices_by_co, fin_by_co, companies, macro_cache,
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
-            fin_nan_ok=fin_nan_ok,
+            fin_nan_ok=fin_nan_ok, return_no_future=return_no_future,
         ),
         "スナップショット",
     )
@@ -1505,6 +1514,7 @@ def _build_snapshots_impl(
     return_stock_ids: bool,
     price_features: list[str] | None = None,
     fin_nan_ok: bool = False,
+    return_no_future: bool = False,
 ) -> tuple:
     """build_snapshots の実体（キャッシュなし・毎回フル計算）。"""
     use_macro = bool(macro_names)
@@ -1537,6 +1547,7 @@ def _build_snapshots_impl(
     samples_by_ym: dict[str, list] = defaultdict(list)
     sample_meta_by_ym: dict[str, list] = defaultdict(list)
     stock_ids_by_ym: dict[str, list] = defaultdict(list)
+    no_future_by_ym: dict[str, list] = defaultdict(list)
     current_snaps: dict[str, tuple] = {}
     min_rows = HORIZON_WEEKS + 4
     macro_memo: dict[str, dict] = {}
@@ -1642,6 +1653,7 @@ def _build_snapshots_impl(
             if non_null / n_feat < min_coverage:
                 continue
 
+            labelled = False
             if has_future:
                 c_snap, c_fut = closes[snap_idx], closes[snap_idx + HORIZON_WEEKS]
                 if c_snap and c_fut and c_snap > 0 and c_fut > 0:
@@ -1649,6 +1661,10 @@ def _build_snapshots_impl(
                     sample_meta_by_ym[snap_ym].append((industry, size_val))
                     if return_stock_ids:
                         stock_ids_by_ym[snap_ym].append(edinet_code)
+                    labelled = True
+            if return_no_future and not labelled:
+                # 計測専用（#1154）: 特徴量はそろったが答えを作れずに捨てた行
+                no_future_by_ym[snap_ym].append(edinet_code)
 
             if is_current:
                 comp = companies.get(edinet_code)
@@ -1662,10 +1678,12 @@ def _build_snapshots_impl(
                 })
 
     progress.emit("スナップショットを構築", n_companies, n_companies)
+    out: tuple = (dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps, all_feat_names)
     if return_stock_ids:
-        return (dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps,
-                all_feat_names, dict(stock_ids_by_ym))
-    return dict(samples_by_ym), dict(sample_meta_by_ym), current_snaps, all_feat_names
+        out += (dict(stock_ids_by_ym),)
+    if return_no_future:
+        out += (dict(no_future_by_ym),)
+    return out
 
 
 # ── 特徴量選択（BIC） ──────────────────────────────────────────────────────
