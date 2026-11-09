@@ -287,3 +287,138 @@ class TestDaytimeJob:
         section = prereg.appendix_section(text, "### 結果")
         assert not section.startswith(prereg.PLACEHOLDER)
         assert "選ばれた K: 該当なし" in section
+
+
+# ── 上位K社の実現順位の平均で測り直す（#1156・docs/prereg/top-k-veto-pct-rank.md）──────────────
+
+PREREG_PCT = ROOT / "docs" / "prereg" / "top-k-veto-pct-rank.md"
+FROZEN_PCT = prereg.recorded_sha(PREREG_PCT.read_text(encoding="utf-8"))
+PCT_KEY = "top_k_pct_rank_by_period"
+
+
+def _pct_entry(name, by_k):
+    """予想の採点（λ=0）に実現順位の系列を持つ 1 モデル。超過リターンの系列はぶれの大きい別物にしておく。"""
+    oof = {PCT_KEY: {str(k): s for k, s in by_k.items()},
+           "top_k_excess_return_by_period": {str(k): _noisy() for k in by_k}}
+    return {"name": name, "available": True, "oof_backtest": oof, "oof_backtest_display": None}
+
+
+def _pct_models(per_model):
+    return [_pct_entry(name, by_k) for name, by_k in per_model.items()]
+
+
+def _oof_pct_series(skill, n=80, seed=0):
+    """合成の OOF 予測を `oof_backtest` に通して、本物と同じ作り方の実現順位の期別系列を得る。
+
+    skill=1 は完全に当てた並び、skill=0 はでたらめな並び（yhat は y と独立）。
+    """
+    from plugins.macro_snapshots import oof_backtest
+    rng = random.Random(seed)
+    residuals = {}
+    for ym in YMS:
+        rows = []
+        for _ in range(n):
+            y = rng.gauss(0.0, 0.2)
+            rows.append((skill * y + (1 - skill) * rng.gauss(0.0, 0.2), y))
+        residuals[ym] = rows
+    return oof_backtest(residuals)[PCT_KEY]
+
+
+class TestPctRankSeries:
+    def test_the_center_is_one_half(self):
+        """同じ系列でも、中心 0 では平均 0.5 が大きな信号に見え、中心 0.5 では信号が無い。"""
+        flat_half = list(_steady(0.5, noise=0.01).values())
+        assert X.judge_series(flat_half)["passed"] is True
+        assert X.judge_series(flat_half, X.SERIES["pct_rank"].center)["passed"] is False
+        assert X.judge_series(list(_steady(0.7, noise=0.01).values()), 0.5)["passed"] is True
+
+    def test_the_rule_reads_the_series_that_oof_backtest_writes(self):
+        """`oof_backtest` が出す系列のまま: 当てた並びは合格し、でたらめな並びは中心 0.5 の近くで不合格。"""
+        perfect, noise = _oof_pct_series(skill=1.0), _oof_pct_series(skill=0.0, seed=1)
+        assert set(perfect) == {str(k) for k in TOP_K_REFERENCE}
+        # 上位 5 社は実現でも上から 5 社＝順位 79..75 / 79 の平均
+        assert all(v == pytest.approx(77 / 79, abs=1e-6) for v in perfect["5"].values())
+        assert statistics.mean(noise["30"].values()) == pytest.approx(0.5, abs=0.05)
+        good = {k: perfect[str(k)] for k in X.CANDIDATE_K}
+        bad = {k: noise[str(k)] for k in X.CANDIDATE_K}
+        table, _ = X.build_table(_pct_models({n: good for n in X.MODELS}), "pct_rank")
+        assert X.choose_k(table) == 5
+        table, _ = X.build_table(_pct_models({**{n: good for n in X.MODELS}, "macro_gbdt": bad}), "pct_rank")
+        assert X.choose_k(table) is None
+
+    def test_reads_the_pct_rank_key_not_the_excess_key(self):
+        source, by_k = X.series_of(_pct_entry("macro_enet", {5: _steady(0.7)}), "pct_rank")
+        assert source == "forecast"
+        assert by_k["5"] == _steady(0.7)
+        # 既定（excess）は今までどおり超過リターンのキーを読む
+        assert X.series_of(_pct_entry("macro_enet", {5: _steady(0.7)}))[1]["5"] == _noisy()
+
+    def test_result_from_before_the_series_is_rejected(self):
+        old = _entry("macro_enet", {5: _steady(0.05)}, display=False)    # 超過リターンだけを持つ
+        with pytest.raises(ValueError, match="#1159 より前"):
+            X.series_of(old, "pct_rank")
+
+    def test_each_series_has_its_own_output(self):
+        assert X.SERIES["excess"].out != X.SERIES["pct_rank"].out
+        assert X.SERIES["excess"].out.name == "top_k_veto.json"          # #1044 の出力先は変えない
+
+
+class TestPctRankCli:
+    def _json(self, tmp_path, models):
+        p = tmp_path / "comparison.json"
+        p.write_text(json.dumps({"models": models}), encoding="utf-8")
+        return p
+
+    def _per(self):
+        return {n: {k: _steady(0.7, noise=0.01, seed=k) for k in X.CANDIDATE_K} for n in X.MODELS}
+
+    def test_writes_the_rule_with_the_series_and_center(self, tmp_path):
+        src, out = self._json(tmp_path, _pct_models(self._per())), tmp_path / "out.json"
+        code = X.main(["--series", "pct_rank", "--prereg", str(PREREG_PCT), "--prereg-sha", FROZEN_PCT,
+                       "--from-json", str(src), "--out", str(out)])
+        assert code == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["chosen_k"] == 5
+        assert payload["rule"]["series"] == "pct_rank"
+        assert payload["rule"]["series_key"] == PCT_KEY
+        assert payload["rule"]["center"] == 0.5
+        assert payload["prereg_issue"].endswith("/issues/1156")
+        assert payload["sources"] == {n: "forecast" for n in X.MODELS}
+
+    @pytest.mark.parametrize("series, doc, sha", [
+        ("pct_rank", PREREG, FROZEN),          # 古い文書の凍結値で新しい系列を測る
+        ("excess", PREREG_PCT, FROZEN_PCT),    # 新しい文書で超過リターンを測る
+    ])
+    def test_series_and_prereg_must_match(self, tmp_path, series, doc, sha):
+        src, out = self._json(tmp_path, _pct_models(self._per())), tmp_path / "out.json"
+        code = X.main(["--series", series, "--prereg", str(doc), "--prereg-sha", sha,
+                       "--from-json", str(src), "--out", str(out)])
+        assert code == prereg.EXIT_MISMATCH
+        assert not out.exists()
+
+
+class TestPctRankDaytimeJob:
+    KEY = "measure:top-k-veto-pct-rank"
+
+    def test_frozen_value_matches_the_prereg_appendix(self):
+        argv = rd.JOBS[self.KEY].argv
+        doc = ROOT / argv[argv.index("--prereg") + 1]
+        sha = argv[argv.index("--prereg-sha") + 1]
+        text = doc.read_text(encoding="utf-8")
+        assert doc == PREREG_PCT
+        assert sha == prereg.recorded_sha(text) == prereg.body_sha256(text)
+
+    def test_runs_the_pct_rank_series_alone(self):
+        job = rd.JOBS[self.KEY]
+        assert job.argv[1:5] == ("-m", "scripts.measure_top_k_veto", "--series", "pct_rank")
+        assert job.parallel_sensitive is True
+        assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN
+
+    def test_the_prereg_keeps_the_rule_of_1044(self):
+        """系列と中心のほかは #1044 と同じ（対象・K の候補・閾値を変えるなら新しい ADR）。"""
+        text = PREREG_PCT.read_text(encoding="utf-8")
+        assert "M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-6（`macro_enet`）" in text
+        assert "K の候補: 5・10・30" in text
+        assert "MDE ≤ 0.5 × |平均 − 0.5|" in text
+        assert X.MODELS == ("macro_risk_return", "macro_gbdt", "macro_enet")
+        assert X.CANDIDATE_K == (5, 10, 30)

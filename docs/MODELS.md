@@ -1410,7 +1410,11 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 - 追加学習・Egress ゼロの純後処理で、`oof_backtest` を呼ぶ全モデルへ自動的に波及する。画面への表示は #1049。
   画面の並び（U = μ̂ − λR）での採点は #1042、拒否権に使う K は #1044 の事前登録した規則で決める
   （[`prereg/top-k-veto.md`](prereg/top-k-veto.md)・各モデル自身の系列のぶれだけから MDE を出し、全モデルで
-  MDE ≤ 0.5×|平均| を満たす最小の K。計測は `scripts/measure_top_k_veto.py`・日中枠 `measure:top-k-veto`）
+  MDE ≤ 0.5×|平均| を満たす最小の K。計測は `scripts/measure_top_k_veto.py`・日中枠 `measure:top-k-veto`）。
+  2026-10-28 の実走は「該当なし」で、超過リターンのぶれが大きすぎた。外れ値に引っ張られない実現順位の平均で同じ規則を
+  測り直す事前登録が [`prereg/top-k-veto-pct-rank.md`](prereg/top-k-veto-pct-rank.md)（#1156・合否は
+  MDE ≤ 0.5×|平均 − 0.5|・`--series pct_rank`・日中枠 `measure:top-k-veto-pct-rank`）。K が決まっても、拒否権・同点決めへ
+  使うかは ADR-0069 への追記で別に決める
 
 参考文献:
 
