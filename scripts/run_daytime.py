@@ -577,6 +577,23 @@ JOBS: dict[str, Job] = {
         # 読み込みの途中に夜間の書き込みが入ると同じ入力にならず、層の顔ぶれそのものが変わる。
         parallel_sensitive=True,
     ),
+    # 売り専用の候補 S1（下位に入る確率）を売りの μ̂（M-6）と比べる（#1152）。判定は事前登録の規則。
+    "measure:sell-dedicated": Job(
+        name="sell_dedicated",
+        argv=("{python}", "-m", "scripts.sell_mu_source_bakeoff", "--sell-candidates",
+              "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/sell-dedicated-model.md",
+              "--prereg-sha", "64c424f8d44d87af2de3f003ea0cafd3be8a9e718c2ed2c5b0a87826410db21a"),
+        why="当てる答えを「その月の下位 1/5 に入るか」に替えたロジスティック回帰（S1）を、M-4 の中の M-6 と同じ"
+            "パネル・fold・規模の中立化で回し、M-6 の買いの並びの上位層の売り側spread と全社の売り側spread で M-6 の"
+            "μ̂ と比べる（#1152）。1 候補 × 2 指標・alpha 0.025。凍結値が合わなければ exit 2。結果は "
+            "scripts/.cache/sell_dedicated.json。",
+        # 見積り: `measure:in-layer-sell` の実測 11.8 分（M-4 1 回）＋ S1 の 19 fold（合成 13 万行で 1 fold 約 45 秒）
+        # ＋余裕。2026-11-09 の --smoke（120 社）で S1 は 18 fold 336 秒・収束しなかった警告が fold 平均 21 回。行数 約 29 倍で
+        # 約 2.7 時間と見て 200 分にした。**次の実走で差し替える。**
+        measured_min=200.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # OOF 運用再現（#1045・親 #1040・ADR-0069 の参考）。判定には使わない。
     "measure:oof-replay": Job(
         name="oof_portfolio_replay",

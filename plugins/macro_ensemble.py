@@ -414,14 +414,17 @@ class MacroEnsemblePlugin(AnalysisPlugin):
             "n_est_max": m2p["n_estimators_max"],
         }
 
-    def _m6_cv(self, b: dict, m6p: dict, yms: list):
+    def _m6_cv(self, b: dict, m6p: dict, yms: list, fit_predict=None):
         """共通月グリッド上で M-6 の OOF を {(ym,ec):(yhat,y)} で返す（+ 現在μ̂用の中間物）。
 
         M-6 のスナップショット構成は M-2 と同値（交差項なし・macro_nan_ok）なので build は
         共有し、CV だけ ElasticNet の fit_predict へ差し替える。探索設定は macro_enet の
         モジュール定数をそのまま参照する（M-6 単体実行と同一コードパス＝数値の二重管理を避ける）。
         内側の CV（`_INNER_CV`）と OOF への規模の中立化（`_SIZE_NEUTRAL`）も本番の M-6 と同じにする
-        （#1058。そろえる前は内側が `rows`・中立化なしで、売りの μ̂ の比較が本番の M-6 を測っていなかった）。"""
+        （#1058。そろえる前は内側が `rows`・中立化なしで、売りの μ̂ の比較が本番の M-6 を測っていなかった）。
+
+        `fit_predict` を渡すと、ElasticNet の代わりにそれで学習する（パネル・fold・規模の中立化は同じ）。
+        本番の M-4 は渡さない。使い手は `scripts/sell_mu_source_bakeoff --sell-candidates`（売り専用の候補・#1152）。"""
         from .macro_enet import (
             _CV_SPLITS, _INNER_CV, _MAX_ITER, _N_ALPHAS, _SIZE_NEUTRAL, MacroEnetPlugin,
         )
@@ -429,7 +432,7 @@ class MacroEnsemblePlugin(AnalysisPlugin):
 
         s, ids = self._filter_yms(b, yms)
         l1_ratios = MacroEnetPlugin._l1_ratios(m6p["l1_ratio"])
-        fp = make_elasticnet_fit_predict(
+        fp = fit_predict or make_elasticnet_fit_predict(
             l1_ratios=l1_ratios, n_alphas=_N_ALPHAS, cv_splits=_CV_SPLITS,
             max_iter=_MAX_ITER, diag=make_diag(), inner_cv=_INNER_CV,
         )

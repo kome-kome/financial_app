@@ -488,6 +488,89 @@ def make_elasticnet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
     return fit_predict
 
 
+# ── 1b. 売り専用の候補 S1（下位に入る確率・#1152）────────────────────────────────
+# 当てる答えを「52週先リターンが、その月の学習行の下位 1/SELL_BOTTOM_QUANTILES に入るか」に替えた L1+L2 の
+# ロジスティック回帰。特徴量・前処理（`_prep_matrices`）・内側 CV の区切り方（`elasticnet_inner_cv`）・l1_ratio は
+# M-6 と同じものを渡す＝違いは「当てる答え」と学習器だけ。予測は −P(下位)（高いほど売る理由が小さい＝μ̂ と同じ向き）。
+# 下位の切り方は `oof_backtest` の最下位分位と同じ（月内の昇順の先頭 m // n 行）。候補メニュー（`_CANDIDATES`）には
+# 載せない（回帰の bakeoff の土俵ではない）。使い手は `scripts/sell_mu_source_bakeoff --sell-candidates`。
+SELL_BOTTOM_QUANTILES = 5
+# 正則化の強さ C の候補数（`LogisticRegressionCV` の既定・1e-4〜1e4 の対数等間隔）。
+_LR_N_CS = 10
+# saga の反復（エポック）の上限。合成 13 万行×72 列で 1 fold 約 45 秒（2026-11-09）。
+_LR_MAX_ITER = 1000
+# 内側 CV で C・l1_ratio を選ぶ基準。二乗誤差の ElasticNetCV に対応する、確率の対数損失。
+_LR_SCORING = "neg_log_loss"
+
+
+def bottom_labels(y, train_groups, n_quantiles: int = SELL_BOTTOM_QUANTILES) -> np.ndarray:
+    """月ごとに、y の昇順の先頭 m // n_quantiles 行を 1、残りを 0 にした配列（#1152）。
+
+    `train_groups` は月の昇順に連結した各月の行数（`walk_forward_cv_monthly(pass_train_groups=True)`）。
+    同じ値は元の並びの順に先頭から取る（安定ソート）。m // n_quantiles が 0 の月は全て 0。
+    """
+    y = np.asarray(y, dtype=float)
+    sizes = [int(g) for g in train_groups]
+    if sum(sizes) != len(y):
+        raise ValueError(f"train_groups の合計 {sum(sizes)} が行数 {len(y)} と合わない")
+    out = np.zeros(len(y), dtype=int)
+    start = 0
+    for m in sizes:
+        k = m // n_quantiles
+        if k > 0:
+            order = np.argsort(y[start:start + m], kind="stable")
+            out[start + order[:k]] = 1
+        start += m
+    return out
+
+
+def make_logistic_bottom_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
+                                     n_cs: int = _LR_N_CS,
+                                     cv_splits: int = _EN_CV_SPLITS,
+                                     max_iter: int = _LR_MAX_ITER,
+                                     diag: dict | None = None,
+                                     inner_cv: str = _EN_INNER_CV_PURGED,
+                                     n_quantiles: int = SELL_BOTTOM_QUANTILES) -> Callable:
+    """売り専用の候補 S1 の fit_predict（#1152）。返す予測は −P(その月の下位に入る)。
+
+    月ごとの下位のラベルを作るので、各学習月の行数 `train_groups` が要る——
+    `walk_forward_cv_monthly(pass_train_groups=True)` で呼ぶこと。C・l1_ratio は M-6 と同じ区切り方の内側 CV
+    （`elasticnet_inner_cv`）で、対数損失が最小の組を選ぶ（`LogisticRegressionCV`・saga・決定的な seed）。
+    診断値には C・l1_ratio・非ゼロ係数の数・収束しなかった警告の数を積む。
+    """
+    if inner_cv not in _EN_INNER_CV_CHOICES:
+        raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
+
+    def fit_predict(train_samples, test_samples, train_groups=None):
+        import warnings
+
+        from sklearn.exceptions import ConvergenceWarning
+        from sklearn.linear_model import LogisticRegressionCV
+
+        if train_groups is None:
+            raise ValueError("S1 は月ごとの下位のラベルを作るので train_groups が要る（pass_train_groups=True で呼ぶ）")
+        X_tr, _y_z, X_te, _mu, _sd, y_te = _prep_matrices(train_samples, test_samples)
+        labels = bottom_labels([s[1] for s in train_samples], train_groups, n_quantiles)
+        cv = elasticnet_inner_cv(len(X_tr), cv_splits, inner_cv, train_groups)
+        model = LogisticRegressionCV(
+            Cs=n_cs, l1_ratios=tuple(l1_ratios), solver="saga", cv=cv, scoring=_LR_SCORING,
+            max_iter=max_iter, random_state=42, use_legacy_attributes=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            model.fit(X_tr, labels)
+        n_conv = sum(1 for w in caught if issubclass(w.category, ConvergenceWarning))
+        pos = list(model.classes_).index(1)
+        yhat = (-model.predict_proba(X_te)[:, pos]).tolist()
+        if diag is not None:
+            diag["C"].append(float(model.C_))
+            diag["l1_ratio"].append(float(model.l1_ratio_))
+            diag["n_nonzero"].append(int(np.count_nonzero(model.coef_)))
+            diag["n_convergence_warnings"].append(n_conv)
+        return yhat, y_te
+
+    return fit_predict
+
+
 # ── 2. ExtraTrees / QRF 相当（sklearn・改善案②）──────────────────────────────
 
 _ET_N_ESTIMATORS = 300

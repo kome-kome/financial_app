@@ -1694,6 +1694,7 @@ Issue #372・ADR-0021。
 | `regime_linear` | 離散状態×符号解釈 | VIX（無ければ信用スプレッド）の学習 fold 内中央値でストレス/平穏に分割し regime 別 Ridge。標本不足・NaN は pooled へフォールバック |
 | `lightgbm` / `catboost` | 代替 GBDT | M-2 と同一ハイパラへ揃え**実装差だけ**を比較（leaf-wise / ordered boosting）。**任意依存**（`requirements-optional.txt`・未導入なら自動スキップ） |
 | `xgb_m2` / `ols` | 基準線 | M-2 既定と同一の XGBoost、および素 OLS（正則化なし・BIC 選択なし） |
+| 売り専用の候補 S1（#1152） | 当てる答えだけを替える | その月の下位 1/5 に入るかを当てる L1+L2 のロジスティック回帰（`make_logistic_bottom_fit_predict`）。予測は −P(下位)。前処理・内側 CV の区切り方は M-6 と同じ。回帰の候補メニューには載せず、`sell_mu_source_bakeoff --sell-candidates` が売りの μ̂（M-6）と比べる（事前登録 `docs/prereg/sell-dedicated-model.md`） |
 | `wrap_macro_pca` | 合成可能ラッパー | マクロ列だけを **fold 内 PCA** で直交少数因子へ畳む（`--pca K`）。非マクロ列は無変換で温存。任意の候補に被せられる |
 
 ### 15.3 リーク防止の契約

@@ -52,6 +52,18 @@
 既定プリセットの −R_macro を残すかの判定の規則は #1073 のコメントで計測の前に固定した。
 結果は `scripts/.cache/sell_in_layer.json`。日中枠 `measure:in-layer-sell`（並走に敏感）で単独に回す。
 
+`--sell-candidates`（#1152）: 売り専用に学習した候補（S1＝その月の下位 1/5 に入る確率・L1+L2 のロジスティック回帰・
+`plugins.model_candidates.make_logistic_bottom_fit_predict`）を、本番の売りの μ̂（M-6）と比べる。事前登録
+`docs/prereg/sell-dedicated-model.md` の規則で判定し、`--prereg` と `--prereg-sha` を必須にする（凍結値が合わなければ
+重い計算の前に exit 2）。
+  - 候補は M-4 の中の M-6 のレグ（`MacroEnsemblePlugin._m6_cv`）が受け取ったパネル・月をそのまま使い、学習関数だけを
+    差し替えて回す＝特徴量・fold・embargo・内側 CV の区切り方・規模の中立化は本番の M-6 と同じで、違うのは当てる答えだけ
+  - 予測は M-4 の共通域へそろえる。共通域の行が候補に無い・実現リターンが食い違うときは止める（域の取り違え）
+  - 主審: (a) M-6 の買いの並びの上位層の売り側spread（ユーザー判断・2026-11-09）、(b) 全社の売り側spread。差は
+    候補 − M-6 を共通の期で対にした定常ブートストラップ（両側 p）。α は 0.05 /（候補数 × 2）
+  - 判定は `sell_dedicated_decision` が `prereg_decision` に機械的に出す。結果は `scripts/.cache/sell_dedicated.json`。
+    日中枠 `measure:sell-dedicated`（並走に敏感）で単独に回す
+
 データは `scripts/_cache.py` 経由でローカル pickle を読む（Issue #355・本番 Egress ゼロ）。
 producer 永続化は `tuning_dry_run()` で no-op、現在μ̂スコアリングは `tuning_objective_only()`
 で省略する（本番 `macro_ensemble_scores` を実測で汚さない）。
@@ -61,6 +73,8 @@ producer 永続化は `tuning_dry_run()` で no-op、現在μ̂スコアリン�
     python -m scripts.sell_mu_source_bakeoff --smoke         # 間引きパネルで動作確認
     python -m scripts.sell_mu_source_bakeoff --refresh-cache # 本番から取り直す
     python -m scripts.sell_mu_source_bakeoff --in-layer      # 上位層の売り側spread も出す（#1043）
+    python -m scripts.sell_mu_source_bakeoff --sell-candidates \
+        --prereg docs/prereg/sell-dedicated-model.md --prereg-sha <凍結値>   # 売り専用の候補（#1152）
 """
 from __future__ import annotations
 
@@ -71,12 +85,15 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Sequence
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database import SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
+from plugins import macro_ensemble  # noqa: E402
+from plugins.model_candidates import make_diag, make_logistic_bottom_fit_predict, summarize_diag  # noqa: E402
 from plugins.macro_snapshots import (  # noqa: E402
     display_risk_map, display_scores, get_producer_scores, in_layer_short_side, oof_backtest,
 )
@@ -86,6 +103,7 @@ from scripts._cache import set_refresh  # noqa: E402
 
 _OUT = Path(__file__).resolve().parent / ".cache" / "sell_mu_source_bakeoff.json"
 _OUT_IN_LAYER = Path(__file__).resolve().parent / ".cache" / "sell_in_layer.json"
+_OUT_SELL = Path(__file__).resolve().parent / ".cache" / "sell_dedicated.json"
 
 # M-4 の基底＝比較対象の μ 出所（sell_ranking.params_schema の mu_source 候補のうち
 # per-(ym,銘柄) OOF を出せるもの）。M-3 は水準を持つが M-4 の基底ではないため対象外
@@ -135,8 +153,18 @@ def sell_score(raws: dict, weights: dict, stats: dict,
     coverage = weight_present / total_weight if total_weight else 0.0
     score = weighted_sum / weight_present if weight_present > 0 and coverage >= min_coverage else None
     return score, coverage
+# ── 売り専用の候補（--sell-candidates・#1152）──────────────────────────────────
+# 事前登録（`docs/prereg/sell-dedicated-model.md`）で固定した候補。S2（分位回帰）は日中枠に収まらず外した（#1152）。
+SELL_S1 = "s1_logistic_bottom"
+SELL_CANDIDATES = (SELL_S1,)
+SELL_PREREG = "docs/prereg/sell-dedicated-model.md"
+# 分母＝本番の売りの μ̂ の出どころ（`sell_ranking.MU_SOURCE`・ADR-0071）。
+SELL_BASE = "macro_enet"
+# 主審 (a) の上位層を作る買いの並び（ユーザー判断・2026-11-09）。他の基底の層は参考で出す。
+SELL_BUY_LAYER = "macro_enet"
+
 SHORT = {"macro_risk_return": "M-1", "macro_gbdt": "M-2", "macro_enet": "M-6",
-         UPPER: "M-6+R_macro(上限)"}
+         UPPER: "M-6+R_macro(上限)", SELL_S1: "S1(下位確率)"}
 # 検定する対（a − b）。μ̂ の出所どうしは主判定と同じ対、上限版は「R_macro を足して層の中の売りが
 # 良くなるか」の未来情報込みの上限。
 IN_LAYER_PAIRS = [(CANDIDATE, CURRENT), (CANDIDATE, "macro_risk_return"), (UPPER, CANDIDATE)]
@@ -343,6 +371,153 @@ def in_layer_report(run: dict, prices_by_co: dict, db) -> dict:
             "whole_universe": whole}
 
 
+def sell_alpha(n_candidates: int = len(SELL_CANDIDATES)) -> float:
+    """Bonferroni の有意水準（候補数 × 主審 2 本）。事前登録 §3。"""
+    return 0.05 / (n_candidates * 2)
+
+
+def sell_candidate_fit_predict(name: str, m6p: dict, diag: dict):
+    """候補 name の fit_predict。l1_ratio・内側 CV の区切り方・分割数は本番の M-6 から取る（書き写さない）。"""
+    from plugins.macro_enet import _CV_SPLITS, _INNER_CV, MacroEnetPlugin
+
+    if name != SELL_S1:
+        raise ValueError(f"未知の売りの候補: {name}（{', '.join(SELL_CANDIDATES)} のみ）")
+    return make_logistic_bottom_fit_predict(
+        l1_ratios=MacroEnetPlugin._l1_ratios(m6p["l1_ratio"]), cv_splits=_CV_SPLITS,
+        inner_cv=_INNER_CV, diag=diag)
+
+
+def candidate_on_common(aligned: dict, y: dict, name: str) -> dict:
+    """候補の OOF `{(ym, ec): (yhat, y)}` を M-4 の共通域 `y` の行へそろえて `{(ym, ec): yhat}` にする。
+
+    共通域の行が候補に無い、または実現リターンが食い違うなら、同じ域・同じラベルを測れていないので止める。
+    """
+    missing = [k for k in y if k not in aligned]
+    if missing:
+        raise RuntimeError(f"{name}: M-4 の共通域の {len(missing)} 行に予測が無い（例 {missing[:3]}）。"
+                           "M-6 と同じパネル・fold で回せていないので判定に使わない")
+    bad = [k for k in y if abs(float(aligned[k][1]) - y[k]) > 1e-12]
+    if bad:
+        raise RuntimeError(f"{name}: 実現リターンが M-4 の共通域と {len(bad)} 行で食い違う（例 {bad[:3]}）")
+    return {k: float(aligned[k][0]) for k in y}
+
+
+def sell_dedicated_decision(sig_layer: dict | None, sig_whole: dict | None, alpha: float) -> dict:
+    """事前登録 §4 の判定（1 候補ぶん）。
+
+    採用は「(a) 上位層の売り側spread の差が正で p < alpha」かつ「(b) 全社の売り側spread の差が負で p < alpha ではない」
+    ときだけ。検定が出ない（共通の期が 2 未満）指標は有意でないものとして扱う。**規則を変えるなら文書を凍結し直す**。
+    """
+    def _hit(s):
+        p = s.get("p_value") if s else None
+        return bool(s and p is not None and p < alpha)
+
+    layer_better = _hit(sig_layer) and sig_layer["mean"] > 0
+    whole_worse = _hit(sig_whole) and sig_whole["mean"] < 0
+    return {"decision": "adopt" if (layer_better and not whole_worse) else "keep",
+            "in_layer_better": layer_better, "whole_universe_worse": whole_worse, "alpha": alpha}
+
+
+def overall_sell_decision(decisions: dict, layer_sigs: dict) -> dict:
+    """候補ごとの判定から全体の判定を出す（§4）。採用が複数なら (a) の差の平均が大きい方。無ければ据え置き。"""
+    adopted = [c for c, d in decisions.items() if d["decision"] == "adopt"]
+    if not adopted:
+        return {"decision": "keep", "chosen": None, "by_candidate": decisions}
+    chosen = max(adopted, key=lambda c: layer_sigs[c]["mean"])
+    return {"decision": "adopt", "chosen": chosen, "by_candidate": decisions}
+
+
+def _buy_rank_ic(sells: dict, y: dict, by_ym: dict) -> dict:
+    """参考: 各売りのキーを買いの並びとして読んだ rank-IC（共通域・全社）。判定には使わない。"""
+    out = {}
+    for name, sell in sells.items():
+        o = oof_backtest({ym: [(sell[(ym, ec)], y[(ym, ec)]) for ec in ecs] for ym, ecs in by_ym.items()})
+        out[name] = {"mean": o["rank_ic"]["mean"], "n_periods": o.get("n_periods")}
+    return out
+
+
+def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, stamp: dict) -> dict:
+    """売り専用の候補を M-6 のレグと同じ入力で回し、主審 2 本の検定と判定を返す（#1152）。"""
+    import time
+
+    b, m6p, yms = m6_args
+    bases = run["bases"]
+    preds, y = common_to_dicts(run["common"], bases)
+    sells = {SELL_BASE: preds[SELL_BASE]}
+    diags: dict[str, dict] = {}
+    for name in SELL_CANDIDATES:
+        diag = make_diag()
+        t0 = time.time()
+        aligned, _ctx = macro_ensemble.plugin._m6_cv(
+            b, m6p, yms, fit_predict=sell_candidate_fit_predict(name, m6p, diag))
+        sells[name] = candidate_on_common(aligned, y, name)
+        diags[name] = {**summarize_diag(diag), "n_folds": len(diag.get("C") or []),
+                       "seconds": round(time.time() - t0, 1)}
+        print(f"[{name}] folds={diags[name]['n_folds']} C={diags[name].get('C')} "
+              f"l1_ratio={diags[name].get('l1_ratio')} n_nonzero={diags[name].get('n_nonzero')} "
+              f"convergence_warnings={diags[name].get('n_convergence_warnings')} ({diags[name]['seconds']}s)",
+              flush=True)
+
+    alpha = sell_alpha()
+    print(f"\n=== 売り専用の候補（#1152・事前登録 {stamp['prereg_path']}・Bonferroni alpha={alpha:g}）===",
+          flush=True)
+    print(f"注意: {M4_BASES_CAVEAT}", flush=True)
+
+    def _sigs(by_condition):
+        return {c: paired_ic_significance(by_condition[c]["by_period"], by_condition[SELL_BASE]["by_period"],
+                                          alpha=alpha)
+                for c in SELL_CANDIDATES}
+
+    layers: dict[str, dict] = {}
+    for buy_name in bases:
+        buy, ordering = buy_scores(buy_name, preds[buy_name], y, prices_by_co, db)
+        res = in_layer_short_side(buy, sells, y)
+        res["ordering"] = ordering
+        sig = _sigs(res["by_condition"])
+        res["sig"] = {f"{c}|{SELL_BASE}": v for c, v in sig.items()}
+        res["primary"] = buy_name == SELL_BUY_LAYER
+        _print_in_layer(buy_name, res)
+        layers[buy_name] = res
+    whole = whole_universe_short_side(run["common"], sells, y, run["base_oof"])
+    whole_sig = _sigs(whole["by_condition"])
+    whole["sig"] = {f"{c}|{SELL_BASE}": v for c, v in whole_sig.items()}
+    _print_whole(whole)
+
+    layer_sig = {c: layers[SELL_BUY_LAYER]["sig"][f"{c}|{SELL_BASE}"] for c in SELL_CANDIDATES}
+    decisions = {c: sell_dedicated_decision(layer_sig[c], whole_sig[c], alpha) for c in SELL_CANDIDATES}
+    decision = overall_sell_decision(decisions, layer_sig)
+    by_ym: dict[str, list] = {}
+    for ym, rows in run["common"].items():
+        by_ym[ym] = [ec for ec, _yh, _y in rows if (ym, ec) in y and all((ym, ec) in v for v in sells.values())]
+    buy_ic = _buy_rank_ic(sells, y, by_ym)
+    chosen = f"（{SHORT[decision['chosen']]}）" if decision["chosen"] else ""
+    print(f"\n=== 判定（prereg_decision）: {decision['decision']}{chosen} ===", flush=True)
+    for c, d in decisions.items():
+        print(f"  {SHORT[c]}: {d['decision']}（(a) 上位層 {SHORT[SELL_BUY_LAYER]} が有意に良い={d['in_layer_better']}・"
+              f"(b) 全社が有意に悪い={d['whole_universe_worse']}）", flush=True)
+    print("  参考（判定に使わない）: 買いの rank-IC "
+          + " / ".join(f"{SHORT[n]} {v['mean']:+.4f}" for n, v in buy_ic.items()), flush=True)
+    return {**stamp, "caveat": M4_BASES_CAVEAT, "alpha": alpha, "base": SELL_BASE,
+            "buy_layer": SELL_BUY_LAYER, "candidates": list(SELL_CANDIDATES), "diagnostics": diags,
+            "in_layer": layers, "whole_universe": whole, "buy_rank_ic_reference": buy_ic,
+            "n_common": run["n_common"], "prereg_decision": decision}
+
+
+def check_prereg_args(args) -> dict | None:
+    """`--sell-candidates` だけ事前登録を必須にして照合する（不一致は重い計算の前に exit 2）。"""
+    from scripts import prereg
+
+    if not args.sell_candidates:
+        if args.prereg or args.prereg_sha:
+            raise SystemExit("--prereg / --prereg-sha は --sell-candidates と一緒にしか使えません")
+        return None
+    if not (args.prereg and args.prereg_sha):
+        raise SystemExit("--sell-candidates には --prereg と --prereg-sha が要る（事前登録 #1152）")
+    if Path(args.prereg).as_posix() != SELL_PREREG:
+        raise SystemExit(f"--sell-candidates の事前登録は {SELL_PREREG}（受け取った値: {args.prereg}）")
+    return prereg.stamp_from_args(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m scripts.sell_mu_source_bakeoff",
                                  description="Issue #402 売り側 μ 出所の OOF 実測")
@@ -353,6 +528,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--refresh-cache", action="store_true", help="キャッシュを無視して再取得")
     ap.add_argument("--in-layer", action="store_true",
                     help="上位層の売り側spread（#1043）も出す。結果は scripts/.cache/sell_in_layer.json")
+    ap.add_argument("--sell-candidates", action="store_true",
+                    help="売り専用の候補を M-6 の μ̂ と比べる（#1152）。結果は scripts/.cache/sell_dedicated.json")
+    ap.add_argument("--prereg", help=f"事前登録文書（--sell-candidates で必須・{SELL_PREREG}）")
+    ap.add_argument("--prereg-sha", help="凍結値（本文の sha256・追記節に記録したもの）")
     return ap
 
 
@@ -366,14 +545,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             pass
 
     args = build_parser().parse_args(argv)
+    stamp = check_prereg_args(args)
     set_refresh(args.refresh_cache)
 
     panel = _load_panel(args)
     db = SessionLocal()
     try:
-        run = _run_config("M-4(3基底・rank_ic_grid)", BASES, panel, db,
-                          weight_method="rank_ic_grid", keep_common=args.in_layer)
+        m6_args: dict = {}
+        orig_m6_cv = macro_ensemble.plugin._m6_cv
+
+        def _spy_m6_cv(b, m6p, yms, fit_predict=None):
+            # M-6 のレグが受け取った入力を捕まえる（候補を同じパネル・月で回すため・#1152）
+            m6_args["args"] = (b, m6p, yms)
+            return orig_m6_cv(b, m6p, yms, fit_predict=fit_predict)
+
+        with patch.object(macro_ensemble.plugin, "_m6_cv", _spy_m6_cv):
+            run = _run_config("M-4(3基底・rank_ic_grid)", BASES, panel, db, weight_method="rank_ic_grid",
+                              keep_common=args.in_layer or args.sell_candidates)
         _report(run)
+        if args.sell_candidates:
+            if "args" not in m6_args:
+                raise RuntimeError("M-6 のレグの入力を捕まえられなかった（_m6_cv が呼ばれていない）")
+            payload = sell_dedicated_report(run, m6_args["args"], panel[0], db, stamp)
+            _OUT_SELL.parent.mkdir(parents=True, exist_ok=True)
+            _OUT_SELL.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\nwrote {_OUT_SELL}", flush=True)
         if args.in_layer:
             payload = in_layer_report(run, panel[0], db)
             _OUT_IN_LAYER.parent.mkdir(parents=True, exist_ok=True)
