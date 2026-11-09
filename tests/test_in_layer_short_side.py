@@ -124,7 +124,10 @@ class TestInLayerShortSide:
         res = in_layer_short_side(buy, {"s": y}, y)
         assert res["periods"]["2020-04"]["n_layer"] == 4
         assert res["by_condition"]["s"] == {"mean": None, "hit_rate": None, "n_periods": 0,
-                                            "by_period": {}}
+                                            "by_period": {},
+                                            "precision": None, "precision_by_period": {},
+                                            "mis_sell_loss": None, "mis_sell_loss_by_period": {},
+                                            "n_mis_sell_periods": 0}
 
     def test_constant_sell_key_in_the_layer_is_skipped(self):
         """層の中の売りのキーが全社同じ期は、社の順で値が決まるので外す（#977 と同じ）。"""
@@ -133,6 +136,59 @@ class TestInLayerShortSide:
         res = in_layer_short_side(_buy(), {"flat": flat, "s": y}, y)
         assert res["by_condition"]["flat"]["n_periods"] == 0
         assert res["by_condition"]["s"]["n_periods"] == 2
+
+
+class TestSellPrecision:
+    """売りの precision と誤売りの損（#1156・参考）。売った社＝層（E40〜E49）の中の下位 2 社。"""
+
+    def test_perfect_sell_has_full_precision_and_no_mis_sell(self):
+        y = _y(seed=3)
+        c = in_layer_short_side(_buy(), {"perfect": y}, y)["by_condition"]["perfect"]
+        assert c["precision"] == 1.0
+        assert c["precision_by_period"] == {ym: 1.0 for ym in YMS[1:]}
+        assert c["mis_sell_loss"] is None and c["mis_sell_loss_by_period"] == {}
+        assert c["n_mis_sell_periods"] == 0
+
+    def test_reverse_sell_misses_every_time_and_the_loss_is_the_excess_of_the_sold(self):
+        y = _y(seed=3)
+        c = in_layer_short_side(_buy(), {"reverse": {k: -v for k, v in y.items()}}, y)["by_condition"]["reverse"]
+        assert c["precision"] == 0.0
+        for ym in YMS[1:]:
+            layer_y = sorted(y[(ym, _ec(i))] for i in range(40, 50))
+            mean = sum(layer_y) / len(layer_y)
+            # 層の中で y が最も高い 2 社を売った＝どちらも外し、損は層の平均からの上振れの平均
+            assert c["mis_sell_loss_by_period"][ym] == pytest.approx(sum(v - mean for v in layer_y[-2:]) / 2)
+        assert c["n_mis_sell_periods"] == 2
+        assert c["mis_sell_loss"] > 0
+
+    def test_hand_computed_period_and_periods_without_a_miss(self):
+        """2020-04: 売った 2 社のうち 1 社が当たり（−0.3）・1 社が外れ（+0.5）。層の平均は 0.2/10 = 0.02。
+        2020-07: 層の y が全社 0 で、売った社は平均を下回りも上回りもしない＝precision 0・誤売りの期に数えない。
+        """
+        y = {(ym, _ec(i)): 0.0 for ym in YMS for i in range(N)}
+        y[("2020-04", _ec(40))] = -0.3
+        y[("2020-04", _ec(41))] = 0.5
+        sell = {(ym, _ec(i)): float(i) for ym in YMS for i in range(N)}   # E40・E41 が層の中で最も先に売られる
+        c = in_layer_short_side(_buy(), {"s": sell}, y)["by_condition"]["s"]
+        assert c["by_period"]["2020-04"] == pytest.approx(0.02 - 0.1)       # 既存の値は変わらない
+        assert c["precision_by_period"] == {"2020-04": 0.5, "2020-07": 0.0}
+        assert c["precision"] == 0.25
+        assert c["mis_sell_loss_by_period"] == {"2020-04": pytest.approx(0.48)}
+        assert c["mis_sell_loss"] == pytest.approx(0.48)
+        assert c["n_mis_sell_periods"] == 1
+
+    def test_reference_keys_do_not_move_the_spread(self):
+        """参考のキーを足しても、判定に使う by_period・mean・hit_rate は層の y から直に計算した値のまま。"""
+        y = _y(seed=11)
+        sell = _y(seed=12)
+        c = in_layer_short_side(_buy(), {"s": sell}, y)["by_condition"]["s"]
+        for ym in YMS[1:]:
+            members = [_ec(i) for i in range(40, 50)]
+            rows = sorted((sell[(ym, ec)], ec, y[(ym, ec)]) for ec in members)
+            expected = sum(r[2] for r in rows) / 10 - sum(r[2] for r in rows[:2]) / 2
+            assert c["by_period"][ym] == expected
+        assert set(c) == {"mean", "hit_rate", "n_periods", "by_period", "precision", "precision_by_period",
+                          "mis_sell_loss", "mis_sell_loss_by_period", "n_mis_sell_periods"}
 
 
 class TestDisplayParts:

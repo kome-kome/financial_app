@@ -280,11 +280,15 @@ def _print_in_layer(buy_name: str, res: dict) -> None:
           f"{'' if o['time_reproducible'] else '・R は未来情報込み'}）---", flush=True)
     print(f"  共通域 {res['n_common_rows']} 行 / 層のある期 {len(sizes)} / 層の社数 "
           f"{min(sizes) if sizes else 0}〜{max(sizes) if sizes else 0}", flush=True)
-    print(f"  {'売りの並び':<20}{'上位層spread':>13}{'当たり率':>10}{'期数':>6}", flush=True)
+    # precision・誤売りの損は参考（#1156・判定に使わない）
+    print(f"  {'売りの並び':<20}{'上位層spread':>13}{'当たり率':>10}{'期数':>6}"
+          f"{'precision':>11}{'誤売りの損':>11}", flush=True)
     for name, c in res["by_condition"].items():
         mean = f"{c['mean']:>13.4f}" if c["mean"] is not None else f"{'n/a':>13}"
         hit = f"{c['hit_rate']:>10.4f}" if c["hit_rate"] is not None else f"{'n/a':>10}"
-        print(f"  {SHORT[name]:<20}{mean}{hit}{c['n_periods']:>6}", flush=True)
+        prec = f"{c['precision']:>11.4f}" if c.get("precision") is not None else f"{'n/a':>11}"
+        loss = f"{c['mis_sell_loss']:>11.4f}" if c.get("mis_sell_loss") is not None else f"{'n/a':>11}"
+        print(f"  {SHORT[name]:<20}{mean}{hit}{c['n_periods']:>6}{prec}{loss}", flush=True)
     for key, sig in res["sig"].items():
         a, b = key.split("|")
         print(f"  {SHORT[a]} − {SHORT[b]:<18} {_fmt_sig(sig)}", flush=True)
