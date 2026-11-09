@@ -160,7 +160,7 @@ Issue は `/next-issue` が優先度順に回す（人は計画承認と人の�
   | 日中枠の暦（`run_daytime.SCHEDULE`） | `batch_freshness.PRODUCERS`（読み手は `Scheduled.produced` を共有） | `test_check_batch_freshness.py::TestScheduledCollectionIsWatched` |
   | 月次系のバッチ（`run_monthly*.py`） | `run_daytime.MONTHLY_BATCHES`（＋ `TRIGGER_DAY` / `TRIGGER_TIME`） | `test_run_daytime.py::TestMonthlyOverlap` |
   | 収集ルーター外の GET 以外のルート（書くなら `routers/collect.py` へ置く） | `api.WRITE_ROUTE_EXEMPTIONS`（`exempt:` 理由＝断面へ書かない根拠・#733） | `test_api_collect.py::TestWriteRouteRegistry` |
-  | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**） |
+  | スキル／エージェント | `docs/SKILLS_AND_AGENTS.md` へ1行（#575） | `test_docs_sync.py`（**`~/.claude/` は CI の checkout に無くローカル pytest でのみ照合**・クラウドのセッションも skip） |
   | 分析プラグイン・「この画面の見方」を持つ画面 | `templates/guide.html` の節（退役は「退役したモデル」の下）／`test_guide_links.HELP_LINKS` | `test_guide_links.py` |
   | `docs/MODELS.md` のモデル章 | `templates/models.html` の `#mN` 節（載せないなら `test_docs_sync.CHAPTERS_WITHOUT_A_SECTION` へ `exempt:` 理由） | `test_docs_sync.py::TestModelsPageTracksModelsDoc` |
 
