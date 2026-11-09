@@ -1973,18 +1973,23 @@ def _top_k_shares(yhats: list, desc: list, k: int) -> tuple[dict, dict]:
 
 
 def _top_k_period(ytrues: list, shares: dict, discounts: dict, gains: list, mean_y: float,
-                  k: int) -> tuple[float, float, float]:
-    """1 期の上位 k 社の (超過リターン, precision, NDCG)（#1041）。期の選別は呼び出し側が行う。
+                  k: int, base_rate: float) -> tuple[float, float, float, float, float | None]:
+    """1 期の上位 k 社の (超過リターン, precision, NDCG, 実現順位の平均, lift)（#1041・#1156）。
 
-    gains は y_true の期内順位を 0〜1 に正規化したもの（最下位 0・最上位 1）。理想の並び（gains の
-    降順）の DCG で割る。期内サンプルが 2 以上なら最上位の gain が正なので分母は 0 にならない。
+    期の選別は呼び出し側が行う。gains は y_true の期内順位を 0〜1 に正規化したもの（最下位 0・最上位 1）。
+    NDCG は理想の並び（gains の降順）の DCG で割る。期内サンプルが 2 以上なら最上位の gain が正なので
+    分母は 0 にならない。実現順位の平均は上位 k 枠の gains の平均（でたらめな並びで約 0.5）で、
+    1 社の大勝ちに引っ張られない。base_rate は期内で y_true が平均を上回った社の割合で、lift は
+    precision ÷ base_rate（全社同じ値で base_rate が 0 の期は None）。
     """
     top_mean = sum(w * ytrues[i] for i, w in shares.items()) / k
     precision = sum(w for i, w in shares.items() if ytrues[i] > mean_y) / k
     dcg = sum(d * gains[i] for i, d in discounts.items())
     ideal = sorted(gains, reverse=True)[:k]
     idcg = sum(g / math.log2(p + 2) for p, g in enumerate(ideal))
-    return top_mean - mean_y, precision, dcg / idcg
+    pct_rank = sum(w * gains[i] for i, w in shares.items()) / k
+    lift = precision / base_rate if base_rate > 0 else None
+    return top_mean - mean_y, precision, dcg / idcg, pct_rank, lift
 
 
 def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 0.0,
@@ -2039,6 +2044,12 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         top_k_excess_return_by_period[str(K)]（拒否権の対比較・#1044 が読む）。
       - precision: 上位 K 社のうち y_true が期内平均を上回った社の割合。
       - ndcg: gain＝y_true の期内順位を 0〜1 に正規化、割引 1/log2(順位+1) の NDCG@K。
+      - mean_pct_rank（#1156）: 上位 K 社の gain（y_true の期内順位 0〜1）の平均。でたらめな並びで
+        約 0.5・完全に当てて 1−(K−1)/(2(m−1))。1 社の大勝ちに引っ張られない。期別系列は
+        top_k_pct_rank_by_period[str(K)]。
+      - lift（#1156）: precision ÷ 期内の基準率（y_true が期内平均を上回った社の割合）を期ごとに出した
+        平均。値動きは右に裾が長く基準率が 0.5 より小さく期ごとに違うので、その違いをならす。
+        基準率が 0 の期（全社同じ値）は lift だけから外す。
     top_decile_rank_ic: yhat 上位 1/`TOP_DECILE_DIVISOR`（切り上げ・境目の同点は全部入れる）の中だけの
       Spearman の期間平均。3 社未満・無分散の期は外す（`_spearman`）。
     """
@@ -2229,20 +2240,26 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
             continue
         mean_y = sum(ytrues) / m
         gains = [(r - 1.0) / (m - 1) for r in _avg_ranks(ytrues)]
+        base_rate = sum(1 for y in ytrues if y > mean_y) / m
         for k in valid_k:
             shares, discounts = _top_k_shares(yhats, desc, k)
-            top_k_rows[k][ym] = _top_k_period(ytrues, shares, discounts, gains, mean_y, k)
+            top_k_rows[k][ym] = _top_k_period(ytrues, shares, discounts, gains, mean_y, k, base_rate)
     top_k: dict[str, dict] = {}
     top_k_excess_return_by_period: dict[str, dict] = {}
+    top_k_pct_rank_by_period: dict[str, dict] = {}
     for k, rows in top_k_rows.items():
         vals = list(rows.values())
+        lifts = [v[4] for v in vals if v[4] is not None]
         top_k[str(k)] = {
             "n_periods":     len(vals),
             "excess_return": round(statistics.mean(v[0] for v in vals), 6) if vals else None,
             "precision":     round(statistics.mean(v[1] for v in vals), 4) if vals else None,
             "ndcg":          round(statistics.mean(v[2] for v in vals), 4) if vals else None,
+            "mean_pct_rank": round(statistics.mean(v[3] for v in vals), 4) if vals else None,
+            "lift":          round(statistics.mean(lifts), 4) if lifts else None,
         }
         top_k_excess_return_by_period[str(k)] = {ym: round(v[0], 6) for ym, v in rows.items()}
+        top_k_pct_rank_by_period[str(k)] = {ym: round(v[3], 6) for ym, v in rows.items()}
 
     return {
         "n_quantiles":        n_quantiles,
@@ -2287,6 +2304,9 @@ def oof_backtest(residuals_by_ym: dict, n_quantiles: int = 5, cost_bps: float = 
         # 上位K社の参考指標（#1041・ADR-0069・判定には使わない）。キーは str(K)（JSON へ出しても同じ形）。
         "top_k":                         top_k,
         "top_k_excess_return_by_period": top_k_excess_return_by_period,
+        # 上位K社の実現順位の平均の期別系列（#1156）。外れ値に引っ張られない物差しで #1044 の
+        # K の規則をやり直す計測の入力。夜間の診断値には残さない（上の超過リターンの系列と同じ）。
+        "top_k_pct_rank_by_period":      top_k_pct_rank_by_period,
         "top_decile_rank_ic": {
             "mean": round(statistics.mean(top_decile_ics), 4) if top_decile_ics else None,
             "n":    len(top_decile_ics),
