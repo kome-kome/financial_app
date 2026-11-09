@@ -308,3 +308,216 @@ class TestCli:
     def test_bad_k_stops_before_loading(self, monkeypatch):
         monkeypatch.setattr(op, "_load_panel", lambda *_a, **_k: pytest.fail("読み込む前に止まる"))
         assert op.main(["--top-k", "2", "--sell-k", "3"]) == 2
+
+    def test_defaults_keep_one_path_and_no_bands(self):
+        args = op.build_parser().parse_args([])
+        assert args.start_shifts == (0,) and args.cost_bands_bps is None
+
+
+# ── #1167: 入替の利得・信頼区間・帯ごとのコスト・開始月をずらした経路（どれも参考）──────────────
+
+class TestSwapGain:
+    def test_hand_calculation_excludes_forced_and_the_first_purchase(self):
+        """TestReplayByHand の P2: 売った A（P2→P3 は 0.00）、買った D・E（+0.30・−0.10）。外した C は売った社に入れない。"""
+        iv1, iv2 = TestReplayByHand()._run()
+        assert iv1["swap_gain"] is None                              # 初回は買うだけ
+        assert iv2["swap_gain"] == pytest.approx((0.30 - 0.10) / 2 - 0.00)
+        s = op.summarize([iv1, iv2], 3)
+        assert s["swap_gain_mean"] == pytest.approx(0.10) and s["n_swaps"] == 1
+        assert s["swap_gain_ci"] is None                             # 1 回だけでは CI が出ない
+
+    def test_sign_follows_the_foresight(self):
+        periods, future, last, ret = TestSign._world(seed=2)
+        good = {**future, **last}
+        bad = {k: -v for k, v in good.items()}
+        assert op.summarize(op.replay(periods, good, good, ret, 5, 1, 0.0), 5)["swap_gain_mean"] > 0
+        assert op.summarize(op.replay(periods, bad, bad, ret, 5, 1, 0.0), 5)["swap_gain_mean"] < 0
+
+    def test_existing_keys_keep_their_values(self):
+        """足すのは新しいキーだけ。既定（帯なし）では帯のキーも出ない。"""
+        iv1, iv2 = TestReplayByHand()._run()
+        old = {"from", "to", "months", "holdings", "sold", "forced", "bought", "gross", "cost", "net", "bench",
+               "n_domain", "n_stopped", "n_missing"}
+        assert set(iv2) == old | {"swap_gain"}
+        assert iv2["net"] == pytest.approx((0.10 + 0.30 - 0.10) / 3 - 0.01 * 4 / 3)
+
+
+class TestConfidenceIntervals:
+    def test_excess_ci_is_the_bootstrap_of_net_minus_bench(self):
+        periods, future, last, ret = TestSign._world(seed=4)
+        scores = {**future, **last}
+        ivs = op.replay(periods, scores, scores, ret, 5, 1, 10.0)
+        s = op.summarize(ivs, 5)
+        assert s["excess_ci"] == op.bootstrap_mean_ci([iv["net"] - iv["bench"] for iv in ivs])
+        assert s["excess_ci"]["n"] == len(ivs)
+
+    def test_annual_ci_collapses_on_identical_intervals(self):
+        """どの区間も同じなら、どう抜き直しても年率の超過は同じ＝区間の幅は 0 で点推定に一致する。"""
+        iv = {"months": 3, "net": 0.03, "bench": 0.01}
+        ivs = [dict(iv) for _ in range(6)]
+        ci = op.annual_excess_ci(ivs)
+        point = (1.03 ** 4 - 1) - (1.01 ** 4 - 1)
+        assert ci["ci_lo"] == pytest.approx(point) and ci["ci_hi"] == pytest.approx(point)
+        assert op.annual_excess_ci(ivs[:1]) is None
+
+    def test_annual_ci_is_reproducible_and_ordered(self):
+        periods, future, last, ret = TestSign._world(seed=5)
+        scores = {**future, **last}
+        ivs = op.replay(periods, scores, scores, ret, 5, 1, 10.0)
+        a, b = op.annual_excess_ci(ivs), op.annual_excess_ci(ivs)
+        assert a == b and a["ci_lo"] <= a["ci_hi"]
+
+
+def _weeks(end: str, n: int) -> list:
+    """end（月曜）から n 週さかのぼった月曜の列。"""
+    from datetime import date, timedelta
+    d = date.fromisoformat(end)
+    return [d - timedelta(weeks=i) for i in range(n)]
+
+
+class TestCostBands:
+    def test_bands_are_tertiles_of_the_trailing_52_weeks(self):
+        weeks = _weeks("2020-03-30", 60)                 # 2020-03 の月末以前の 60 週
+        turnover = {f"E{i}": {w: float(i + 1) for w in weeks} for i in range(6)}
+        turnover["SHORT"] = {w: 1000.0 for w in weeks[:5]}   # 13 週に満たない社は帯を付けない
+        bands = op.turnover_bands(turnover, ["2020-03"])
+        assert [bands[("2020-03", f"E{i}")] for i in range(6)] == [0, 0, 1, 1, 2, 2]
+        assert ("2020-03", "SHORT") not in bands
+
+    def test_the_window_does_not_look_ahead_or_too_far_back(self):
+        """月末より後の週と、52 週より前の週は平均に入らない。"""
+        inside = _weeks("2020-03-30", 52)
+        future = _weeks("2020-05-25", 4)                 # 2020-03 の月末より後
+        old = _weeks("2019-01-28", 20)                   # 52 週より前
+        turnover = {
+            "A": {**{w: 1.0 for w in inside}, **{w: 1e9 for w in future + old}},
+            "B": {w: 2.0 for w in inside},
+            "C": {w: 3.0 for w in inside},
+        }
+        bands = op.turnover_bands(turnover, ["2020-03"])
+        assert bands[("2020-03", "A")] == 0              # 未来と古い週の大きな値に引っ張られない
+
+    def test_flat_band_costs_reproduce_the_flat_net(self):
+        ivs_flat = TestReplayByHand()._run(cost_bps=100.0)
+        cost = op.make_band_cost({}, (999.0, 999.0, 999.0), 100.0)   # 帯の無い社は一律
+        ivs = op.replay([P1, P2, P3], TestReplayByHand.BUY, TestReplayByHand.SELL,
+                        _table_ret(TestReplayByHand.RET), 3, 1, 100.0, cost)
+        for a, b in zip(ivs, ivs_flat):
+            assert a["cost_banded"] == pytest.approx(b["cost"]) and a["net_banded"] == pytest.approx(b["net"])
+            assert a["net"] == b["net"]                  # 既定の net は帯に左右されない
+        s = op.summarize(ivs, 3)
+        assert s["annual_net_banded"] == pytest.approx(s["annual_net"])
+
+    def test_costlier_band_lowers_only_the_banded_net(self):
+        bands = {(P2, "D"): 0, (P2, "E"): 2}             # P2 に買う D は売買代金の小さい帯
+        cheap = op.make_band_cost(bands, (10.0, 10.0, 10.0), 10.0)
+        dear = op.make_band_cost(bands, (500.0, 10.0, 10.0), 10.0)
+        args = ([P1, P2, P3], TestReplayByHand.BUY, TestReplayByHand.SELL, _table_ret(TestReplayByHand.RET), 3, 1, 10.0)
+        a, b = op.replay(*args, cheap), op.replay(*args, dear)
+        assert b[1]["net_banded"] == pytest.approx(a[1]["net_banded"] - (500.0 - 10.0) / 10_000 / 3)
+        assert b[0]["net_banded"] == a[0]["net_banded"]  # P1 の買いは帯の外＝一律
+        assert [iv["net"] for iv in a] == [iv["net"] for iv in b]
+
+
+class TestShiftedMinTrain:
+    YMS = _months(2015, 1, 40)
+
+    def _resid(self):
+        import plugins.macro_ensemble as m4
+        rng = random.Random(0)
+        samples = {ym: [([rng.random()], rng.gauss(0, 0.1)) for _ in range(10)] for ym in self.YMS}
+        _folds, resid = m4.walk_forward_cv_monthly(samples, ["x"], min_train_months=6, step_months=3,
+                                                   return_residuals=True, embargo_months=12)
+        return sorted(resid)
+
+    def test_the_grid_moves_by_the_shift(self):
+        base = self._resid()
+        assert base[0] == self.YMS[18]                    # min_train 6 + embargo 12
+        for shift in (1, 2):
+            with op.shifted_min_train(shift):
+                moved = self._resid()
+            assert moved[0] == self.YMS[18 + shift]
+            assert not set(moved) & set(base)             # 3 か月おきの格子が重ならない
+        assert self._resid() == base                      # 抜けたら元に戻る
+
+    def test_zero_shift_does_not_patch(self):
+        import plugins.macro_ensemble as m4
+        before = m4.walk_forward_cv_monthly
+        with op.shifted_min_train(0):
+            assert m4.walk_forward_cv_monthly is before
+
+    def test_a_call_without_the_keyword_stops(self):
+        import plugins.macro_ensemble as m4
+        with op.shifted_min_train(1), pytest.raises(RuntimeError, match="min_train_months"):
+            m4.walk_forward_cv_monthly({}, [])
+
+    def test_overlapping_paths_stop(self):
+        op.check_paths_disjoint({0: {"2020-01", "2020-04"}, 1: {"2020-02", "2020-05"}})
+        with pytest.raises(RuntimeError, match="重なる"):
+            op.check_paths_disjoint({0: {"2020-01", "2020-04"}, 2: {"2020-04"}})
+
+
+class TestPathsCli:
+    KEY = "measure:oof-replay-paths"
+    BASES = ["macro_risk_return", "macro_gbdt", "macro_enet"]
+
+    @pytest.mark.parametrize("bad", ["0,3", "1,1", "", "a", "-1"])
+    def test_bad_shifts_are_rejected(self, bad):
+        with pytest.raises(SystemExit):
+            op.build_parser().parse_args(["--start-shifts", bad])
+
+    @pytest.mark.parametrize("bad", ["30,15", "30,15,8,4", "30,-1,8", "x,1,2"])
+    def test_bad_band_costs_are_rejected(self, bad):
+        with pytest.raises(SystemExit):
+            op.build_parser().parse_args(["--cost-bands-bps", bad])
+
+    def test_job_runs_three_paths_alone_into_its_own_file(self):
+        job = rd.JOBS[self.KEY]
+        assert job.argv[1:3] == ("-m", "scripts.oof_portfolio_replay")
+        args = op.build_parser().parse_args(list(job.argv[3:]))
+        assert args.start_shifts == (0, 1, 2) and args.cost_bands_bps is None
+        assert args.out != str(op._OUT)                   # 1 本の運用再現の結果を上書きしない
+        assert job.parallel_sensitive is True
+        assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN
+
+    def test_main_writes_every_path_and_keeps_the_head_as_results(self, monkeypatch, tmp_path):
+        """M-4 は回さず、経路ごとに格子のずれた共通域を返す偽物で配線を確かめる（M-2 は選ばない＝本番の行なし）。"""
+        import plugins.macro_ensemble as m4
+        rng = random.Random(7)
+        grids = {0: ["2021-01", "2021-04", "2021-07"], 1: ["2021-02", "2021-05", "2021-08"],
+                 2: ["2021-03", "2021-06", "2021-09"]}
+
+        def fake_run_config(label, bases, panel, db, weight_method, keep_common):
+            shift = next((s for s in (1, 2) if label.endswith(f"+{s}か月")), 0)
+            patched = m4.walk_forward_cv_monthly is not op.walk_forward_cv_monthly
+            assert patched == (shift > 0), "ずらしの経路の M-4 だけが、包まれた walk-forward で回る"
+            common = {ym: [(f"E{i:02d}", (rng.random(), rng.random(), rng.random()), rng.gauss(0, 0.1))
+                           for i in range(8)] for ym in grids[shift]}
+            return {"common": common, "bases": bases}
+
+        class Book:
+            def __init__(self, _prices):
+                pass
+
+            def period_return(self, ec, ym0, ym1):
+                return 0.01, False
+
+        monkeypatch.setattr(op, "_load_panel", lambda args: ({}, {}, {}, {}))
+        monkeypatch.setattr(op, "SessionLocal", lambda: type("DB", (), {"close": lambda self: None})())
+        monkeypatch.setattr(op, "_run_config", fake_run_config)
+        monkeypatch.setattr(op, "buy_scores", lambda name, pred, y, prices_by_co, db: (
+            dict(pred), {"lambda": 0.0, "risk_axis": None, "time_reproducible": True, "n_dropped_rows": 0}))
+        monkeypatch.setattr(op, "PriceBook", Book)
+        out = tmp_path / "paths.json"
+        code = op.main(["--start-shifts", "0,1,2", "--models", "macro_risk_return", "macro_enet",
+                        "--top-k", "3", "--sell-k", "1", "--out", str(out)])
+        assert code == 0
+        import json
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert set(payload["paths"]) == {"0", "1", "2"}
+        assert payload["results"] == payload["paths"]["0"]["results"]
+        assert payload["paths"]["1"]["test_months"] == {"first": "2021-02", "last": "2021-08", "n": 3}
+        assert set(payload["path_summary"]) == {"macro_risk_return", "macro_enet"}
+        assert payload["path_summary"]["macro_enet"]["n_paths"] == 3
+        assert op.PATH_NOTE in payload["caveats"] and op.BAND_NOTE not in payload["caveats"]
+        assert payload["params"]["start_shifts"] == [0, 1, 2]
