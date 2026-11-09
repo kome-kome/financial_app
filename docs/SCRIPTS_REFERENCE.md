@@ -50,6 +50,7 @@
 | [`scripts/preset_weight_walkforward.py`](#scriptspreset_weight_walkforwardpy) | 検証（実験） |
 | [`scripts/sell_mu_source_bakeoff.py`](#scriptssell_mu_source_bakeoffpy) | 検証（実験） |
 | [`scripts/oof_portfolio_replay.py`](#scriptsoof_portfolio_replaypy) | 検証（計測） |
+| [`scripts/measure_label_audit.py`](#scriptsmeasure_label_auditpy) | 検証（計測） |
 | [`scripts/experiment_pooled_rhat.py`](#scriptsexperiment_pooled_rhatpy) | 検証（実験） |
 | [`scripts/bench_macro_beta.py`](#scriptsbench_macro_betapy) | 検証（計測） |
 | [`scripts/bench_macro_beta_report.py`](#scriptsbench_macro_beta_reportpy) | 検証（計測） |
@@ -288,6 +289,12 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 **OOF 運用再現**（#1045・親 #1040・ADR-0069 の参考）: `python -m scripts.oof_portfolio_replay [--models ...] [--sell-source macro_enet] [--top-k 10] [--sell-k 2] [--cost-bps 10] [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える運用を、`sell_mu_source_bakeoff --in-layer` と同じ M-4 の共通域の OOF（`_run_config(keep_common=True)`・`common_to_dicts`・買いの並び `buy_scores`）で test 期ごとに繰り返し、年率（コスト前・後）・最大下落・入替率・全社平均の年率・超過を出す。守ること: **出力と JSON に「過去の経路は 1 本しかなく、運とモデルの良さを区別できない。判定・ゲートには使わない」を残す**／**期間のリターンは 52 週先のラベル y を繋げず**、各社の月末の週の終値（`month_end_indices`）の比を test 期の間で取る（株価が途切れた社はその月末以前の最後の終値で手仕舞い＝楽観側・件数を出す）／名前は「OOF 運用再現」で `/api/backtest`・「模擬売買」と書かない。M-4 の基底が本番と設定が違うこと（#1058）も注意書きに出す。**M-2 の行の直後に本番の設定の行 `macro_gbdt:production`（表示 `M-2*`）を足す**（#1123・ADR-0070 決定 6）: 設定は `model_comparison._production_config`（比較画面と同じ射影）、単体の M-2 を本番の手続きのまま `tuning_dry_run`・`tuning_objective_only` の内側で回し、`oof_backtest` へ渡る予測と `meta_by_ym` を横取りする。**M-4 の基底に設定を渡す形にしない**（単調制約を読まず、早期打ち切りの検証も `rows`＝本番の M-2 にならない）。単体の M-2 は 3 か月おきの test 月の位置が共通域とずれる（M-1 の始まりが遅い）ので、**最初の学習期間だけを延ばして共通域の最初の test 月にそろえる**（`aligned_min_train`）。共通域の外の予測は落として `coverage` に数え、そろった期が 0・本番の設定が無い・回せないときは行を出さず理由を JSON の `production` に出す。行は `selection_optimism`（採点と同じ期間のデータで選んだ設定）。結果は既定 `scripts/.cache/oof_portfolio_replay.json`。日中枠（`measure:oof-replay`・並走に敏感）で単独に回す
 
 種別: 検証（計測） ／ 依存先: scripts/sell_mu_source_bakeoff.py、scripts/ensemble_base_bakeoff.py、plugins/macro_snapshots.py（`month_end_indices`）、model_comparison.py（`_production_config`） ／ テスト: tests/test_oof_portfolio_replay.py
+
+## `scripts/measure_label_audit.py`
+
+**採点の物差しの点検**（#1154・事前登録 `docs/prereg/label-audit.md`）: `python -m scripts.measure_label_audit --prereg docs/prereg/label-audit.md --prereg-sha <凍結値> [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。答え（52 週先の対数リターン）が配当を含まない影響と、52 週以内の上場廃止で答えが消える影響を測る。予測は `oof_portfolio_replay` と同じく M-4 の共通域の OOF（`_run_config(keep_common=True)`）と本番の設定の M-2（`production_predictions`・共通域の行だけ）で、**予測は変えず答えだけを差し替えて採点する**（`oof_backtest`・`in_layer_short_side`）。守ること: **答えは週次終値からパネルと同じ規則（`month_end_indices`・`HORIZON_WEEKS`）で引き直し、パネルの答えと 1 行でも食い違えば終了コード 3**／値上がりだけの採点の rank-IC と全社の売り側spread が M-4 の `base_oof` と食い違っても終了コード 3／配当込みの答えは `log((c_fut + D) / c_snap)` で、D は「スナップ日より後に期末を迎える最初の通期」の `dps ÷ (split_factor × split_dps_lag)`（VIEW の `div_yield` と同じ補正・期末日を基準日とみなす近似。行が無ければ見えていた通期で代用し件数を出す）／**消えた行は `build_snapshots(return_no_future=True)` で取り、特徴量の条件を書き写さない**（M-4 の M-2 / M-6 のレグの構築にだけ足す）。株価の日付で直近（数えない）・途中で終わった・週の欠けに分け、途中で終わった行を終値の形で TOB/MBO の疑い・倒産の疑い・不明に分ける（参考）。判定は事前登録の規則を `dividend_decision`・`delisting_decision` が機械的に `prereg_decision` へ出す（M-6 − M-2 の主審 2 本の判定か上位10社超過の差の符号が入れ替われば切り替えの Issue、途中で終わった行の割合が 1% を超えれば答えの作り直しの Issue）。`--prereg-sha` が合わなければ終了コード 2。結果は既定 `scripts/.cache/label_audit.json`。日中枠（`measure:label-audit`・並走に敏感）で単独に回す
+
+種別: 検証（計測） ／ 依存先: scripts/oof_portfolio_replay.py、scripts/sell_mu_source_bakeoff.py、scripts/ensemble_base_bakeoff.py、plugins/macro_snapshots.py（`build_snapshots(return_no_future=True)`）、scripts/prereg.py ／ テスト: tests/test_label_audit.py
 
 ## `scripts/experiment_pooled_rhat.py`
 

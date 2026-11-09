@@ -594,6 +594,22 @@ JOBS: dict[str, Job] = {
         measured_min=200.0,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
+    # 採点の物差しの点検（#1154）。答えが配当を含まない影響と、52 週以内の上場廃止で答えが消える影響を測る。
+    "measure:label-audit": Job(
+        name="label_audit",
+        argv=("{python}", "-m", "scripts.measure_label_audit",
+              "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/label-audit.md",
+              "--prereg-sha", "df41686fa8ee1b2e7abd503358a36cb5ffad917060878091b9db4b55164757ac"),
+        why="M-4 の共通域の M-1・M-2・M-6（参考に本番の設定の M-2）の OOF 予測を変えずに、答えだけを配当込み"
+            "（52 週先の終値＋年間配当）へ差し替えて採点し直し、M-6 − M-2 の判定が入れ替わるかを見る。あわせて、"
+            "特徴量はそろうのに 52 週先の株価が無いので消えた行の割合（閾値 1%）と理由を数える（#1154）。"
+            "凍結値が合わなければ exit 2、答えの照合が合わなければ exit 3。結果は scripts/.cache/label_audit.json。",
+        # 見積り: `measure:oof-replay`（M-4 1 回＋本番の設定の M-2 1 回・2026-11-06 の実測 14.1 分）＋配当の読み込みと
+        # 採点し直し（学習なし）＋余裕。**次の実走で差し替える。**
+        measured_min=20.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # OOF 運用再現（#1045・親 #1040・ADR-0069 の参考）。判定には使わない。
     "measure:oof-replay": Job(
         name="oof_portfolio_replay",
