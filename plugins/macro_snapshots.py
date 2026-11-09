@@ -91,6 +91,15 @@ FIN_BASE_OPTIONS = [
 ]
 DEFAULT_FIN_FEATURES = ["per", "pbr", "roe", "equity_ratio", "roa", "eps_growth"]
 
+# M-2 / M-6 の既定の財務特徴量から外す列（#1145）。財務特徴量が 1 つでも空欄の行は捨てるので、営業利益を
+# 開示しない社（IFRS の一部・#905）と減価償却費のタグを持たない社が、この 6 列のせいで学習と予測から外れていた。
+# 2026-11-09 の `momentum_gate --fin-drop`（共通域・8検定・α 0.00625）で外しても有意な悪化が無く、学習パネルは
+# 3,477 → 3,514 社に広がった（ユーザー判断で採用）。選択肢（FIN_BASE_OPTIONS）には残す。M-1 の既定は別。
+M2_M6_DROPPED_FIN_FEATURES = ("op_margin", "op_growth", "z_op_margin", "delta_op_margin",
+                              "z_op_margin_sec", "da_intensity")
+M2_M6_DEFAULT_FIN_FEATURES = [o["value"] for o in FIN_BASE_OPTIONS
+                              if o["value"] not in M2_M6_DROPPED_FIN_FEATURES]
+
 # `load_data` が financial_metrics VIEW から実際に引く列（Issue #459）。VIEW は 97 列あるが
 # 消費側（`_build_snapshots_impl` が唯一）が読むのはここだけで、ORM の全列ロードは本番実測
 # 22.5MB/回＝夜間バッチ 67.7MB の 33% を占めていた。`load_weekly_prices_chunked`（3列）・

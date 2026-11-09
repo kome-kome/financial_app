@@ -60,6 +60,7 @@ from .model_candidates import (
 )
 from .macro_snapshots import (
     FIN_BASE_OPTIONS,
+    M2_M6_DEFAULT_FIN_FEATURES,
     LABEL_HORIZON_MONTHS,
     MACRO_FEATURE_OPTIONS,
     PRICE_FEATURE_OPTIONS,
@@ -166,7 +167,7 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "type": "multiselect",
                 "label": "財務ベース特徴量",
                 "options": FIN_BASE_OPTIONS,
-                "default": [o["value"] for o in FIN_BASE_OPTIONS],
+                "default": list(M2_M6_DEFAULT_FIN_FEATURES),   # 営業利益系と減価償却を外す（#1145）
             },
             "use_macro": {
                 "type": "checkbox",

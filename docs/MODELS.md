@@ -1118,7 +1118,7 @@ M-1（§9）の**非線形兄弟**。同一の目的変数（52週先対数リ�
 
 M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO の事前選択なし（木の暗黙選択に委ねる）。
 
-- 財務ベース（`fin_features` multiselect）: M-1 と同一選択肢
+- 財務ベース（`fin_features` multiselect）: M-1 と同一選択肢。**既定は営業利益系 5 列と `da_intensity` を除いた全選択肢**（§11.3.4・#1145。M-6 も同じ）
 - マクロ（`macro_features` multiselect）: M-1 と同一選択肢（`use_macro=True/False` で制御）。**既定は M-2 が ON・M-1 が OFF**（#615。選択肢の顔ぶれは同じで、既定だけ割れている）
 - モメンタム（`use_momentum`、既定 OFF）: M-1 と同一。**M-2/M-6 で ON/OFF を honest OOF 実測した結果、共通 (ym,ec) 域では4検定すべて補正後 α を通らず符号も負のため既定 OFF を維持**（`python -m scripts.momentum_gate`・ADR-0045）。**窓（`momentum_window`）も 2026-09-04 に [3,6,12,18,24] を実測して棄却**——M-2 は共通域で全窓が基準以下、窓24 は **−0.0264（p=0.001）で有意に悪化**した（[ADR-0050](adr/0050-hyperparameter-search-must-align-populations.md)）
 - **価格行動系（`price_features` multiselect、既定 OFF・Issue #364）**: M-3（§13）と**共有**する銘柄固有の遅行特徴量（週次実現ボラ `px_rvol`・出来高z-score `px_volz`・52週高値乖離 `px_high52dev`・4週リバーサル `px_rev4w`）。定義の正本は `macro_snapshots.build_price_features`（M-2/M-3 共有）。実現ボラ・出来高z・リバーサルは**非線形/閾値効果が強く GBDT の得意領域**。各スナップショット `snap_idx` 時点の既知値（未来を覗かない・`px_high52dev` の52週 warmup 分は nan → XGBoost がネイティブ処理）を momentum の直後に追加する。**追加収集ゼロ・追加 Egress ゼロ**（`volume_sum` は `StockPriceWeekly` 由来で取得済）。px_* は全て無次元→木で単調不変・次元整合 OK。`use_momentum` と同様に**M-2 側でゲート**し M-1 の OLS 特徴を汚さない。**既定 OFF は保守設定**で、OOF 前後比較（rank-IC / long-short spread / hit-rate）と個別 ablation で有効性を確認してから DEFAULT_PRICE_FEATURES を既定化する（「検証→全選択化」パターン）。参考: Jegadeesh & Titman 1993。
@@ -1154,6 +1154,14 @@ M-1 から**交差項（`fin×macro`）を除いた**同一セット。BIC/LASSO
 - **単調性の制約（§11.4.1）の `per` の向きは +1 に反転する**（`_build_monotone_constraints`）。−1 のままだと「割安ほど将来リターンが低い」を木に強制する。根拠の計測（下）の M-2 は制約なしの候補で回したので、制約ありの本番の組み合わせは次の探索の周回で測り直される。
 - M-1 には掛けない。`financial_metrics` VIEW の `per` は変えない＝他の読み手には効かない（`PREPROCESS_VERSION` は上げない）。
 - **根拠**（2026-10-30・`momentum_gate --earnings-yield`・共通 (ym,ec) 域 51,156 行・19 期・Bonferroni α 0.0125・M-2 は種 5 個の平均）: 学習パネルは 174,900 行・3,346 社から 204,216 行・3,442 社に広がった。M-2 は rank-IC が +0.0133（95%CI [+0.0064, +0.0208]・p=0.003）で有意に改善、M-6 は rank-IC −0.0037（p=0.30）・short_side_spread +0.0002（p=0.93）で差なし（悪化の証拠なし）。両モデルとも採った（ユーザー判断・2026-10-31・数値は #950）。
+
+#### 11.3.4 営業利益系と減価償却の列を既定から外す（M-2/M-6 共有・#1145）
+
+財務特徴量が 1 つでも空欄の行は捨てる（上の厳格除外）ので、営業利益を開示しない会社（IFRS の一部・#905）と減価償却費のタグを持たない会社が、その列のせいで学習と予測から外れていた。M-2 と M-6 の `fin_features` の既定から、営業利益系 5 列（`op_margin`・`op_growth`・`z_op_margin`・`delta_op_margin`・`z_op_margin_sec`）と `da_intensity` を外した（正本は `macro_snapshots.M2_M6_DROPPED_FIN_FEATURES`）。
+
+- 外した列は空欄の判定にも使わないので、母集団が広がる。選択肢には残るので、画面で選べば従来どおり使える。
+- M-1 の既定（`DEFAULT_FIN_FEATURES`）は変えない。VIEW も変えない（`PREPROCESS_VERSION` は上げない）。
+- **根拠**（2026-11-09・`momentum_gate --fin-drop`・共通 (ym,ec) 域 60,214 行・19 期・8検定 Bonferroni α 0.00625・M-2 は種 5 個の平均）: 学習パネルは 206,241 行・3,477 社から 209,358 行・3,514 社に広がった。8 検定とも補正後 α を通らず、有意な悪化は無かった（M-2 rank-IC +0.0083・p=0.008／M-6 short_side_spread −0.0032・p=0.009 は 95%CI が負側に収まる悪化の傾向）。事前に置いた目安（どちらの指標も有意に悪化しない条件のうち社数が最も多いもの）で `drop_op_da` を採った（ユーザー判断・2026-11-09・数値は #1145）。
 
 ### 11.4 walk-forward CV と early_stopping
 
@@ -1793,7 +1801,8 @@ M-1 はマクロ込みだと BIC が財務列をほとんど選ばない点が M
 
 1. **スナップショット**: M-2 と同一（`build_snapshots(build_interactions=False, macro_nan_ok=True)`）。
    書類で「無い」と確かめた財務の空欄（無配の配当利回り・R&D の無い会社の R&D 集約度）を先に 0 で埋めるのも、
-   `per` を益利回り E/P へ置き換えるのも M-2 と同じ値を共有する（§11.3.2・§11.3.3・#983・#950）。
+   `per` を益利回り E/P へ置き換えるのも、営業利益系と `da_intensity` を既定の特徴量から外すのも M-2 と同じ値を共有する
+   （§11.3.2・§11.3.3・§11.3.4・#983・#950・#1145）。
 2. **前処理**（学習 fold 内でのみ fit）: 列平均で NaN 補完 → p1-p99 winsorize → zscore
    （`fit_feature_columns`）。y も winsorize→zscore し、予測は元スケールへ逆変換する。
 3. **学習**: `ElasticNetCV`。α と l1_ratio は**学習 fold 内の `TimeSeriesSplit`**（過去→直近の向き）で
