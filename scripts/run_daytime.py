@@ -610,6 +610,23 @@ JOBS: dict[str, Job] = {
         measured_min=20.0,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
+    # M-6 と本番の設定の M-2 を上位10社で公平に比べる（#1155）。12 月の探索の周回の反映後に単独で積む。
+    "measure:selection-optimism": Job(
+        name="selection_optimism",
+        argv=("{python}", "-m", "scripts.measure_selection_optimism",
+              "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/selection-optimism.md",
+              "--prereg-sha", "edf170dbde03ad5e2a3bdc501651c2ca4e80cb3a5647f89da2bd151f1f582603"),
+        why="本番の探索と同じ 150 候補を 1 つのパネルで回し、各 test 期で 12 か月前までに答えが出そろった期の成績だけで"
+            "本番と同じ規則（決勝候補 5 件×5 種・2 段の選び方）で設定を選び直した M-2 と、本番の設定の M-2（楽観込み）を、"
+            "M-6 と上位10社超過の対比較で比べる（#1155）。2 本・alpha 0.025。凍結値が合わなければ exit 2、150 件を"
+            "回し切れない・本番の設定が出せなければ exit 3。結果は scripts/.cache/selection_optimism.json。",
+        # 見積り: M-4 1 回（約 11 分）＋本番の設定の M-2（約 2 分）＋150 件（11/04 の探索の本体で 1 件約 2.0 分＝約 300 分）
+        # ＋決勝候補の和集合の種 4 巡（確かめ直す段で 1 回約 1.6 分。和集合 12 件なら約 80 分）。種の巡は締切で畳む。
+        # 窓を 1 件で使い切るので 2 件目は付かない。**次の実走で差し替える。**
+        measured_min=420.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # OOF 運用再現（#1045・親 #1040・ADR-0069 の参考）。判定には使わない。
     "measure:oof-replay": Job(
         name="oof_portfolio_replay",
