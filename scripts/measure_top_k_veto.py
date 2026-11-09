@@ -4,6 +4,17 @@
 期別系列について、平均・SE（定常ブートストラップ）・MDE を出し、**全モデルで MDE ≤ 0.5 × |平均| を
 満たす最小の K** を返す。該当が無ければ「該当なし」＝拒否権は導入せず参考のまま。
 
+## 系列（`--series`・#1156）
+
+- `excess`（既定）: 上位K社超過リターン（`top_k_excess_return_by_period`・#1041）。中心 0。事前登録は
+  `docs/prereg/top-k-veto.md`（#1044・2026-10-28 に実走済み）
+- `pct_rank`: 上位K社の実現順位の平均（`top_k_pct_rank_by_period`・#1159）。期内の全社の順位の平均が
+  ちょうど 0.5 なので中心 0.5、合否は MDE ≤ 0.5 × |平均 − 0.5|。外れ値の 1 社で動かない。事前登録は
+  `docs/prereg/top-k-veto-pct-rank.md`（#1156）
+
+系列ごとの「読むキー・中心・事前登録の Issue・出力先」は `SERIES` の 1 か所にまとめ、ここ以外へ書き写さない。
+**系列と事前登録の文書の Issue が食い違えば終了コード 2**（古い文書の凍結値で別の系列を測る事故を防ぐ）。
+
 ## 守ること
 
 - **`--prereg` と `--prereg-sha` を必須にし、本文の sha256 が凍結値と一致しなければ終了コード 2**
@@ -12,8 +23,8 @@
   K を選ぶと、効いているように見えるだけの規則になる・ADR-0045 / ADR-0050）。
 - **系列はモデル比較と同じ手続き（`model_comparison.run_comparison`・ADR-0041）から取る。** 各モデルに
   画面の並びの採点（`oof_backtest_display`・#1042）があればその系列、無ければ予想の採点
-  （`oof_backtest`）の `top_k_excess_return_by_period` を使う。λ>0 の M-1 / M-2 は②、λ=0 の M-6 は①に
-  なる——モデルごとの指定をここへ書き写さない（画面の既定が変わったら追随する）。
+  （`oof_backtest`）の系列を使う。λ>0 のモデルは②、λ=0 のモデルは①になる（2026-11-06 以降は M-1・M-2・
+  M-6 とも λ=0）——モデルごとの指定をここへ書き写さない（画面の既定が変わったら追随する）。
 - **1 モデルでも系列がそろわなければ K を決めずに止まる**（終了コード 3）。一部のモデルだけで
   「全モデルで満たす」を判定しない。
 - 日中キューで単独に回す（`measure:top-k-veto`・並走に敏感）。
@@ -24,11 +35,15 @@
 上位K社超過リターンの差を、期ごとに対にした定常ブートストラップ（`model_stats.paired_ic_significance`）で出し、
 JSON の `lambda_reference` に書く。**K を選ぶ規則には入れない**（事前登録の本文は変えない）。`lambda_risk` の
 既定を変えるかの判定の規則（主は K = 10・両側 α = 0.05）は #1040 のコメントで計測の前に固定した。
+その規則が上位K社超過リターンについてのものなので、`--series` によらず超過リターンで出す。2026-11-06 以降は
+M-1・M-2・M-6 とも λ=0 で画面の並びの採点が無く、空になる。
 
 終了コード: 0 = 完了（K が決まったか「該当なし」）/ 2 = 事前登録の不一致 / 3 = 入力がそろわない。
 
 実行:
     python -m scripts.measure_top_k_veto --prereg docs/prereg/top-k-veto.md --prereg-sha <凍結値>
+    python -m scripts.measure_top_k_veto --series pct_rank \
+        --prereg docs/prereg/top-k-veto-pct-rank.md --prereg-sha <凍結値>
     # モデル比較を回し直さず、`scripts.model_comparison_run --json` の出力から計算し直す:
     python -m scripts.measure_top_k_veto --prereg ... --prereg-sha ... --from-json <path>
 
@@ -42,6 +57,7 @@ import json
 import math
 import statistics
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import NormalDist
@@ -63,13 +79,31 @@ CANDIDATE_K = (5, 10, 30)
 ALPHA = 0.05
 POWER = 0.80
 PAIR_SE_FACTOR = math.sqrt(2.0)
-# 事前登録 §4 の判定: MDE ≤ MDE_RATIO × |系列の平均|。
+# 事前登録 §4 の判定: MDE ≤ MDE_RATIO × |系列の平均 − 中心|。
 MDE_RATIO = 0.5
 
 Z_ALPHA = NormalDist().inv_cdf(1.0 - ALPHA)
 Z_POWER = NormalDist().inv_cdf(POWER)
 
-DEFAULT_OUT = ROOT / "scripts" / ".cache" / "top_k_veto.json"
+
+@dataclass(frozen=True)
+class Series:
+    """規則に入れる期別系列（#1156）。"""
+    key: str            # oof_backtest の期別系列のキー（{str(K): {ym: 値}}）
+    center: float       # でたらめな並びのときの値。合否は |平均 − center| で測る
+    issue: int          # 事前登録の Issue 番号（文書の「事前登録の Issue」の行と照合する）
+    since: str          # その系列を出し始めた変更（古い結果を読んだときのエラー文）
+    out: Path
+
+
+SERIES = {
+    "excess": Series("top_k_excess_return_by_period", 0.0, 1044, "#1041",
+                     ROOT / "scripts" / ".cache" / "top_k_veto.json"),
+    # 上位K社の実現順位（期内 0〜1・`_avg_ranks` で同点は平均）の平均。期内の全社の平均がちょうど 0.5
+    "pct_rank": Series("top_k_pct_rank_by_period", 0.5, 1156, "#1159",
+                       ROOT / "scripts" / ".cache" / "top_k_veto_pct_rank.json"),
+}
+DEFAULT_SERIES = "excess"
 # λ の参考（#1040）の主の K。判定の規則は #1040 のコメントで固定（K = 5 / 30 は並べるだけ）
 LAMBDA_MAIN_K = 10
 EXIT_INPUT = 3
@@ -80,12 +114,16 @@ def mde(se: float) -> float:
     return (Z_ALPHA + Z_POWER) * PAIR_SE_FACTOR * se
 
 
-def judge_series(values: list[float]) -> dict:
-    """1 本の期別系列（時系列順）の平均・SE・MDE・合否。2 期未満は SE が無く不合格。"""
+def judge_series(values: list[float], center: float = 0.0) -> dict:
+    """1 本の期別系列（時系列順）の平均・SE・MDE・合否。2 期未満は SE が無く不合格。
+
+    合否は MDE ≤ 0.5 × |平均 − center|。center はでたらめな並びのときの値（超過リターンは 0、
+    実現順位の平均は 0.5）。SE は平行移動で変わらないので、MDE の式は系列によらない。
+    """
     mean = statistics.mean(values) if values else None
     se = bootstrap_mean_se(values)
     m = mde(se) if se is not None else None
-    passed = mean is not None and m is not None and m <= MDE_RATIO * abs(mean)
+    passed = mean is not None and m is not None and m <= MDE_RATIO * abs(mean - center)
     return {"n": len(values), "mean": mean, "se": se, "mde": m, "passed": passed}
 
 
@@ -103,20 +141,23 @@ def choose_k(table: dict[str, dict[int, dict]]) -> int | None:
     return None
 
 
-def series_of(entry: dict) -> tuple[str, dict]:
-    """モデル比較の 1 モデルから `(出どころ, top_k_excess_return_by_period)` を取る。
+def series_of(entry: dict, series: str = DEFAULT_SERIES) -> tuple[str, dict]:
+    """モデル比較の 1 モデルから `(出どころ, 期別系列 {str(K): {ym: 値}})` を取る。
 
     画面の並びの採点があればそれ（"display"）、無ければ予想の採点（"forecast"）。期別系列のキーが
-    無い（#1041 より前の結果）なら ValueError——空の系列として読むと黙って「該当なし」になる。
+    無い（その系列を出し始めた変更より前の結果）なら ValueError——空の系列として読むと黙って「該当なし」になる。
     """
+    spec = SERIES[series]
     display = entry.get("oof_backtest_display")
     source, oof = ("display", display) if display else ("forecast", entry.get("oof_backtest") or {})
-    if "top_k_excess_return_by_period" not in oof:
-        raise ValueError(f"{entry.get('name')}: {source} の採点に上位K社の期別系列が無い（#1041 より前の結果）")
-    return source, oof["top_k_excess_return_by_period"]
+    if spec.key not in oof:
+        raise ValueError(f"{entry.get('name')}: {source} の採点に上位K社の期別系列が無い"
+                         f"（{spec.key}・{spec.since} より前の結果）")
+    return source, oof[spec.key]
 
 
-def build_table(models: list[dict]) -> tuple[dict[str, dict[int, dict]], dict[str, str]]:
+def build_table(models: list[dict], series: str = DEFAULT_SERIES,
+                ) -> tuple[dict[str, dict[int, dict]], dict[str, str]]:
     """モデル比較の `models` から `(table, sources)` を作る。対象のモデルが欠けていれば ValueError。
 
     事前登録の規則はスキーマ既定の行だけで判定する（本番の設定の行は選択の楽観を含む・#1115）。同じ名前の
@@ -129,11 +170,12 @@ def build_table(models: list[dict]) -> tuple[dict[str, dict[int, dict]], dict[st
         raise ValueError(f"対象のモデルが実行できていない: {detail}")
     table: dict[str, dict[int, dict]] = {}
     sources: dict[str, str] = {}
+    center = SERIES[series].center
     for name in MODELS:
-        source, by_k = series_of(by_name[name])
+        source, by_k = series_of(by_name[name], series)
         sources[name] = source
         table[name] = {
-            k: judge_series([v for _ym, v in sorted((by_k.get(str(k)) or {}).items())])
+            k: judge_series([v for _ym, v in sorted((by_k.get(str(k)) or {}).items())], center)
             for k in CANDIDATE_K
         }
     return table, sources
@@ -201,11 +243,13 @@ def _fmt(v, digits: int = 4) -> str:
     return "-" if v is None else f"{v:.{digits}f}"
 
 
-def _print_table(table: dict, sources: dict, chosen: int | None) -> None:
-    print("model  source    K   n   mean      SE        MDE       0.5|mean|  pass")
+def _print_table(table: dict, sources: dict, chosen: int | None, series: str = DEFAULT_SERIES) -> None:
+    center = SERIES[series].center
+    print(f"series: {series} ({SERIES[series].key}, center {center:g})")
+    print("model  source    K   n   mean      SE        MDE       0.5|m-c|   pass")
     for name, rows in table.items():
         for k, r in rows.items():
-            half = None if r["mean"] is None else MDE_RATIO * abs(r["mean"])
+            half = None if r["mean"] is None else MDE_RATIO * abs(r["mean"] - center)
             print(f"{MODEL_SHORT[name]:<6} {sources[name]:<9} {k:<3} {r['n']:<3} "
                   f"{_fmt(r['mean']):>8}  {_fmt(r['se']):>8}  {_fmt(r['mde']):>8}  {_fmt(half):>9}  "
                   f"{'yes' if r['passed'] else 'no'}")
@@ -217,13 +261,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="python -m scripts.measure_top_k_veto",
         description="拒否権に使う K を事前登録の規則で決める（各モデルの系列のぶれだけを見る）")
     prereg.add_arguments(ap)
+    ap.add_argument("--series", choices=sorted(SERIES), default=DEFAULT_SERIES,
+                    help="規則に入れる期別系列（excess=上位K社超過リターン・#1044 / pct_rank=実現順位の平均・#1156）")
     ap.add_argument("--from-json", help="scripts.model_comparison_run --json の出力を読む（モデル比較を回さない）")
-    ap.add_argument("--out", default=str(DEFAULT_OUT), help="結果の JSON")
+    ap.add_argument("--out", default=None, help="結果の JSON（既定は系列ごと: top_k_veto.json / top_k_veto_pct_rank.json）")
     args = ap.parse_args(argv)
+    spec = SERIES[args.series]
 
     from collector_utils import force_utf8_stdout
     force_utf8_stdout()
     stamp = prereg.stamp_from_args(args)
+    # 系列と事前登録の文書の取り違え（古い文書の凍結値で別の系列を測る）を、重い計算の前に止める
+    if not stamp["prereg_issue"].endswith(f"/issues/{spec.issue}"):
+        print(f"[top_k_veto] NG: --series {args.series} の事前登録は #{spec.issue} だが、文書は "
+              f"{stamp['prereg_issue']} を指す", file=sys.stderr)
+        return prereg.EXIT_MISMATCH
 
     from plugins.macro_snapshots import TOP_K_REFERENCE
     if not set(CANDIDATE_K) <= set(TOP_K_REFERENCE):
@@ -236,12 +288,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         models = _run_comparison()
     try:
-        table, sources = build_table(models)
+        table, sources = build_table(models, args.series)
     except ValueError as e:
         print(f"[top_k_veto] NG: {e}", file=sys.stderr)
         return EXIT_INPUT
     chosen = choose_k(table)
-    _print_table(table, sources, chosen)
+    _print_table(table, sources, chosen, args.series)
+    # λ の参考は #1040 で上位K社超過リターンについて固定した規則なので、系列によらず超過リターンで出す
     lam = lambda_reference(models)
     _print_lambda(lam)
 
@@ -249,7 +302,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         **stamp,
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "input": args.from_json or "model_comparison.run_comparison",
-        "rule": {"models": list(MODELS), "candidate_k": list(CANDIDATE_K), "alpha_one_sided": ALPHA,
+        "rule": {"series": args.series, "series_key": spec.key, "center": spec.center,
+                 "models": list(MODELS), "candidate_k": list(CANDIDATE_K), "alpha_one_sided": ALPHA,
                  "power": POWER, "pair_se_factor": PAIR_SE_FACTOR, "mde_ratio": MDE_RATIO},
         "sources": sources,
         "table": {name: {str(k): r for k, r in rows.items()} for name, rows in table.items()},
@@ -259,7 +313,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              # 本番の設定の行（#1115）: 採点と同じ期で選んだ設定＝選択の楽観を含む
                              "selection_optimism": [k for k in lam if ":" in k]},
     }
-    out = Path(args.out)
+    out = Path(args.out) if args.out else spec.out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {out}")

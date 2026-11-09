@@ -563,6 +563,21 @@ JOBS: dict[str, Job] = {
         # 書き込みが入ると同じ入力にならず、K の判定そのものが変わりうる（他の計測ゲートと同じ扱い）。
         parallel_sensitive=True,
     ),
+    # 同じ規則を上位K社の実現順位の平均で測り直す（#1156）。凍結値は追記節の値（テストが照合する）。
+    "measure:top-k-veto-pct-rank": Job(
+        name="measure_top_k_veto_pct_rank",
+        argv=("{python}", "-m", "scripts.measure_top_k_veto", "--series", "pct_rank",
+              "--prereg", "docs/prereg/top-k-veto-pct-rank.md",
+              "--prereg-sha", "c0ead344e90ead92bd9d9ac6bf9e00ca033ec99fab65d88668a9c8703c7d01a2"),
+        why="拒否権に使う K を、外れ値に引っ張られない上位K社の実現順位の平均（期内 0〜1 の順位の平均・"
+            "でたらめなら 0.5）の期別系列で測り直す（#1156）。規則は #1044 と同じ形で、全モデル（M-1・M-2・M-6）で "
+            "MDE ≤ 0.5×|平均 − 0.5| を満たす最小の K。凍結値か Issue が合わなければ exit 2。結果は "
+            "scripts/.cache/top_k_veto_pct_rank.json で、事前登録の追記節へ書き写す。",
+        # 見積り: 同じ手続きの `measure:top-k-veto` の 2026-11-06 の実測 8.3 分（M-2 の本番の設定の行込み）＋余裕。
+        # **次の実走で差し替える。**
+        measured_min=10.0,
+        parallel_sensitive=True,   # `measure:top-k-veto` と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # 上位層の売り側spread（#1043・親 #1040・ADR-0069 の決定 4）。売りにも拒否権を置くかの材料（参考）。
     "measure:in-layer-sell": Job(
         name="sell_in_layer",
