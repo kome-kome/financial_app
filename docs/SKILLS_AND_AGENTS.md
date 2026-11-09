@@ -26,7 +26,7 @@ Claude Code で使える **スキル（Skill）** と **エージェント（Age
 
 > **凡例**: 末尾 † のコマンドは現在この環境に未収録（呼び出しても動かない）。利用するには別途セットアップが必要。それ以外は組み込みコマンド、または `.claude/skills/`・`~/.claude/{skills,commands}` に収録済み。
 >
-> **この表は `tests/test_docs_sync.py` が実体と照合する**（#575）。リポジトリ内 `.claude/` は CI で、ユーザーレベル `~/.claude/` はローカルの pytest でのみ縛られる（CI の checkout に `~/.claude/` は無い）。スキル・エージェントを足したらこの表にも1行足すこと。
+> **この表は `tests/test_docs_sync.py` が実体と照合する**（#575）。リポジトリ内 `.claude/` は CI で、ユーザーレベル `~/.claude/` はローカルの pytest でのみ縛られる（CI の checkout に `~/.claude/` は無い。Claude Code のクラウドのセッションも、`~/.claude/skills` は在るが個人スキルが無いので skip する）。スキル・エージェントを足したらこの表にも1行足すこと。
 
 ### 🛠 コード品質チェック
 

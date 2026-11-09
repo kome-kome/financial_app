@@ -176,6 +176,14 @@ AGENT_IN_CELL_RE = re.compile(r"\*\*([A-Za-z][A-Za-z0-9_-]*)\*\*")
 
 USER_CLAUDE_HOME_ENV = "FINAPP_TEST_CLAUDE_HOME"
 
+# Claude Code のクラウドの作業環境（claude.ai/code）が設定する環境変数。
+# そこにも `~/.claude/skills/` は在るが、中身は同期された組み込みだけで利用者の個人スキル
+# （`next-issue` など）は無いので、照合すると変更と無関係に毎回落ちる。ローカルの CLI には無い。
+CLOUD_SESSION_ENV_MARKERS = (
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE",
+)
+
 # 組み込み／プラグイン由来でディスクに実体を持たないもの。
 # **「呼べることを人が確認した印」**であって、在否を証明できないものの掃きだめではない。
 # 2026-09-01 に、セッションが提示するスキル一覧へ実際に載っていることを確認して並べた。
@@ -278,7 +286,24 @@ def user_claude_dir() -> Path:
     return Path(override) if override else Path.home() / ".claude"
 
 
+def cloud_session_marker() -> str | None:
+    """Claude Code のクラウドの作業環境（claude.ai/code）なら、その印の環境変数名を返す。
+
+    値は使わず、在るかだけを見る。
+    """
+    return next((name for name in CLOUD_SESSION_ENV_MARKERS if name in os.environ), None)
+
+
 def require_user_claude_dir() -> Path:
+    # 差し替えは明示の指示なので、クラウドでも最優先で効かせる（skip 判定の前に見る）
+    if os.environ.get(USER_CLAUDE_HOME_ENV) is None:
+        marker = cloud_session_marker()
+        if marker:
+            pytest.skip(
+                f"Claude Code のクラウドの作業環境（{marker} が在る）。"
+                "~/.claude/skills はあっても利用者の個人スキルが無いので照合できない"
+                "（この層を照合できるのはローカルの pytest だけ）"
+            )
     base = user_claude_dir()
     if not (base / "skills").is_dir():
         pytest.skip(
@@ -342,7 +367,8 @@ class TestUserLevelMatchesIndex:
     索引はユーザーレベルの実体も案内している（genshijin 系・`security-auditor` など）ため、
     ここを照合しないと #575 の実害の主軸——「`/genshijin` は常時 ON なのに索引には英語版
     `/caveman` しか無く実運用と真逆の案内だった」——を拾えない。CI の checkout には
-    `~/.claude/` が無いので、この層はローカルの pytest でしか走らない。
+    `~/.claude/` が無いので、この層はローカルの pytest でしか走らない。Claude Code の
+    クラウドの作業環境（claude.ai/code）も、`~/.claude/skills` は在るが個人スキルが無いので skip する。
     """
 
     def test_user_entities_are_indexed(self):
@@ -404,6 +430,7 @@ class TestUserLevelGuard:
 
     skip 条件が事故で常時成立していても「緑」に見えるだけなので、ここが無いと
     `TestUserLevelMatchesIndex` が黙って空振りし続けても誰も気づけない。
+    クラウドの印での skip がローカルにまで及ぶと唯一の砦が消えるので、その逆側も縛る。
     """
 
     def test_guard_skips_when_user_level_is_absent(self, monkeypatch, tmp_path):
@@ -415,6 +442,38 @@ class TestUserLevelGuard:
         (tmp_path / "skills").mkdir()
         monkeypatch.setenv(USER_CLAUDE_HOME_ENV, str(tmp_path))
         assert require_user_claude_dir() == tmp_path
+
+    @staticmethod
+    def _home_with_user_skills(monkeypatch, tmp_path) -> Path:
+        """`~/.claude/skills` が在るホームを作り、差し替えとクラウドの印を消す（＝ローカル相当）。"""
+        (tmp_path / ".claude" / "skills").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv(USER_CLAUDE_HOME_ENV, raising=False)
+        for name in CLOUD_SESSION_ENV_MARKERS:
+            monkeypatch.delenv(name, raising=False)
+        return tmp_path / ".claude"
+
+    def test_guard_runs_locally_when_home_has_skills(self, monkeypatch, tmp_path):
+        """ローカル（クラウドの印が無い）では今までどおり照合が走る。ここで skip されると砦が消える。"""
+        expected = self._home_with_user_skills(monkeypatch, tmp_path)
+        assert require_user_claude_dir() == expected
+
+    @pytest.mark.parametrize("marker", CLOUD_SESSION_ENV_MARKERS)
+    def test_guard_skips_in_cloud_session_even_if_skills_dir_exists(self, monkeypatch, tmp_path, marker):
+        """クラウドには `~/.claude/skills` が在っても個人スキルが無いので skip する（値は見ない）。"""
+        self._home_with_user_skills(monkeypatch, tmp_path)
+        monkeypatch.setenv(marker, "")
+        with pytest.raises(pytest.skip.Exception, match="クラウド"):
+            require_user_claude_dir()
+
+    def test_override_still_wins_in_cloud_session(self, monkeypatch, tmp_path):
+        """差し替え（`FINAPP_TEST_CLAUDE_HOME`）は明示の指示なので、クラウドでも効く。"""
+        self._home_with_user_skills(monkeypatch, tmp_path)
+        override = tmp_path / "override"
+        (override / "skills").mkdir(parents=True)
+        monkeypatch.setenv(CLOUD_SESSION_ENV_MARKERS[0], "session_x")
+        monkeypatch.setenv(USER_CLAUDE_HOME_ENV, str(override))
+        assert require_user_claude_dir() == override
 
     def test_disk_scanners_are_empty_for_a_bare_dir(self, tmp_path):
         """走査対象が無いディレクトリで例外を出さず空を返すこと（CI 相当の経路）。"""
