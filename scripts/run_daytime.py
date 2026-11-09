@@ -655,6 +655,19 @@ JOBS: dict[str, Job] = {
         # 読み込みの途中に夜間の書き込みが入ると同じ入力にならず、保有の顔ぶれそのものが変わる。
         parallel_sensitive=True,
     ),
+    # 同じ運用再現を開始月を 0・1・2 か月ずらした 3 本の経路で回す（#1167・親 #1156・参考）。
+    "measure:oof-replay-paths": Job(
+        name="oof_portfolio_replay_paths",
+        argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache",
+              "--start-shifts", "0,1,2", "--out", "scripts/.cache/oof_portfolio_replay_paths.json"),
+        why="OOF 運用再現を、M-4 の基底の最初の学習期間を 0・1・2 か月延ばして test 月の格子をずらした 3 本の経路で回し、"
+            "経路の間の年率の超過のばらつき（開始月の運の大きさ）・区間の超過と入替の利得の 95%CI を出す（#1167・#1156）。"
+            "同じ歴史の別の切り方で独立な標本ではない＝参考。結果は scripts/.cache/oof_portfolio_replay_paths.json。",
+        # 見積り: `measure:oof-replay` の 2026-11-06 の実測 14.1 分（M-4 1 回＋本番の設定の M-2 1 回）× 3 経路＋余裕。
+        # **次の実走で差し替える。**
+        measured_min=45.0,
+        parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。

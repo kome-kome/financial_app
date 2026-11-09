@@ -41,9 +41,28 @@
 
 日中枠 `measure:oof-replay`（並走に敏感）で単独に回す。結果は `scripts/.cache/oof_portfolio_replay.json`。
 
+## 経路のずらし・信頼区間・入替の利得・帯ごとのコスト（#1167・親 #1156・どれも参考）
+
+- **開始月をずらした経路**（`--start-shifts 0,1,2`・既定は `0`＝今までの 1 本）: test 月は 3 か月おきの格子なので、
+  先頭の期を削っても同じ格子のままで別の経路にならない。M-4 の基底の walk-forward の最初の学習期間だけを +s か月
+  （`shifted_min_train`・`plugins.macro_ensemble.walk_forward_cv_monthly` を計測の中でだけ包む＝本番のコードは変えない）
+  して M-4 を回し直し、格子を s か月ずらした経路を作る。経路どうしの test 月は重ならない（重なれば止める）。
+  本番の設定の M-2* は `production_predictions` が経路ごとの test 月へそろえる。`results` は先頭の経路のまま
+  （既定の出力は変わらない）で、2 本以上なら `paths`（経路ごと）と `path_summary`（経路間の超過の平均・最小・最大）を足す。
+  **同じ歴史の別の切り方で、独立な標本ではない**（`PATH_NOTE`）
+- **信頼区間**: 区間ごとの「純リターン − 全社平均」の平均に `model_stats.bootstrap_mean_ci`（定常ブートストラップ・
+  期の並びの相関を保つ）で `excess_ci`。年率の区間（`annual_excess_ci`）は区間を同じ方法で抜き直して年率に畳む
+- **入替の利得**（`swap_gain`）: 2 回目以降の入れ替えごとに「買った社 − 売った社」の次の区間のリターンの平均の差。
+  予測が切れて外した社（`forced`）は売った社に入れない。要約に平均（`swap_gain_mean`）と `swap_gain_ci`
+- **売買代金の帯ごとのコスト**（`--cost-bands-bps 低,中,高`・既定は無効）: 各期の月末以前の直近 52 週の売買代金の平均
+  （`TURNOVER_WEEKS`・13 週未満は帯を付けず一律のコスト）で社を三分位に分け（0＝売買代金が小さい）、帯ごとの片道コストで
+  引いた `net_banded` と `annual_net_banded` を並べる。売買代金は `measure_index_event.load_turnover` で絞って読む
+  （週次ローダへ列を足さない）。**コストを判定へ組み込まない**（ADR-0069 の決定 5）
+
 実行:
     python -m scripts.oof_portfolio_replay                      # 既定 K=10・k=2・10bp
     python -m scripts.oof_portfolio_replay --top-k 30 --sell-k 6 --cost-bps 20
+    python -m scripts.oof_portfolio_replay --start-shifts 0,1,2 --cost-bands-bps 30,15,8
     python -m scripts.oof_portfolio_replay --smoke --allow-full-pull   # 間引きパネルで動作確認
 """
 from __future__ import annotations
@@ -53,8 +72,11 @@ import bisect
 import json
 import math
 import os
+import random
 import statistics
 import sys
+from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 from unittest.mock import patch
@@ -63,6 +85,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database import SessionLocal, tuning_dry_run, tuning_objective_only  # noqa: E402
 from model_comparison import VARIANT_PRODUCTION, _production_config, _safe_rollback  # noqa: E402
+from model_stats import (  # noqa: E402
+    DEFAULT_AVG_BLOCK, DEFAULT_N_BOOT, DEFAULT_SEED, _percentile, _stationary_bootstrap_sample, bootstrap_mean_ci,
+)
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import _month_end_bound, month_end_indices, oof_backtest  # noqa: E402
 from plugins.utils import coerce_params, walk_forward_cv_monthly  # noqa: E402
@@ -79,11 +104,22 @@ _OUT = Path(__file__).resolve().parent / ".cache" / "oof_portfolio_replay.json"
 DEFAULT_TOP_K = 10
 DEFAULT_SELL_K = 2
 DEFAULT_COST_BPS = 10.0
+# 開始月のずらし（#1167）。test 月の格子の刻み（M-4 の基底の `step_months=3`）より小さいずらしだけが別の格子になる
+DEFAULT_START_SHIFTS = (0,)
+MAX_START_SHIFT = 2
+# 売買代金の帯（#1167・参考）: 直近 52 週の平均で三分位。13 週（四半期）未満しか無い社は帯を付けず一律のコスト
+TURNOVER_WEEKS = 52
+MIN_TURNOVER_WEEKS = 13
+N_COST_BANDS = 3
 
 DISCLAIMER = ("過去の経路は 1 本しかなく、運とモデルの良さを区別できない。参考で、判定・ゲートには使わない"
               "（ADR-0069）")
 DELIST_NOTE = ("株価が途切れた保有は、その月末以前の最後の終値で手仕舞ったとみなす（最後の取引より後の損失は"
                "捉えない＝成績は楽観側にずれる）")
+PATH_NOTE = ("開始月をずらした経路は、同じ歴史を別の 3 か月おきの格子で切ったもので、独立な標本ではない。経路の間の"
+             "ばらつきは開始月の運の大きさの目安（参考・#1167）")
+BAND_NOTE = ("帯ごとのコストは、各期の月末以前の直近 52 週の売買代金の三分位（0＝小さい）ごとに片道コストを変えた参考の"
+             "想定（実測ではない）。判定には使わない（ADR-0069 の決定 5・#1167）")
 
 # 本番の設定の行（#1123）。鍵は比較画面・λ の参考と同じ `<name>:production`（model_comparison.VARIANT_PRODUCTION）
 PRODUCTION_MODEL = "macro_gbdt"
@@ -147,13 +183,19 @@ def months_between(ym0: str, ym1: str) -> int:
 
 def replay(periods: list[str], buy: dict, sell: dict,
            ret: Callable[[str, str, str], tuple[float | None, bool]],
-           top_k: int, sell_k: int, cost_bps: float) -> list[dict]:
+           top_k: int, sell_k: int, cost_bps: float,
+           band_cost: Callable[[str, str], float] | None = None) -> list[dict]:
     """入れ替えを periods の順に繰り返し、区間ごとの明細を返す。
 
     buy = {(ym, 社): 買いのスコア}（高いほど買う）、sell = {(ym, 社): 売りのキー}（低いほど先に売る）。
     その期に予測がある社＝両方がそろう社。ret(社, ym0, ym1) は `(リターン, 途切れたか)`。
     区間 i は periods[i] で組んだ保有を periods[i+1] まで持った結果。最後の期では入れ替えない。
     同点は社の順で決める（入力の順に依らない）。
+
+    参考（#1167）: `swap_gain` は 2 回目以降の入れ替えで「買った社 − 売った社」の、この区間のリターンの平均の差
+    （どちらかの社のリターンが 1 つも取れない区間と初回は None）。予測が切れて外した社（`forced`）は売った社に
+    入れない。`band_cost(ym, 社)` を渡すと、売った・外した・買った社ごとの片道コスト（bp）で引いた
+    `cost_banded`・`net_banded` を足す（既定の `cost`・`net` は変えない）。
     """
     by_ym: dict[str, set] = {}
     for ym, ec in buy.keys() & sell.keys():
@@ -184,13 +226,20 @@ def replay(periods: list[str], buy: dict, sell: dict,
             stopped += stale
         bench = [r for r, _s in (ret(ec, ym, nxt) for ec in sorted(domain)) if r is not None]
         gross = statistics.mean(rets) if rets else 0.0
-        intervals.append({
+        sold_r = [r for r, _s in (ret(ec, ym, nxt) for ec in sold) if r is not None]
+        bought_r = [r for r, _s in (ret(ec, ym, nxt) for ec in bought) if r is not None]
+        row = {
             "from": ym, "to": nxt, "months": months_between(ym, nxt),
             "holdings": holdings, "sold": sold, "forced": forced, "bought": bought,
             "gross": gross, "cost": cost, "net": gross - cost,
             "bench": statistics.mean(bench) if bench else 0.0,
             "n_domain": len(domain), "n_stopped": stopped, "n_missing": missing,
-        })
+            "swap_gain": (statistics.mean(bought_r) - statistics.mean(sold_r)) if i and sold_r and bought_r else None,
+        }
+        if band_cost is not None:
+            row["cost_banded"] = sum(band_cost(ym, ec) for ec in sold + forced + bought) / 10_000.0 / top_k
+            row["net_banded"] = gross - row["cost_banded"]
+        intervals.append(row)
     return intervals
 
 
@@ -217,6 +266,10 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
 
     入替率は、2 回目以降の入れ替えで手放した社数（予測が無くなった社を含む）÷ K の平均。
     超過は、年率（コスト後）− 全社平均の年率。
+
+    参考（#1167）: `excess_ci` は区間ごとの「純リターン − 全社平均」の平均の定常ブートストラップ CI
+    （`bootstrap_mean_ci`）、`annual_excess_ci` は年率の超過の CI（`annual_excess_ci`）、`swap_gain_mean`・
+    `swap_gain_ci` は入替の利得。全区間に `net_banded` があれば帯ごとのコストの年率（`annual_net_banded`）も出す。
     """
     if not intervals:
         return {"n_intervals": 0}
@@ -224,7 +277,8 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
     ann_net = _annualized([iv["net"] for iv in intervals], years)
     ann_bench = _annualized([iv["bench"] for iv in intervals], years)
     turns = [(len(iv["sold"]) + len(iv["forced"])) / top_k for iv in intervals[1:]]
-    return {
+    gains = [iv["swap_gain"] for iv in intervals if iv.get("swap_gain") is not None]
+    out = {
         "n_intervals":       len(intervals),
         "years":             round(years, 4),
         "annual_gross":      _annualized([iv["gross"] for iv in intervals], years),
@@ -235,7 +289,133 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
         "turnover":          statistics.mean(turns) if turns else None,
         "n_stopped":         sum(iv["n_stopped"] for iv in intervals),
         "n_missing":         sum(iv["n_missing"] for iv in intervals),
+        "excess_ci":         bootstrap_mean_ci([iv["net"] - iv["bench"] for iv in intervals]),
+        "annual_excess_ci":  annual_excess_ci(intervals),
+        "swap_gain_mean":    statistics.mean(gains) if gains else None,
+        "swap_gain_ci":      bootstrap_mean_ci(gains),
+        "n_swaps":           len(gains),
     }
+    if all("net_banded" in iv for iv in intervals):
+        ann_banded = _annualized([iv["net_banded"] for iv in intervals], years)
+        out["annual_net_banded"] = ann_banded
+        out["annual_excess_banded"] = (ann_banded - ann_bench
+                                       if ann_banded is not None and ann_bench is not None else None)
+    return out
+
+
+def annual_excess_ci(intervals: list[dict], *, n_boot: int = DEFAULT_N_BOOT, avg_block: float = DEFAULT_AVG_BLOCK,
+                     seed: int = DEFAULT_SEED, alpha: float = 0.05) -> dict | None:
+    """年率の超過（年率（コスト後）− 全社平均の年率）の定常ブートストラップ CI（参考・#1167）。
+
+    区間を `model_stats._stationary_bootstrap_sample` で丸ごと抜き直し（純リターン・全社平均・月数を同じ区間から取る）、
+    `summarize` と同じ幾何平均の年率に畳む。抜き直しの回数・平均ブロック長・種は `model_stats` の既定。
+    2 区間未満、または年率が出せない（資産が 0 以下になる）抜き直しばかりなら None。
+    """
+    if len(intervals) < 2:
+        return None
+    rng = random.Random(seed)
+    vals: list[float] = []
+    for _ in range(n_boot):
+        pick = _stationary_bootstrap_sample(intervals, rng, avg_block)
+        years = sum(iv["months"] for iv in pick) / 12.0
+        net = _annualized([iv["net"] for iv in pick], years)
+        bench = _annualized([iv["bench"] for iv in pick], years)
+        if net is not None and bench is not None:
+            vals.append(net - bench)
+    if not vals:
+        return None
+    vals.sort()
+    return {"ci_lo": _percentile(vals, 100 * alpha / 2), "ci_hi": _percentile(vals, 100 * (1 - alpha / 2)),
+            "n": len(intervals), "n_boot": len(vals)}
+
+
+@contextmanager
+def shifted_min_train(shift: int):
+    """M-4 の基底の walk-forward の最初の学習期間を +shift か月して回す（#1167・計測の中でだけ）。
+
+    `plugins.macro_ensemble.walk_forward_cv_monthly` を包み、`min_train_months` に shift を足す。学習の手続きは
+    そのままで、test 月の格子だけが shift か月後ろへずれる（`aligned_min_train` と同じ考え）。本番のコード
+    （`macro_ensemble` の `min_train_months=6`）は変えない。キーワードで渡されていない呼び出しは、ずらし損ねて
+    黙って同じ格子になるので止める。shift=0 は何もしない。
+    """
+    if shift == 0:
+        yield
+        return
+    from plugins import macro_ensemble
+
+    def shifted(samples_by_ym, feature_names, **kwargs):
+        if "min_train_months" not in kwargs:
+            raise RuntimeError("M-4 の基底の walk-forward に min_train_months がキーワードで渡されていない"
+                               "（ずらせないので止める）")
+        return walk_forward_cv_monthly(samples_by_ym, feature_names,
+                                       **{**kwargs, "min_train_months": kwargs["min_train_months"] + shift})
+
+    with patch.object(macro_ensemble, "walk_forward_cv_monthly", side_effect=shifted):
+        yield
+
+
+def check_paths_disjoint(test_months: dict) -> None:
+    """経路（{ずらし: test 月の集合}）どうしの test 月が重ならないことを確かめる。重なれば RuntimeError。
+
+    重なるのは、ずらしが効かずに同じ格子で回ったとき（M-4 の呼び方が変わった等）。そのまま並べると「経路の間の
+    ばらつき」が小さく見える＝例外を出さずにもっともらしい値を返すので止める。
+    """
+    shifts = sorted(test_months)
+    for i, a in enumerate(shifts):
+        for b in shifts[i + 1:]:
+            both = sorted(test_months[a] & test_months[b])
+            if both:
+                raise RuntimeError(f"ずらし {a} と {b} の経路の test 月が重なる（{both[:3]}）。ずらしが効いていない")
+
+
+def _month_end_date(ym: str) -> date:
+    y, m = map(int, ym.split("-"))
+    return date(y + m // 12, m % 12 + 1, 1) - timedelta(days=1)
+
+
+def turnover_bands(turnover: dict, periods: Sequence[str], n_bins: int = N_COST_BANDS,
+                   weeks: int = TURNOVER_WEEKS, min_weeks: int = MIN_TURNOVER_WEEKS) -> dict:
+    """{(ym, 社): 帯}（0＝売買代金が小さい・#1167）。
+
+    turnover = {社: {週の月曜(date): 売買代金}}（`measure_index_event.load_turnover` の形）。各期 ym について、
+    その月末以前の直近 `weeks` 週の売買代金の平均を、`min_weeks` 週以上そろう社の中で `n_bins` 等分する
+    （同値は社の順・`index_event_study._bins` と同じ切り方）。そろわない社は入れない（呼び出し側が一律のコストへ倒す）。
+    """
+    out: dict = {}
+    for ym in periods:
+        hi = _month_end_date(ym)
+        lo = hi - timedelta(weeks=weeks)
+        means = {}
+        for ec, by_week in turnover.items():
+            vals = [v for d, v in by_week.items() if lo < d <= hi]
+            if len(vals) >= min_weeks:
+                means[ec] = statistics.mean(vals)
+        ordered = sorted(means, key=lambda ec: (means[ec], ec))
+        for j, ec in enumerate(ordered):
+            out[(ym, ec)] = j * n_bins // len(ordered)
+    return out
+
+
+def make_band_cost(bands: dict, band_bps: Sequence[float], flat_bps: float) -> Callable[[str, str], float]:
+    """`replay` の `band_cost`。帯のある社は帯の片道コスト（bp）、帯の無い社は一律の `flat_bps`。"""
+    def cost(ym: str, ec: str) -> float:
+        band = bands.get((ym, ec))
+        return float(band_bps[band]) if band is not None else float(flat_bps)
+    return cost
+
+
+def path_summary(paths: dict) -> dict:
+    """{買いの並び: {annual_excess: {ずらし: 値}, mean, min, max, n_paths}}（経路の間のばらつき・参考・#1167）。"""
+    names = [n for res in paths.values() for n in res]
+    out: dict = {}
+    for name in dict.fromkeys(names):
+        by_shift = {str(s): (res.get(name) or {}).get("summary", {}).get("annual_excess")
+                    for s, res in paths.items()}
+        vals = [v for v in by_shift.values() if v is not None]
+        out[name] = {"annual_excess": by_shift, "n_paths": len(vals),
+                     "mean": statistics.mean(vals) if vals else None,
+                     "min": min(vals) if vals else None, "max": max(vals) if vals else None}
+    return out
 
 
 def aligned_min_train(yms: Sequence[str], first_test: str, min_train: int, embargo: int) -> int | None:
@@ -316,13 +496,14 @@ def predictions_with_params(panel: tuple, db, test_yms: Sequence[str],
 
 def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[str],
                 sell_source: str, top_k: int, sell_k: int, cost_bps: float,
-                production: dict | None = None, extra_m2: dict | None = None) -> dict:
+                production: dict | None = None, extra_m2: dict | None = None,
+                band_cost: Callable[[str, str], float] | None = None) -> dict:
     """買いの並び（models）ごとに OOF 運用再現を回す。
 
     `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
     直後に `PRODUCTION_KEY` の行を足す。共通域（y がある鍵）の外の予測は落とし、件数を `coverage` に出す。
     `extra_m2`（`{行の名前: M-2 の予測}`・#1155 の時間順に選んだ M-2 など）は、M-2 の並び方（`buy_scores`）で
-    末尾に足す（models に M-2 が無くても足す）。
+    末尾に足す（models に M-2 が無くても足す）。`band_cost`（#1167）は全ての行の `replay` へそのまま渡す。
     """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
@@ -331,7 +512,7 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
     def one(name: str, pred: dict) -> dict:
         buy, ordering = buy_scores(name, pred, y, prices_by_co, db)
         periods = sorted({ym for ym, _ec in buy.keys() & sell.keys()})
-        intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps)
+        intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps, band_cost)
         return {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
 
     def coverage(pred: dict, inside: dict) -> dict:
@@ -389,6 +570,58 @@ def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: f
               f"{_pct(s.get('annual_bench')):>10}{_pct(s.get('annual_excess')):>10}"
               f"{dd:>10}{turn}{s.get('n_intervals', 0):>6}"
               f"{s.get('n_stopped', 0):>7}", flush=True)
+    # 参考（#1167）: 区間の超過・年率の超過・入替の利得の 95%CI と、帯ごとのコスト後の年率の超過
+    print(f"  {'買いの並び':<10}{'区間の超過 [95%CI]':>30}{'年率の超過の95%CI':>24}{'入替の利得 [95%CI]':>30}"
+          f"{'帯コスト後の超過':>12}", flush=True)
+    for name, res in results.items():
+        s = res["summary"]
+        ann = s.get("annual_excess_ci")
+        ann_txt = f"[{_pct(ann['ci_lo'])},{_pct(ann['ci_hi'])}]" if ann else "n/a"
+        print(f"  {_label(name):<10}{_fmt_ci(s.get('excess_ci')):>30}{ann_txt:>24}"
+              f"{_fmt_ci(s.get('swap_gain_ci'), s.get('swap_gain_mean')):>30}"
+              f"{_pct(s.get('annual_excess_banded')):>12}", flush=True)
+
+
+def _fmt_ci(ci: dict | None, mean: float | None = None) -> str:
+    """`bootstrap_mean_ci` の結果を「平均 [下限, 上限]」で。CI が無ければ平均だけ（それも無ければ n/a）。"""
+    if not ci:
+        return _pct(mean)
+    return f"{_pct(ci['mean'])} [{_pct(ci['ci_lo'])},{_pct(ci['ci_hi'])}]"
+
+
+def _print_paths(paths: dict) -> None:
+    """経路の間の年率の超過（#1167・参考）。"""
+    summary = path_summary({s: p["results"] for s, p in paths.items()})
+    shifts = list(paths)
+    print(f"\n=== 開始月をずらした経路の年率の超過（参考）===\n注意: {PATH_NOTE}", flush=True)
+    print(f"  {'買いの並び':<10}" + "".join(f"{'+' + str(s) + 'か月':>10}" for s in shifts)
+          + f"{'平均':>10}{'最小':>10}{'最大':>10}", flush=True)
+    for name, row in summary.items():
+        print(f"  {_label(name):<10}" + "".join(f"{_pct(row['annual_excess'][str(s)]):>10}" for s in shifts)
+              + f"{_pct(row['mean']):>10}{_pct(row['min']):>10}{_pct(row['max']):>10}", flush=True)
+
+
+def _start_shifts(text: str) -> tuple[int, ...]:
+    """`--start-shifts` の値（例 "0,1,2"）。0〜MAX_START_SHIFT の相異なる整数。"""
+    try:
+        vals = tuple(int(v) for v in text.split(",") if v.strip() != "")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"整数のカンマ区切りにする: {text!r}") from None
+    if not vals or len(set(vals)) != len(vals) or not all(0 <= v <= MAX_START_SHIFT for v in vals):
+        raise argparse.ArgumentTypeError(
+            f"0〜{MAX_START_SHIFT} の相異なる整数にする（3 か月おきの格子なので 3 以上は同じ格子に戻る）: {text!r}")
+    return vals
+
+
+def _band_bps(text: str) -> tuple[float, ...]:
+    """`--cost-bands-bps` の値（売買代金の小さい帯から順に N_COST_BANDS 個の片道 bp）。"""
+    try:
+        vals = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"数のカンマ区切りにする: {text!r}") from None
+    if len(vals) != N_COST_BANDS or any(v < 0 for v in vals):
+        raise argparse.ArgumentTypeError(f"0 以上の数を {N_COST_BANDS} 個（小さい帯から）: {text!r}")
+    return vals
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -401,6 +634,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="保有する社数 K")
     ap.add_argument("--sell-k", type=int, default=DEFAULT_SELL_K, help="毎期売る保有の下位の社数 k")
     ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS, help="片道の売買コスト（bp）")
+    ap.add_argument("--start-shifts", type=_start_shifts, default=DEFAULT_START_SHIFTS,
+                    help="開始月のずらし（か月・カンマ区切り。例 0,1,2。既定 0＝1 本。#1167）")
+    ap.add_argument("--cost-bands-bps", type=_band_bps, default=None,
+                    help=f"売買代金の三分位ごとの片道コスト（bp・小さい帯から {N_COST_BANDS} 個。例 30,15,8。"
+                         "既定は無効。参考・#1167）")
     ap.add_argument("--smoke", action="store_true", help="企業を絞った軽量パネルで動作確認")
     ap.add_argument("--smoke-companies", type=int, default=120)
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -427,29 +665,71 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     panel = _load_panel(args)
     db = SessionLocal()
+    paths: dict[int, dict] = {}
     try:
-        run = _run_config("M-4(3基底・rank_ic_grid)", BASES, panel, db,
-                          weight_method="rank_ic_grid", keep_common=True)
-        prod_preds, prod_info = None, None
-        if PRODUCTION_MODEL in args.models:
-            # 本番の設定の M-2（#1123）。test 月は M-4 の共通域にそろえる
-            prod_preds, prod_info = production_predictions(panel, db, sorted(run["common"]))
-        results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
-                              args.sell_source, args.top_k, args.sell_k, args.cost_bps,
-                              production=prod_preds)
+        runs = {}
+        for shift in args.start_shifts:
+            # 開始月のずらし（#1167）。ずらし 0 は今までと同じ 1 回の M-4
+            label = "M-4(3基底・rank_ic_grid)" + (f"・開始 +{shift}か月" if shift else "")
+            with shifted_min_train(shift):
+                runs[shift] = _run_config(label, BASES, panel, db, weight_method="rank_ic_grid", keep_common=True)
+        check_paths_disjoint({s: set(r["common"]) for s, r in runs.items()})
+        bands = None
+        if args.cost_bands_bps is not None:
+            # 売買代金の帯（#1167・参考）。週次ローダへ列を足さず、対象の社と期間に絞って読む
+            from scripts.measure_index_event import load_turnover
+            all_yms = sorted({ym for r in runs.values() for ym in r["common"]})
+            codes = {row[0] for r in runs.values() for rows in r["common"].values() for row in rows}
+            turnover = load_turnover(db, codes, _month_end_date(all_yms[0]) - timedelta(weeks=TURNOVER_WEEKS),
+                                     _month_end_date(all_yms[-1]))
+            bands = turnover_bands(turnover, all_yms)
+        band_cost = make_band_cost(bands, args.cost_bands_bps, args.cost_bps) if bands is not None else None
+        for shift, run in runs.items():
+            prod_preds, prod_info = None, None
+            if PRODUCTION_MODEL in args.models:
+                # 本番の設定の M-2（#1123）。test 月は（その経路の）M-4 の共通域にそろえる
+                prod_preds, prod_info = production_predictions(panel, db, sorted(run["common"]))
+            results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
+                                  args.sell_source, args.top_k, args.sell_k, args.cost_bps,
+                                  production=prod_preds, band_cost=band_cost)
+            paths[shift] = {"results": results, "production": prod_info, "has_production": prod_preds is not None,
+                            "test_months": sorted(run["common"])}
     finally:
         db.close()
-    _print(results, args.sell_source, args.top_k, args.sell_k, args.cost_bps, prod_info)
+    for shift, p in paths.items():
+        if len(paths) > 1:
+            months = p["test_months"]
+            print(f"\n--- 経路: 開始 +{shift}か月（test 月 {months[0] if months else '-'}〜"
+                  f"{months[-1] if months else '-'}・{len(months)} 期）---", flush=True)
+        _print(p["results"], args.sell_source, args.top_k, args.sell_k, args.cost_bps, p["production"])
+    if len(paths) > 1:
+        _print_paths(paths)
+    if bands is not None:
+        print(f"注意: {BAND_NOTE}", flush=True)
 
+    head = paths[args.start_shifts[0]]
     payload = {
         "disclaimer": DISCLAIMER,
-        "caveats":    [M4_BASES_CAVEAT, DELIST_NOTE] + ([PRODUCTION_NOTE] if prod_preds is not None else []),
+        "caveats":    ([M4_BASES_CAVEAT, DELIST_NOTE]
+                       + ([PRODUCTION_NOTE] if any(p["has_production"] for p in paths.values()) else [])
+                       + ([PATH_NOTE] if len(paths) > 1 else []) + ([BAND_NOTE] if bands is not None else [])),
         "params":     {"top_k": args.top_k, "sell_k": args.sell_k, "cost_bps": args.cost_bps,
-                       "sell_source": args.sell_source, "models": args.models, "smoke": args.smoke},
+                       "sell_source": args.sell_source, "models": args.models, "smoke": args.smoke,
+                       "start_shifts": list(args.start_shifts),
+                       "cost_bands_bps": list(args.cost_bands_bps) if args.cost_bands_bps is not None else None},
         # 本番の設定の M-2 の行の付記（設定・探索日・そろった期・回せなかった理由）。M-2 を選ばない回は None
-        "production": prod_info,
-        "results":    results,
+        "production": head["production"],
+        # 先頭の経路（既定はずらし 0＝今までの 1 本）
+        "results":    head["results"],
     }
+    if len(paths) > 1:
+        payload["paths"] = {
+            str(shift): {"test_months": {"first": p["test_months"][0] if p["test_months"] else None,
+                                         "last": p["test_months"][-1] if p["test_months"] else None,
+                                         "n": len(p["test_months"])},
+                         "production": p["production"], "results": p["results"]}
+            for shift, p in paths.items()}
+        payload["path_summary"] = path_summary({s: p["results"] for s, p in paths.items()})
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
