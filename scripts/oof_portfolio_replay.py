@@ -254,17 +254,32 @@ def aligned_min_train(yms: Sequence[str], first_test: str, min_train: int, embar
 def production_predictions(panel: tuple, db, test_yms: Sequence[str]) -> tuple[dict | None, dict]:
     """本番の設定の M-2 の OOF 予測 `{(ym, 社): 予測}` と付記。回せなければ予測は None で付記に理由（#1123）。
 
-    単体の M-2 を本番の設定で回し、`oof_backtest` へ渡る予測と社の並び（`meta_by_ym`）を横取りする。変えるのは
-    最初の学習期間だけで、test 月を `test_yms`（M-4 の共通域）の最初の月から始める（モジュールの docstring）。
-    読み込み済みのパネルを使い回す（DB から引き直さない。空欄埋めは M-2 自身が行う）。
+    設定は `plugin_tuned_params` を比較画面と同じ射影（`_production_config`）で写し、`predictions_with_params` で回す。
     """
     plugin = get_plugin(PRODUCTION_MODEL)
     params, info = _production_config(db, plugin, PRODUCTION_MODEL, {})
     if params is None:
         return None, {"available": False, **info}
+    preds, _oof, extra = predictions_with_params(panel, db, test_yms, params)
+    if preds is None:
+        return None, {"available": False, **info, **extra}
+    return preds, {"available": True, **info, **extra}
+
+
+def predictions_with_params(panel: tuple, db, test_yms: Sequence[str],
+                            params: dict) -> tuple[dict | None, dict | None, dict]:
+    """M-2 を params で単体の手続きのまま回した OOF 予測 `{(ym, 社): 予測}`、その回の `oof_backtest`（M-2 自身の
+    母集団）、付記。そろえられない・回せないときは予測と oof は None で、付記に理由（#1123・#1155）。
+
+    `oof_backtest` へ渡る予測と社の並び（`meta_by_ym`）を横取りする。変えるのは最初の学習期間だけで、test 月を
+    `test_yms`（M-4 の共通域）の最初の月から始める（モジュールの docstring）。読み込み済みのパネルを使い回す（DB から
+    引き直さない。空欄埋めは M-2 自身が行う）。`tuning_dry_run`・`tuning_objective_only` の内側で回す＝本番の μ̂ と
+    探索の結果を上書きしない。種は呼び出し側が `plugins.tuning.seed_override` で変えられる（既定は M-2 の既定の種）。
+    """
+    plugin = get_plugin(PRODUCTION_MODEL)
     test_yms = sorted(test_yms)
     if not test_yms:
-        return None, {"available": False, **info, "reason": "not_aligned", "error": "共通域に test 月が無い"}
+        return None, None, {"reason": "not_aligned", "error": "共通域に test 月が無い"}
 
     def aligned_wf(samples_by_ym, feature_names, **kwargs):
         m = aligned_min_train(list(samples_by_ym), test_yms[0], kwargs.get("min_train_months", 18),
@@ -280,34 +295,34 @@ def production_predictions(panel: tuple, db, test_yms: Sequence[str]) -> tuple[d
              patch("plugins.macro_gbdt.walk_forward_cv_monthly", side_effect=aligned_wf), \
              patch("plugins.macro_gbdt.oof_backtest", wraps=oof_backtest) as spy, \
              tuning_dry_run(), tuning_objective_only():
-            plugin.execute(coerce_params(plugin.params_schema(), params), db)
+            result = plugin.execute(coerce_params(plugin.params_schema(), params), db)
     except NotAligned as e:
-        return None, {"available": False, **info, "reason": "not_aligned", "error": str(e)}
-    except Exception as e:  # noqa: BLE001 — 本番の行が回せなくても運用再現の他の行は出す
+        return None, None, {"reason": "not_aligned", "error": str(e)}
+    except Exception as e:  # noqa: BLE001 — 1 つの設定が回せなくても呼び出し側の他の行は出す
         _safe_rollback(db)
-        return None, {"available": False, **info, "reason": "error", "error": str(e)}
+        return None, None, {"reason": "error", "error": str(e)}
     if spy.call_args is None:
-        return None, {"available": False, **info, "reason": "error",
-                      "error": "M-2 の OOF を捕まえられなかった（oof_backtest が呼ばれていない）"}
+        return None, None, {"reason": "error", "error": "M-2 の OOF を捕まえられなかった（oof_backtest が呼ばれていない）"}
     resid = spy.call_args.args[0]
     meta = spy.call_args.kwargs.get("meta_by_ym") or {}
     preds = {(ym, sid): float(yh) for ym, rows in resid.items()
              for (yh, _y), (sid, _industry) in zip(rows, meta.get(ym, [])) if sid is not None}
     matched = sorted(set(resid) & set(test_yms))
     if not matched:
-        return None, {"available": False, **info, "reason": "not_aligned",
-                      "error": "test 月が共通域と 1 期も重ならない"}
-    return preds, {"available": True, **info,
-                   "n_periods_target": len(test_yms), "n_periods_matched": len(matched)}
+        return None, None, {"reason": "not_aligned", "error": "test 月が共通域と 1 期も重ならない"}
+    oof = result.get("oof_backtest") if isinstance(result, dict) else None
+    return preds, oof, {"n_periods_target": len(test_yms), "n_periods_matched": len(matched)}
 
 
 def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[str],
                 sell_source: str, top_k: int, sell_k: int, cost_bps: float,
-                production: dict | None = None) -> dict:
+                production: dict | None = None, extra_m2: dict | None = None) -> dict:
     """買いの並び（models）ごとに OOF 運用再現を回す。
 
     `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
     直後に `PRODUCTION_KEY` の行を足す。共通域（y がある鍵）の外の予測は落とし、件数を `coverage` に出す。
+    `extra_m2`（`{行の名前: M-2 の予測}`・#1155 の時間順に選んだ M-2 など）は、M-2 の並び方（`buy_scores`）で
+    末尾に足す（models に M-2 が無くても足す）。
     """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
@@ -319,6 +334,10 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
         intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps)
         return {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
 
+    def coverage(pred: dict, inside: dict) -> dict:
+        return {"n_rows": len(inside), "n_outside_common": len(pred) - len(inside),
+                "n_common_without_prediction": len(y.keys() - inside.keys())}
+
     out: dict[str, dict] = {}
     for name in models:
         out[name] = one(name, preds[name])
@@ -329,6 +348,9 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
                 "coverage": {"n_rows": len(inside), "n_outside_common": len(production) - len(inside),
                              "n_common_without_prediction": len(preds[name].keys() - inside.keys())},
             }
+    for key, pred in (extra_m2 or {}).items():
+        inside = {k: v for k, v in pred.items() if k in y}
+        out[key] = {**one(PRODUCTION_MODEL, inside), "coverage": coverage(pred, inside)}
     return out
 
 
