@@ -51,6 +51,7 @@
 | [`scripts/sell_mu_source_bakeoff.py`](#scriptssell_mu_source_bakeoffpy) | 検証（実験） |
 | [`scripts/oof_portfolio_replay.py`](#scriptsoof_portfolio_replaypy) | 検証（計測） |
 | [`scripts/measure_label_audit.py`](#scriptsmeasure_label_auditpy) | 検証（計測） |
+| [`scripts/measure_selection_optimism.py`](#scriptsmeasure_selection_optimismpy) | 検証（計測） |
 | [`scripts/experiment_pooled_rhat.py`](#scriptsexperiment_pooled_rhatpy) | 検証（実験） |
 | [`scripts/bench_macro_beta.py`](#scriptsbench_macro_betapy) | 検証（計測） |
 | [`scripts/bench_macro_beta_report.py`](#scriptsbench_macro_beta_reportpy) | 検証（計測） |
@@ -295,6 +296,12 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 **採点の物差しの点検**（#1154・事前登録 `docs/prereg/label-audit.md`）: `python -m scripts.measure_label_audit --prereg docs/prereg/label-audit.md --prereg-sha <凍結値> [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。答え（52 週先の対数リターン）が配当を含まない影響と、52 週以内の上場廃止で答えが消える影響を測る。予測は `oof_portfolio_replay` と同じく M-4 の共通域の OOF（`_run_config(keep_common=True)`）と本番の設定の M-2（`production_predictions`・共通域の行だけ）で、**予測は変えず答えだけを差し替えて採点する**（`oof_backtest`・`in_layer_short_side`）。守ること: **答えは週次終値からパネルと同じ規則（`month_end_indices`・`HORIZON_WEEKS`）で引き直し、パネルの答えと 1 行でも食い違えば終了コード 3**／値上がりだけの採点の rank-IC と全社の売り側spread が M-4 の `base_oof` と食い違っても終了コード 3／配当込みの答えは `log((c_fut + D) / c_snap)` で、D は「スナップ日より後に期末を迎える最初の通期」の `dps ÷ (split_factor × split_dps_lag)`（VIEW の `div_yield` と同じ補正・期末日を基準日とみなす近似。行が無ければ見えていた通期で代用し件数を出す）／**消えた行は `build_snapshots(return_no_future=True)` で取り、特徴量の条件を書き写さない**（M-4 の M-2 / M-6 のレグの構築にだけ足す）。株価の日付で直近（数えない）・途中で終わった・週の欠けに分け、途中で終わった行を終値の形で TOB/MBO の疑い・倒産の疑い・不明に分ける（参考）。判定は事前登録の規則を `dividend_decision`・`delisting_decision` が機械的に `prereg_decision` へ出す（M-6 − M-2 の主審 2 本の判定か上位10社超過の差の符号が入れ替われば切り替えの Issue、途中で終わった行の割合が 1% を超えれば答えの作り直しの Issue）。`--prereg-sha` が合わなければ終了コード 2。結果は既定 `scripts/.cache/label_audit.json`。日中枠（`measure:label-audit`・並走に敏感）で単独に回す
 
 種別: 検証（計測） ／ 依存先: scripts/oof_portfolio_replay.py、scripts/sell_mu_source_bakeoff.py、scripts/ensemble_base_bakeoff.py、plugins/macro_snapshots.py（`build_snapshots(return_no_future=True)`）、scripts/prereg.py ／ テスト: tests/test_label_audit.py
+
+## `scripts/measure_selection_optimism.py`
+
+**M-6 と本番の設定の M-2 を上位10社で公平に比べる**（#1155・事前登録 `docs/prereg/selection-optimism.md`・ADR-0070 の選択肢 9 の却下理由に答える）: `python -m scripts.measure_selection_optimism --prereg docs/prereg/selection-optimism.md --prereg-sha <凍結値> [--smoke] [--smoke-candidates 3] [--allow-full-pull] [--refresh-cache] [--budget-min <分>] [--out <json>]`。本番の探索と同じ固定の候補集合（`candidate_pool`）を同じパネルで 1 回ずつ、test 月を M-4 の共通域にそろえて単体の M-2 で回し（`oof_portfolio_replay.predictions_with_params`・`shared_snapshot_cache` の内側）、各 test 期 t で**答えが t の 12 か月前までに出そろった期の成績だけ**を使って本番と同じ規則（種 42 の rank-IC 上位 5 件＋前の期の選択を 5 種で測り直し、`plugins.tuning._two_stage_select`）で設定を選び直す（時間順に選んだ M-2）。主審は M-6 − 本番の設定の M-2（楽観込み）と M-6 − 時間順に選んだ M-2 の上位10社超過の対比較 2 本（Bonferroni α 0.025）。守ること: **候補集合と確かめ直す段の引数は `run_daytime.JOBS["tune:macro_gbdt"]` の argv から読む（書き写さない）**／使える期が 2 期に満たない期は比較から外す（既定の設定で埋めない）／種の巡は締切（`FINAPP_STEP_DEADLINE_UTC`・`hyperparameter_search.resolve_deadline`）の手前 15 分で畳み、回し切った種だけで平均する（本番と同じ）。150 件を回し切れない・本番の設定の M-2 が出せない・選べた期が無いときは終了コード 3、凍結値が合わなければ 2。全候補の期別系列を JSON に残す（上位 20 件に限らない）。どの実行も `tuning_dry_run`・`tuning_objective_only` の内側＝本番の探索の結果・周回の状態・μ̂ を変えない。12 月の探索の周回の反映後に日中枠（`measure:selection-optimism`・並走に敏感・窓を 1 件で使う）で単独に回す。結果は既定 `scripts/.cache/selection_optimism.json`
+
+種別: 検証（計測） ／ 依存先: scripts/oof_portfolio_replay.py（`predictions_with_params`・`run_replays(extra_m2=…)`）、plugins/tuning.py、scripts/ensemble_base_bakeoff.py、scripts/run_daytime.py、tuning_cycle.py、scripts/prereg.py ／ テスト: tests/test_selection_optimism.py
 
 ## `scripts/experiment_pooled_rhat.py`
 
