@@ -193,7 +193,12 @@ async function preflight() {
 // ── バリュエーション分析 ─────────────────────────────────────────────────────────
 async function runGapAnalysis() {
   const params = _collectParamValues('gap_analysis', _pluginMeta['gap_analysis']?.params_schema ?? {});
-  const url = '/api/gap-analysis' + (params.year ? `?year=${params.year}` : '');
+  // 入力のある条件は全部送る（以前は year だけで、最低配当利回りが黙って無視されていた）
+  const qs = new URLSearchParams();
+  for (const k of ['year', 'sort', 'min_div_yield']) {
+    if (params[k] != null && params[k] !== '' && !Number.isNaN(params[k])) qs.set(k, params[k]);
+  }
+  const url = '/api/gap-analysis' + (qs.toString() ? `?${qs}` : '');
   try {
     const d = await apiFetch(url);
     gapResults = d.results;
@@ -225,6 +230,7 @@ function renderGap(rows) {
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}</td>
       <td><span class="tag tag-amber" style="font-size:11px">${esc(r.industry||'-')}</span></td>
+      <td style="text-align:right;font-family:monospace;color:var(--text-secondary)">${r.year != null ? Number(r.year) : '-'}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.actual_market_cap||0)/100)}</td>
       <td style="text-align:right;font-family:monospace">${fmt0((r.predicted_market_cap||0)/100)}</td>
       <td class="${gapCls}" style="text-align:right;font-family:monospace">${gap>0?'+':''}${gap}%</td>
@@ -239,6 +245,11 @@ function renderGap(rows) {
     </tr>`;
   }).join('');
 }
+
+// ソート順は手元で並べ直すだけなので、変えたらその場で描き直す（押し直しを要らなくする）
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'param-gap_analysis-sort' && gapResults.length) renderGap(gapResults);
+});
 
 // 横断分布: 理論 vs 実際 の散布図 ＋ 乖離率ヒストグラム
 function renderGapCharts(rows) {
@@ -297,8 +308,8 @@ function renderGapCharts(rows) {
 
 function exportGapCSV() {
   if (!gapResults.length) return;
-  const h = '証券コード,企業名,業種,実際時価総額,予測時価総額,乖離率%,期待総リターン%,配当利回り%,implied PER,implied PBR,予測株価,実際株価,期待乖離6M%,期待乖離12M%,収束スコア12M(参考)\n';
-  const b = gapResults.map(r=>[r.sec_code,r.company_name,r.industry,r.actual_market_cap,r.predicted_market_cap,r.gap_ratio,r.expected_total_return_pct,r.div_yield_pct,r.implied_per??'',r.implied_pbr??'',r.pred_price??'',r.actual_price??'',r.expected_gap_6m,r.expected_gap_12m,r.conv_score_12m].join(',')).join('\n');
+  const h = '証券コード,企業名,業種,年度,実際時価総額,予測時価総額,乖離率%,期待総リターン%,配当利回り%,implied PER,implied PBR,予測株価,実際株価,期待乖離6M%,期待乖離12M%,収束スコア12M(参考)\n';
+  const b = gapResults.map(r=>[r.sec_code,r.company_name,r.industry,r.year??'',r.actual_market_cap,r.predicted_market_cap,r.gap_ratio,r.expected_total_return_pct,r.div_yield_pct,r.implied_per??'',r.implied_pbr??'',r.pred_price??'',r.actual_price??'',r.expected_gap_6m,r.expected_gap_12m,r.conv_score_12m].join(',')).join('\n');
   dl('﻿'+h+b, 'valuation_analysis.csv');
 }
 

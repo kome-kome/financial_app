@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # 列指定 Row に無い属性へ触ると AttributeError で落ちる（黙って None にはならない）。
 _GAP_FIELDS: tuple[str, ...] = (
     "edinet_code", "sec_code", "company_name", "industry",
+    "year", "period_end",
     "gap_ratio", "div_yield", "stock_price", "pl_eps", "bs_bps",
     "market_cap", "predicted_market_cap",
 )
@@ -83,6 +84,21 @@ def _estimate_ar1_half_life_years(series: list[float]) -> dict | None:
     }
 
 
+def _one_row_per_company(rows) -> list:
+    """同じ社が同じ年度に通期行を 2 本持つ（決算期変更）とき、期末の新しい方だけを残す。
+
+    `prediction_snapshots._read_gap` と同じ規則。並びは入力の順を保つ。
+    """
+    best: dict = {}
+    for r in rows:
+        cur = best.get(r.edinet_code)
+        if cur is None or (r.period_end is not None
+                           and (cur.period_end is None or r.period_end > cur.period_end)):
+            best[r.edinet_code] = r
+    keep = {id(r) for r in best.values()}
+    return [r for r in rows if id(r) in keep]
+
+
 class GapAnalysisPlugin(AnalysisPlugin):
     name = "gap_analysis"   # 内部 slug は後方互換（/api/gap-analysis）。表示ラベルは下記。
     label = "バリュエーション分析"
@@ -101,7 +117,7 @@ class GapAnalysisPlugin(AnalysisPlugin):
             "year": {
                 "type": "number",
                 "dtype": "int",
-                "label": "対象年度（空=全年度）",
+                "label": "対象年度（空=各社の最新）",
                 "default": None,
                 "optional": True,
             },
@@ -127,24 +143,31 @@ class GapAnalysisPlugin(AnalysisPlugin):
     def execute(self, params: dict, db: Any) -> dict:
         # gap_ratio / predicted_market_cap は regression_results 由来。
         # financial_metrics VIEW が LEFT JOIN して合成するため VIEW を読む。
-        from database import FinancialMetric, tradable_filters
+        from database import FinancialMetric, latest_year_subq, tradable_filters
 
         # params はパラメータ契約に従い coerce 済み（year:int|None・sort:str・min_div_yield:float）。
         year = params["year"]
         sort = params["sort"]
         min_div_yield = params["min_div_yield"]
 
-        # 当該フィルタの最新スナップショット。買えない銘柄は対象外＝上場廃止（#315）と、
-        # 価格が止まって12週の廃止待ち行列に居る社（#605・tradable_filters が唯一の源）。
-        # VIEW は 97 列あるが結果 dict が読むのは _GAP_FIELDS の 11 列だけ（Issue #489）。
-        # is_active / year は WHERE 専用なので SELECT には要らない。
+        # 1 社 1 行にする。年度の指定が無ければ各社の最新年度（`sell_ranking` / `recommend` /
+        # `prediction_snapshots._read_gap` と同じ `latest_year_subq`）。`regression_results` は
+        # sector_ols が各社の最新通期だけを書き直し、前の年度の行を残す（ADR-0066）ので、
+        # 絞らないと同じ社が前年度の古い予測と並んで二重に出る。
+        # 買えない銘柄は対象外＝上場廃止（#315）と、価格が止まって12週の廃止待ち行列に居る社
+        # （#605・tradable_filters が唯一の源）。
+        # VIEW は 97 列あるが結果 dict が読むのは _GAP_FIELDS の列だけ（Issue #489）。
         cols = [getattr(FinancialMetric, f) for f in _GAP_FIELDS]
         query = (db.query(*cols)
                    .filter(FinancialMetric.gap_ratio.isnot(None))
                    .filter(*tradable_filters(db)))
         if year:
             query = query.filter(FinancialMetric.year == year)
-        records = query.all()
+        else:
+            subq = latest_year_subq(db, FinancialMetric)
+            query = query.join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code)
+                                     & (FinancialMetric.year == subq.c.max_year))
+        records = _one_row_per_company(query.all())
 
         # 回帰の鮮度・モデルメタ（staleness / ols-ridge 混在の可視化）。
         regression = self._regression_meta(db, year)
@@ -224,6 +247,7 @@ class GapAnalysisPlugin(AnalysisPlugin):
                 "sec_code":                  r.sec_code,
                 "company_name":              r.company_name,
                 "industry":                  r.industry,
+                "year":                      r.year,
                 "actual_market_cap":         r.market_cap,
                 "predicted_market_cap":      r.predicted_market_cap,
                 "gap_ratio":                 gap,

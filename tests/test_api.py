@@ -336,6 +336,44 @@ class TestGapAnalysisDependency:
         assert r.json()["count"] == 0
 
 
+class TestGapAnalysisQueryReachesThePlugin:
+    """画面の条件が `/api/gap-analysis` を通ってプラグインまで届くこと。
+
+    以前は endpoint が year・sort しか受けず、画面の「最低配当利回り」が黙って無視されていた
+    （プラグイン単体のテストは通るので、endpoint の受け渡しを別に縛る）。"""
+
+    @pytest.fixture
+    def seeded(self, db, make_metric):
+        from database import RegressionResult
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end=date(2023, 3, 31),
+                                predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x"))
+        db.add_all([
+            make_metric(edinet_code="E00001", sec_code="1001", gap_ratio=10.0,
+                        stock_price=100.0, div_yield=4.0),
+            make_metric(edinet_code="E00002", sec_code="1002", gap_ratio=20.0,
+                        stock_price=100.0, div_yield=1.0),
+        ])
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        yield
+        api.app.dependency_overrides.clear()
+
+    def test_min_div_yield_filters(self, seeded):
+        r = client.get("/api/gap-analysis?min_div_yield=3")
+        assert r.status_code == 200
+        assert [x["edinet_code"] for x in r.json()["results"]] == ["E00001"]
+
+    def test_no_query_uses_the_schema_defaults(self, seeded):
+        # 既定（sort=desc・配当で絞らない）。endpoint が独自の既定値を持たない
+        r = client.get("/api/gap-analysis")
+        assert [x["edinet_code"] for x in r.json()["results"]] == ["E00002", "E00001"]
+
+    def test_sort_and_year_pass_through(self, seeded):
+        assert [x["edinet_code"] for x in
+                client.get("/api/gap-analysis?sort=asc").json()["results"]] == ["E00001", "E00002"]
+        assert client.get("/api/gap-analysis?year=1999").json()["count"] == 0
+
+
 class TestBacktestEndpoint:
     """candidate3: backtest 抽出後のエンドポイント配線（routing→backtest.run 委譲）を検証。"""
 

@@ -973,9 +973,9 @@ sequenceDiagram
 
     Note over User,DB: ② バリュエーション分析の実行（業種別OLS完了後に利用可能）
     User ->> UI  : 「バリュエーション分析」タブを選択
-    UI   ->> API : GET /api/gap-analysis?sort=asc
-    API  ->> GAP : execute_plugin(p, {year, sort}, db)（coerce→ensure_dependencies→execute[to_thread]）
-    GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN）
+    UI   ->> API : GET /api/gap-analysis?year=&sort=&min_div_yield=（入力のあるものだけ）
+    API  ->> GAP : execute_plugin(p, {来たキーだけ}, db)（coerce→ensure_dependencies→execute[to_thread]。既定値は params_schema）
+    GAP  ->> DB  : SELECT financial_metrics WHERE gap_ratio IS NOT NULL<br/>（VIEW が regression_results をJOIN。year 空欄は latest_year_subq で各社の最新年度・1社1行）
     DB  -->> GAP : 予測値付きレコード
     GAP -->> API : { results: [{company, gap_ratio, market_cap, predicted, ...}] }
     API -->> UI  : ランキングデータ
@@ -1419,7 +1419,7 @@ graph LR
         AN16["POST /api/plugins/{name}/cancel\n画面から回した heavy の取消（協調型・#849）\n{accepted, running, saving, message}\n次の進捗の区切りで止まり、実行は 409\n保存を始めた後は受け付けない（DB へは書かない）"]
         AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params\n測ったパネルの照合=panel_changed(#711)\nFalse と言えたときだけ画面が自動プリフィル"]
         AN10["GET /api/model/status\n業種別OLSモデルの鮮度情報\n（computed_at/staleness_days/n_results/is_stale）\n鮮度バーUI用の軽量GET"]
-        AN4["GET /api/gap-analysis\nバリュエーション分析（旧互換エンドポイント）"]
+        AN4["GET /api/gap-analysis?year=&sort=&min_div_yield=\nバリュエーション分析（旧互換エンドポイント・year 空欄=各社の最新）"]
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
         AN6["GET /api/recommend/presets\n推薦プリセット一覧"]
         AN7["POST /api/recommend\n推薦スクリーニング実行\nweights.mu は opt-in（mu_source 必須・未指定は400）\n既定プリセットは mu 重みを持たない＝既定は μ̂ 不使用"]
