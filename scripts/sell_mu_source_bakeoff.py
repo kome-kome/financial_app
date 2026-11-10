@@ -63,6 +63,9 @@
     候補 − M-6 を共通の期で対にした定常ブートストラップ（両側 p）。α は 0.05 /（候補数 × 2）
   - 判定は `sell_dedicated_decision` が `prereg_decision` に機械的に出す。結果は `scripts/.cache/sell_dedicated.json`。
     日中枠 `measure:sell-dedicated`（並走に敏感）で単独に回す
+  - `--sell-set s2`（#1158）: 候補を S2（52 週先リターンの下側 20% 点・丸めたピンボール損失の L1+L2 分位回帰を
+    FISTA で解く・`make_quantile_enet_fit_predict`）に替える。事前登録は `docs/prereg/sell-quantile-model.md`、結果は
+    `scripts/.cache/sell_dedicated_s2.json`、日中枠は `measure:sell-quantile`。判定の規則（主審 2 本・α）は S1 と同じ形
 
 データは `scripts/_cache.py` 経由でローカル pickle を読む（Issue #355・本番 Egress ゼロ）。
 producer 永続化は `tuning_dry_run()` で no-op、現在μ̂スコアリングは `tuning_objective_only()`
@@ -75,6 +78,7 @@ producer 永続化は `tuning_dry_run()` で no-op、現在μ̂スコアリン�
     python -m scripts.sell_mu_source_bakeoff --in-layer      # 上位層の売り側spread も出す（#1043）
     python -m scripts.sell_mu_source_bakeoff --sell-candidates \
         --prereg docs/prereg/sell-dedicated-model.md --prereg-sha <凍結値>   # 売り専用の候補（#1152）
+    python -m scripts.sell_mu_source_bakeoff --sell-candidates --sell-set s2         --prereg docs/prereg/sell-quantile-model.md --prereg-sha <凍結値>    # 分位回帰の候補 S2（#1158）
 """
 from __future__ import annotations
 
@@ -83,6 +87,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 from unittest.mock import patch
@@ -93,7 +98,9 @@ from database import SessionLocal  # noqa: E402
 from model_stats import paired_ic_significance  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins import macro_ensemble  # noqa: E402
-from plugins.model_candidates import make_diag, make_logistic_bottom_fit_predict, summarize_diag  # noqa: E402
+from plugins.model_candidates import (  # noqa: E402
+    make_diag, make_logistic_bottom_fit_predict, make_quantile_enet_fit_predict, summarize_diag,
+)
 from plugins.macro_snapshots import (  # noqa: E402
     display_risk_map, display_scores, get_producer_scores, in_layer_short_side, oof_backtest,
 )
@@ -158,13 +165,38 @@ def sell_score(raws: dict, weights: dict, stats: dict,
 SELL_S1 = "s1_logistic_bottom"
 SELL_CANDIDATES = (SELL_S1,)
 SELL_PREREG = "docs/prereg/sell-dedicated-model.md"
+# S2（下側 20% 点の分位回帰・#1158）。丸めたピンボール損失を FISTA で解き、本番の大きさで日中枠に収める。
+SELL_S2 = "s2_quantile_low"
+
+
+@dataclass(frozen=True)
+class SellSet:
+    """`--sell-set` の 1 組＝同じ事前登録で測る候補・その文書・結果の出力先。"""
+    candidates: tuple
+    prereg: str
+    out: Path
+    issue: int
+
+
+# 組ごとに事前登録を分ける（#1152 の文書は凍結済みで変えない）。S1 は判定済み（keep）なので S2 の組で測り直さない。
+SELL_SETS = {
+    "s1": SellSet(SELL_CANDIDATES, SELL_PREREG, _OUT_SELL, 1152),
+    "s2": SellSet((SELL_S2,), "docs/prereg/sell-quantile-model.md",
+                  Path(__file__).resolve().parent / ".cache" / "sell_dedicated_s2.json", 1158),
+}
+SELL_SET_DEFAULT = "s1"
+
+
+def sell_set_of(args) -> SellSet:
+    """args の `--sell-set`（無ければ既定の S1）の組。"""
+    return SELL_SETS[getattr(args, "sell_set", None) or SELL_SET_DEFAULT]
 # 分母＝本番の売りの μ̂ の出どころ（`sell_ranking.MU_SOURCE`・ADR-0071）。
 SELL_BASE = "macro_enet"
 # 主審 (a) の上位層を作る買いの並び（ユーザー判断・2026-11-09）。他の基底の層は参考で出す。
 SELL_BUY_LAYER = "macro_enet"
 
 SHORT = {"macro_risk_return": "M-1", "macro_gbdt": "M-2", "macro_enet": "M-6",
-         UPPER: "M-6+R_macro(上限)", SELL_S1: "S1(下位確率)"}
+         UPPER: "M-6+R_macro(上限)", SELL_S1: "S1(下位確率)", SELL_S2: "S2(下側20%点)"}
 # 検定する対（a − b）。μ̂ の出所どうしは主判定と同じ対、上限版は「R_macro を足して層の中の売りが
 # 良くなるか」の未来情報込みの上限。
 IN_LAYER_PAIRS = [(CANDIDATE, CURRENT), (CANDIDATE, "macro_risk_return"), (UPPER, CANDIDATE)]
@@ -384,9 +416,10 @@ def sell_candidate_fit_predict(name: str, m6p: dict, diag: dict):
     """候補 name の fit_predict。l1_ratio・内側 CV の区切り方・分割数は本番の M-6 から取る（書き写さない）。"""
     from plugins.macro_enet import _CV_SPLITS, _INNER_CV, MacroEnetPlugin
 
-    if name != SELL_S1:
-        raise ValueError(f"未知の売りの候補: {name}（{', '.join(SELL_CANDIDATES)} のみ）")
-    return make_logistic_bottom_fit_predict(
+    makers = {SELL_S1: make_logistic_bottom_fit_predict, SELL_S2: make_quantile_enet_fit_predict}
+    if name not in makers:
+        raise ValueError(f"未知の売りの候補: {name}（{', '.join(makers)} のみ）")
+    return makers[name](
         l1_ratios=MacroEnetPlugin._l1_ratios(m6p["l1_ratio"]), cv_splits=_CV_SPLITS,
         inner_cv=_INNER_CV, diag=diag)
 
@@ -440,8 +473,9 @@ def _buy_rank_ic(sells: dict, y: dict, by_ym: dict) -> dict:
     return out
 
 
-def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, stamp: dict) -> dict:
-    """売り専用の候補を M-6 のレグと同じ入力で回し、主審 2 本の検定と判定を返す（#1152）。"""
+def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, stamp: dict,
+                          candidates: tuple = SELL_CANDIDATES) -> dict:
+    """売り専用の候補を M-6 のレグと同じ入力で回し、主審 2 本の検定と判定を返す（#1152・#1158）。"""
     import time
 
     b, m6p, yms = m6_args
@@ -449,20 +483,18 @@ def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, sta
     preds, y = common_to_dicts(run["common"], bases)
     sells = {SELL_BASE: preds[SELL_BASE]}
     diags: dict[str, dict] = {}
-    for name in SELL_CANDIDATES:
+    for name in candidates:
         diag = make_diag()
         t0 = time.time()
         aligned, _ctx = macro_ensemble.plugin._m6_cv(
             b, m6p, yms, fit_predict=sell_candidate_fit_predict(name, m6p, diag))
         sells[name] = candidate_on_common(aligned, y, name)
-        diags[name] = {**summarize_diag(diag), "n_folds": len(diag.get("C") or []),
+        diags[name] = {**summarize_diag(diag), "n_folds": len(diag.get("l1_ratio") or []),
                        "seconds": round(time.time() - t0, 1)}
-        print(f"[{name}] folds={diags[name]['n_folds']} C={diags[name].get('C')} "
-              f"l1_ratio={diags[name].get('l1_ratio')} n_nonzero={diags[name].get('n_nonzero')} "
-              f"convergence_warnings={diags[name].get('n_convergence_warnings')} ({diags[name]['seconds']}s)",
-              flush=True)
+        shown = " ".join(f"{k}={v}" for k, v in diags[name].items() if k not in ("n_folds", "seconds"))
+        print(f"[{name}] folds={diags[name]['n_folds']} {shown} ({diags[name]['seconds']}s)", flush=True)
 
-    alpha = sell_alpha()
+    alpha = sell_alpha(len(candidates))
     print(f"\n=== 売り専用の候補（#1152・事前登録 {stamp['prereg_path']}・Bonferroni alpha={alpha:g}）===",
           flush=True)
     print(f"注意: {M4_BASES_CAVEAT}", flush=True)
@@ -470,7 +502,7 @@ def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, sta
     def _sigs(by_condition):
         return {c: paired_ic_significance(by_condition[c]["by_period"], by_condition[SELL_BASE]["by_period"],
                                           alpha=alpha)
-                for c in SELL_CANDIDATES}
+                for c in candidates}
 
     layers: dict[str, dict] = {}
     for buy_name in bases:
@@ -487,8 +519,8 @@ def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, sta
     whole["sig"] = {f"{c}|{SELL_BASE}": v for c, v in whole_sig.items()}
     _print_whole(whole)
 
-    layer_sig = {c: layers[SELL_BUY_LAYER]["sig"][f"{c}|{SELL_BASE}"] for c in SELL_CANDIDATES}
-    decisions = {c: sell_dedicated_decision(layer_sig[c], whole_sig[c], alpha) for c in SELL_CANDIDATES}
+    layer_sig = {c: layers[SELL_BUY_LAYER]["sig"][f"{c}|{SELL_BASE}"] for c in candidates}
+    decisions = {c: sell_dedicated_decision(layer_sig[c], whole_sig[c], alpha) for c in candidates}
     decision = overall_sell_decision(decisions, layer_sig)
     by_ym: dict[str, list] = {}
     for ym, rows in run["common"].items():
@@ -502,7 +534,7 @@ def sell_dedicated_report(run: dict, m6_args: tuple, prices_by_co: dict, db, sta
     print("  参考（判定に使わない）: 買いの rank-IC "
           + " / ".join(f"{SHORT[n]} {v['mean']:+.4f}" for n, v in buy_ic.items()), flush=True)
     return {**stamp, "caveat": M4_BASES_CAVEAT, "alpha": alpha, "base": SELL_BASE,
-            "buy_layer": SELL_BUY_LAYER, "candidates": list(SELL_CANDIDATES), "diagnostics": diags,
+            "buy_layer": SELL_BUY_LAYER, "candidates": list(candidates), "diagnostics": diags,
             "in_layer": layers, "whole_universe": whole, "buy_rank_ic_reference": buy_ic,
             "n_common": run["n_common"], "prereg_decision": decision}
 
@@ -516,9 +548,10 @@ def check_prereg_args(args) -> dict | None:
             raise SystemExit("--prereg / --prereg-sha は --sell-candidates と一緒にしか使えません")
         return None
     if not (args.prereg and args.prereg_sha):
-        raise SystemExit("--sell-candidates には --prereg と --prereg-sha が要る（事前登録 #1152）")
-    if Path(args.prereg).as_posix() != SELL_PREREG:
-        raise SystemExit(f"--sell-candidates の事前登録は {SELL_PREREG}（受け取った値: {args.prereg}）")
+        raise SystemExit("--sell-candidates には --prereg と --prereg-sha が要る（事前登録 #1152・#1158）")
+    expected = sell_set_of(args).prereg
+    if Path(args.prereg).as_posix() != expected:
+        raise SystemExit(f"--sell-candidates の事前登録は {expected}（受け取った値: {args.prereg}）")
     return prereg.stamp_from_args(args)
 
 
@@ -533,8 +566,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--in-layer", action="store_true",
                     help="上位層の売り側spread（#1043）も出す。結果は scripts/.cache/sell_in_layer.json")
     ap.add_argument("--sell-candidates", action="store_true",
-                    help="売り専用の候補を M-6 の μ̂ と比べる（#1152）。結果は scripts/.cache/sell_dedicated.json")
-    ap.add_argument("--prereg", help=f"事前登録文書（--sell-candidates で必須・{SELL_PREREG}）")
+                    help="売り専用の候補を M-6 の μ̂ と比べる（#1152・#1158）。候補の組は --sell-set、"
+                         "結果は組ごと（s1: scripts/.cache/sell_dedicated.json / s2: sell_dedicated_s2.json）")
+    ap.add_argument("--sell-set", choices=sorted(SELL_SETS), default=SELL_SET_DEFAULT,
+                    help="--sell-candidates で測る候補の組（s1: #1152 の S1・既定 / s2: #1158 の分位回帰 S2）。"
+                         "組ごとに事前登録と結果の出力先が別")
+    ap.add_argument("--prereg", help="事前登録文書（--sell-candidates で必須・組ごとに決まった文書）")
     ap.add_argument("--prereg-sha", help="凍結値（本文の sha256・追記節に記録したもの）")
     return ap
 
@@ -570,10 +607,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if args.sell_candidates:
             if "args" not in m6_args:
                 raise RuntimeError("M-6 のレグの入力を捕まえられなかった（_m6_cv が呼ばれていない）")
-            payload = sell_dedicated_report(run, m6_args["args"], panel[0], db, stamp)
-            _OUT_SELL.parent.mkdir(parents=True, exist_ok=True)
-            _OUT_SELL.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"\nwrote {_OUT_SELL}", flush=True)
+            sset = sell_set_of(args)
+            payload = sell_dedicated_report(run, m6_args["args"], panel[0], db, stamp, candidates=sset.candidates)
+            sset.out.parent.mkdir(parents=True, exist_ok=True)
+            sset.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\nwrote {sset.out}", flush=True)
         if args.in_layer:
             payload = in_layer_report(run, panel[0], db)
             _OUT_IN_LAYER.parent.mkdir(parents=True, exist_ok=True)
