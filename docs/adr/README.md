@@ -80,6 +80,7 @@
 | [0069](0069-evaluation-metrics-have-roles.md) | **評価指標に役割を持たせる——rank-IC を主審に残し、上位K社の指標は拒否権、画面の並びは別に採点する** | #1040, #1041〜#1045, #1073 | accepted（2026-10-28） |
 | [0070](0070-search-selects-in-two-stages-for-top-k-buying.md) | **探索は運用（上位10社を買う）に合わせて2段で選び、固定した候補を日中の空きで測り切る** | #1112, #1113〜#1116 | accepted（2026-11-02） |
 | [0071](0071-sell-ranking-keeps-only-the-measured-best.md) | **売り候補ランキングは実測で最良の 1 手法（M-6 の μ̂ の下位 1/5）だけを残す** | #1043, #1073 | accepted（2026-11-05） |
+| [0072](0072-screen-heavy-runs-do-not-save-by-default.md) | **画面からの heavy 実行は既定で保存しない（保存は「結果を保存する」を選んだときだけ）** | — | accepted（2026-11-11） |
 
 ## 運用
 

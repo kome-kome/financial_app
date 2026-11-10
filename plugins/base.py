@@ -38,6 +38,10 @@ class AnalysisPlugin(ABC):
     # `tests/test_plugin_progress.py::TestHeavyDeclaresWrites` が照合する）。heavy を画面から
     # 回すと夜間・月次バッチが書いた結果を黙って上書きするので、押す前に何が変わるかを見せる。
     writes: tuple[str, ...] | None = None
+    # `writes` の表が変わると**利用者から見て何が変わるか**（画面の「結果を保存する」の横と確認
+    # ダイアログに出す・ADR-0072）。表名だけでは影響先が読めない。`writes` を持つなら必須
+    # （`tests/test_screen_run_persist.py` が照合する）。次にどのバッチが書き直すかも書く。
+    writes_impact: str = ""
 
     @abstractmethod
     def params_schema(self) -> dict:
@@ -76,5 +80,6 @@ class AnalysisPlugin(ABC):
             "ui_order": self.ui_order,
             "hidden": self.hidden,
             "writes": None if self.writes is None else list(self.writes),
+            "writes_impact": self.writes_impact,
             "params_schema": self.params_schema(),
         }

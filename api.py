@@ -109,9 +109,9 @@ WRITE_ROUTE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "exempt: app_settings のパスワードを書く。閲覧専用でもログインを復旧できる必要がある"
         "（断面の分析データではない）",
     ("POST", "/api/plugins/{plugin_name}/run"):
-        "exempt: 書くのは heavy だけ（各プラグインの writes＝regression_results・"
-        "macro_*_scores と、所要の記録 app_settings）で、heavy は writes_blocked() で 403。"
-        "heavy でないプラグインは DB へ書かない",
+        "exempt: 書くのは heavy だけ。保存済みの表（writes＝regression_results・macro_*_scores）は"
+        "?persist=1 のときだけで、既定は tuning_dry_run で保存しない（ADR-0072）。ほかは所要の記録"
+        "（app_settings）。heavy は writes_blocked() で 403。heavy でないプラグインは DB へ書かない",
     ("POST", "/api/plugins/{plugin_name}/cancel"):
         "exempt: 画面から回した heavy の取消（#849）。プロセス内の取消の旗を立てるだけで DB へ書かない",
     ("POST", "/api/recommend"):

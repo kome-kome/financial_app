@@ -256,6 +256,7 @@ class MacroEnsemblePlugin(AnalysisPlugin):
     depends_on: list[str] = []          # 自前で全計算（r_macro は graceful マージ）
     heavy = True
     writes = ("macro_ensemble_scores",)
+    writes_impact = "退役した M-4 の μ̂（どの画面の既定にも使われていません）"
     category = "③ 将来リターンを予測"
     ui_order = 370                       # M-3=360 の後（M-1→M-2→M-3→M-4 順・#378）
     # 退役（ADR-0044）: 統合は **M-6 単体を上回らない**（rank-IC +0.0006・p=0.810／売り側

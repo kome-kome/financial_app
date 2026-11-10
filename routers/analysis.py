@@ -178,8 +178,17 @@ async def model_status(db: Session = Depends(api.get_db)):
 @api.limiter.limit(api.RATELIMIT_ANALYSIS)
 async def run_plugin(
     request: Request, plugin_name: str, params: dict,
+    persist: bool = False,
     db: Session = Depends(api.get_db),
 ):
+    """プラグインを実行する。heavy は**既定で保存しない**（ADR-0072）。
+
+    画面の既定値は本番の設定と一致しない（sector_ols は画面 `none`・夜間 `ridge`、M-2/M-3 の
+    本番は探索で選んだ値）ので、押しただけで夜間・日中・月次のバッチが書いた結果を別の設定の
+    値で置き換えていた。保存は画面の「結果を保存する」（`?persist=1`）を選んだときだけにする。
+    止め方は探索と同じ `database.tuning_dry_run()`（保存関数がこれを見る）。バッチは HTTP を
+    通らないので、この既定に影響されない。
+    """
     p = plugin_registry.get_plugin(plugin_name)
     if p is None:
         raise HTTPException(404, f"プラグイン '{plugin_name}' が見つかりません")
@@ -193,7 +202,13 @@ async def run_plugin(
         _refuse_heavy_while_unsafe(plugin_name, p.label)
     try:
         if getattr(p, "heavy", False):
-            return await _execute_with_progress(p, plugin_name, params, db)
+            if persist:
+                return await _execute_with_progress(p, plugin_name, params, db)
+            # ContextVar は await の先（to_thread・タスク）へ複写されるので、ここで入れれば
+            # execute の内側の保存関数まで届く
+            from database import tuning_dry_run
+            with tuning_dry_run():
+                return await _execute_with_progress(p, plugin_name, params, db)
         return await plugin_registry.execute_plugin(p, params, db)
     except progress.AnalysisCancelled:
         # 下の `except Exception` に 500 へ化けさせない（取消は失敗ではない・#849）
@@ -314,7 +329,8 @@ async def plugin_preflight(plugin_name: str, db: Session = Depends(api.get_db)):
     """heavy を押す直前の確認材料（読取専用）。画面はこれで確認ダイアログを組み立てる。
 
     - `blocked_reason`: 今は始められない理由（バッチ実行中・同じ分析が実行中）。None なら始められる
-    - `writes`: 置き換わる保存済みの表（`AnalysisPlugin.writes`）
+    - `writes`: 「結果を保存する」で置き換わる保存済みの表（`AnalysisPlugin.writes`）
+    - `writes_impact`: その表が変わると利用者から何が変わるか（`AnalysisPlugin.writes_impact`）
     - `last_run_min`: このアプリから前回回したときの所要（記録が無ければ None）
 
     サーバ側の 409（`_refuse_heavy_while_unsafe`）と同じ判定を使う。こちらは押す前に見せる
@@ -336,6 +352,7 @@ async def plugin_preflight(plugin_name: str, db: Session = Depends(api.get_db)):
     except Exception:                                  # noqa: BLE001 — 表示の補助で画面を殺さない
         log.warning("「%s」の前回所要を読めなかった", plugin_name, exc_info=True)
     return {"name": plugin_name, "label": entry["label"], "writes": entry.get("writes"),
+            "writes_impact": entry.get("writes_impact") or "",
             "last_run_min": last, "blocked_reason": blocked}
 
 
