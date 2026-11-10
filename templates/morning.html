@@ -56,7 +56,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── 朝ダッシュボード固有（Issue #423 子3）─────────────────────────────── */
-.verdict{border-radius:12px;padding:18px 20px;margin-bottom:24px;border:1px solid var(--border);display:flex;flex-direction:column;gap:10px}
+.verdict{border-radius:10px;padding:18px 20px;margin-bottom:24px;border:1px solid var(--border);display:flex;flex-direction:column;gap:10px}
 .verdict-fresh{background:var(--status-good-bg);border-color:var(--status-good)}
 .verdict-warn{background:var(--status-warn-bg);border-color:var(--status-warn)}
 .verdict-alert{background:var(--status-bad-bg);border-color:var(--status-bad)}
@@ -76,6 +76,8 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .fresh-details>summary::-webkit-details-marker{display:none}
 .fresh-details>summary::before{content:'▸';color:var(--text-muted)}
 .fresh-details[open]>summary::before{content:'▾'}
+/* 畳んだ要約の下に .section-title の余白が残ると、次の見出しまでが他の節の間隔（28px）より広がる */
+.fresh-details:not([open])>summary{margin-bottom:0}
 .legend{margin:0 0 12px;font-size:13px;color:var(--text-body)}
 .legend>summary{cursor:pointer;color:var(--text-secondary);display:inline-flex;gap:6px;align-items:center}
 .legend>summary::-webkit-details-marker{display:none}
@@ -93,23 +95,31 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .fresh-card.warn{border-color:var(--status-warn)}
 .fresh-card.alert{border-color:var(--status-bad)}
 .fresh-card-label{font-size:11px;color:var(--text-muted);letter-spacing:.5px}
-.fresh-card-value{font-size:19px;font-weight:700}
+/* balance：夜間バッチの日時が「JST」だけ次の行へ落ちないよう、日付と時刻で折る */
+.fresh-card-value{font-size:19px;font-weight:700;text-wrap:balance}
 .fresh-card-sub{font-size:11px;color:var(--text-muted);line-height:1.6}
+.nowrap{white-space:nowrap}
 .fresh-card a{font-size:11px;color:var(--accent-text);text-decoration:none;margin-top:auto}
 .rank-wrap{overflow-x:auto}
-.rank-table{width:100%;border-collapse:collapse;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:12px}
+/* 読み込み中（プリセット・件数を変えてから応答まで数秒）は前の並びを薄くし、新しい並びと取り違えさせない */
+.rank-wrap.is-loading{opacity:.5}
+/* 文字色は td ではなく表に置いて継承させる。td に置くと（詳細度 0,1,1）.stale-asof・.rank-num・.muted
+   （0,1,0）が負けて効かない——古い株価の日付が色付かないまま「古いと色が変わる」と案内していた */
+.rank-table{width:100%;border-collapse:collapse;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:12px;color:var(--text-body)}
 .rank-table th{background:var(--bg-sunken);color:var(--text-muted);font-size:11px;letter-spacing:.4px;padding:10px 12px;text-align:left;white-space:nowrap}
-.rank-table td{padding:9px 12px;border-top:1px solid var(--border-subtle);color:var(--text-body);white-space:nowrap}
+.rank-table td{padding:9px 12px;border-top:1px solid var(--border-subtle);white-space:nowrap}
 .rank-table tbody tr:hover{background:var(--bg-hover)}
 .rank-num{color:var(--text-muted);font-variant-numeric:tabular-nums}
 .rank-name{color:var(--text);font-weight:500}
 .rank-name a{color:var(--accent-text);text-decoration:none}
 .rank-name a:hover{text-decoration:underline}
-.rank-score{font-weight:700;color:var(--accent-text);font-variant-numeric:tabular-nums}
+/* スコアは紫にしない（紫は「押せる・今ここ・技術版」だけ）。強調は太さと --text で出す */
+.rank-score{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .stale-asof{color:var(--status-warn-text)}
-.gap-positive{color:var(--val-up);font-weight:600}
-.gap-negative{color:var(--val-down);font-weight:600}
+/* 文字なので X-text を使う（--val-up / --val-down は線・点の色で、ダークとホバー行で対比 AA に届かない） */
+.gap-positive{color:var(--val-up-text);font-weight:600}
+.gap-negative{color:var(--val-down-text);font-weight:600}
 /* 狭い幅ではランキングを1社1枚のカードにする。横スクロールの先にスコアが隠れると、
    肝心の列を見ないまま発注を判断することになる。残すのは名前・スコア・乖離率・株価 as-of */
 @media(max-width:480px){
@@ -170,7 +180,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   <div class="verdict verdict-warn" id="verdict">
     <div class="verdict-head" id="verdict-head"><span class="spinner"></span> 鮮度を確認しています…</div>
     <ul class="verdict-reasons" id="verdict-reasons"></ul>
-    <a id="verdict-link" href="#" target="_blank" rel="noopener">復旧手順（DEPLOYMENT.md）を見る →</a>
+    <a id="verdict-link" href="#" target="_blank" rel="noopener" hidden>復旧手順（DEPLOYMENT.md）を見る →</a>
   </div>
 
   <details class="fresh-details" id="fresh-details" open>
