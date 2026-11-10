@@ -153,7 +153,9 @@ async def model_status(db: Session = Depends(api.get_db)):
 
     rq = db.query(RegressionResult).filter(RegressionResult.gap_ratio.isnot(None))
     computed_at = rq.with_entities(func.max(RegressionResult.computed_at)).scalar()
-    n_results = rq.count()
+    # 画面は「N社の予測値」と出すので社数で数える。行数は前の年度の行（ADR-0066 で残す）を
+    # 二重に数え、全社数より多くなっていた
+    n_results = rq.with_entities(func.count(func.distinct(RegressionResult.edinet_code))).scalar() or 0
     data_updated_at = db.query(func.max(FinancialRecord.updated_at)).scalar()
 
     staleness_days = None
@@ -457,12 +459,17 @@ async def get_plugin_tuned(plugin_name: str, db: Session = Depends(api.get_db)):
 async def gap_analysis(
     request: Request,
     year: Optional[int] = None,
-    sort: str = "asc",
+    sort: Optional[str] = None,
+    min_div_yield: Optional[float] = None,
     db: Session = Depends(api.get_db),
 ):
     p = plugin_registry.get_plugin("gap_analysis")
+    # 来たキーだけを渡し、既定値は params_schema（coerce_params）に任せる。endpoint 側で
+    # 既定値を持つと schema と食い違い、画面の入力が黙って落ちる（min_div_yield がそうだった）。
+    raw = {k: v for k, v in {"year": year, "sort": sort, "min_div_yield": min_div_yield}.items()
+           if v is not None}
     try:
-        return await plugin_registry.execute_plugin(p, {"year": year, "sort": sort}, db)
+        return await plugin_registry.execute_plugin(p, raw, db)
     except (plugin_registry.DependencyError, ValueError) as e:
         # sector_ols 未実行等の依存/検証エラー（内部実装は露出しない）。可観測性のためログにも残す（#346）。
         log.info("gap-analysis を依存/検証で拒否: %s", e)

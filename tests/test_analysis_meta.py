@@ -211,6 +211,16 @@ class TestModelStatusEndpoint:
         # is_stale は bool
         assert isinstance(d["is_stale"], bool)
 
+    def test_n_results_counts_companies_not_rows(self, db):
+        # 画面は「N社の予測値」と出す。前の年度の行（ADR-0066 で残す）を数えると全社数を超える
+        from datetime import date
+        from database import RegressionResult
+        for ec, yr in (("E00001", 2024), ("E00001", 2025), ("E00002", 2025)):
+            db.add(RegressionResult(edinet_code=ec, year=yr, period_end=date(yr, 3, 31),
+                                    predicted_market_cap=1.0, gap_ratio=1.0, model="ridge", sector="x"))
+        db.commit()
+        assert client.get("/api/model/status").json()["n_results"] == 2
+
     def test_no_render_light_mode_field(self):
         """環境の旗は /api/system/info（writes_blocked・#733）が担当し model/status には含まない。"""
         d = client.get("/api/model/status").json()

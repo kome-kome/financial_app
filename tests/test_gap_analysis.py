@@ -209,6 +209,41 @@ class TestTotalReturnColumns:
         assert trs == sorted(trs, reverse=True)
         assert res["results"][0]["edinet_code"] == "E00002"   # 総リターン20 > 18
 
+    def test_blank_year_returns_each_companys_latest_row_once(self, db, make_metric):
+        # regression_results は前の年度の行を残す（ADR-0066）。年度空欄で全年度を返すと、
+        # 同じ社が古い予測と二重に並んでいた（5,641 行に対して 3,664 社）。
+        # 決算期の違う社（2024 年度が最新の E00002）を落とさないよう「全体の最新年度」ではなく各社の最新。
+        db.add_all([
+            make_metric(edinet_code="E00001", year=2024, period_end="2024-03-31", gap_ratio=5.0),
+            make_metric(edinet_code="E00001", year=2025, period_end="2025-03-31", gap_ratio=7.0),
+            make_metric(edinet_code="E00002", year=2024, period_end="2024-12-31", gap_ratio=3.0),
+        ])
+        db.commit()
+        res = plugin.execute(_typed({}), db)
+        got = {r["edinet_code"]: (r["year"], r["gap_ratio"]) for r in res["results"]}
+        assert got == {"E00001": (2025, 7.0), "E00002": (2024, 3.0)}
+        assert res["count"] == 2
+
+    def test_year_given_returns_that_year(self, db, make_metric):
+        db.add_all([
+            make_metric(edinet_code="E00001", year=2024, period_end="2024-03-31", gap_ratio=5.0),
+            make_metric(edinet_code="E00001", year=2025, period_end="2025-03-31", gap_ratio=7.0),
+        ])
+        db.commit()
+        res = plugin.execute(_typed({"year": 2024}), db)
+        assert [(r["edinet_code"], r["year"], r["gap_ratio"]) for r in res["results"]] == [
+            ("E00001", 2024, 5.0)]
+
+    def test_two_closings_in_one_year_keep_the_later(self, db, make_metric):
+        # 決算期変更で同じ年度に通期行が 2 本ある社は期末の新しい方（prediction_snapshots._read_gap と同じ）
+        db.add_all([
+            make_metric(edinet_code="E00001", year=2025, period_end="2025-03-31", gap_ratio=5.0),
+            make_metric(edinet_code="E00001", year=2025, period_end="2025-12-31", gap_ratio=9.0),
+        ])
+        db.commit()
+        res = plugin.execute(_typed({}), db)
+        assert [r["gap_ratio"] for r in res["results"]] == [9.0]
+
     def test_min_div_yield_filter(self, db, make_metric):
         db.add_all([
             make_metric(edinet_code="E00001", gap_ratio=10.0, stock_price=100.0, div_yield=4.0),
