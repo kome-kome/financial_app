@@ -571,6 +571,209 @@ def make_logistic_bottom_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
     return fit_predict
 
 
+# ── 1c. 売り専用の候補 S2（下側の分位回帰・#1158）──────────────────────────────────
+# 当てる答えを「52週先リターンの下側 SELL_QUANTILE_TAU 点」に替えた、L1+L2 の線形分位回帰。特徴量・前処理
+# （`_prep_matrices`＝y も M-6 と同じく winsorize → zscore）・内側 CV の区切り方・l1_ratio・α の点数と比は M-6 と同じ
+# ものを渡す＝違いは「当てる答え（損失）」だけ。予測は分位の予測値そのもの（高いほど売る理由が小さい＝μ̂ と同じ向き）。
+# sklearn の `QuantileRegressor`（線形計画）は行数の 2 乗に近く伸び、本番の大きさ（約 20 万行）では日中枠に
+# 収まらない（#1152）。そこでピンボール損失の角を幅 h の二次関数で丸め（Huber 型）、FISTA（Beck & Teboulle 2009）で
+# 解く。反復に上限を置くので、所要は「反復回数 × 行列とベクトルの積」で決まり、データの性質に左右されない
+# （S1 は saga の収束待ちで、間引きからの見積りの約 41 倍かかった・#1152）。候補メニュー（`_CANDIDATES`）には
+# 載せない。使い手は `scripts/sell_mu_source_bakeoff --sell-candidates --sell-set s2`。
+SELL_QUANTILE_TAU = 0.2
+# ピンボール損失を丸める幅（標準化した y の単位）。|残差| < h の範囲だけ二次関数でつなぐ。
+_QR_SMOOTH_H = 0.1
+# α 1 点あたりの FISTA の反復の上限（α の経路は上端から温めて解く）。上限に当たった回数は診断値に積む。
+_QR_MAX_ITER = 300
+# 収束の判定: 係数と切片の更新の最大の絶対値 ≤ _QR_TOL × max(1, 係数の最大の絶対値)。
+_QR_TOL = 1e-5
+# 切片だけの最適値（丸めた損失の勾配が 0 になる点）を二分法で探す回数。
+_QR_BISECT = 60
+
+
+def smoothed_pinball(r: np.ndarray, tau: float = SELL_QUANTILE_TAU,
+                     h: float = _QR_SMOOTH_H) -> tuple[np.ndarray, np.ndarray]:
+    """丸めたピンボール損失の各行の値と、残差 r についての導関数を返す（#1158）。
+
+    r ≤ −h: (τ−1)r − h/4、r ≥ h: τr − h/4、その間は (τ−1)r + (r+h)²/(4h) − h/4。導関数は τ−1 から τ へ
+    傾き 1/(2h) で線形につながる（リプシッツ定数 1/(2h)）。h → 0 で元のピンボール損失に一致する。
+    """
+    r = np.asarray(r, dtype=float)
+    psi = (tau - 1.0) + np.clip((r + h) / (2.0 * h), 0.0, 1.0)
+    loss = np.where(r <= -h, (tau - 1.0) * r - h / 4.0,
+                    np.where(r >= h, tau * r - h / 4.0,
+                             (tau - 1.0) * r + (r + h) ** 2 / (4.0 * h) - h / 4.0))
+    return loss, psi
+
+
+def pinball_loss(r: np.ndarray, tau: float = SELL_QUANTILE_TAU) -> float:
+    """丸めないピンボール損失の平均（内側 CV で α・l1_ratio を選ぶ基準・#1158）。"""
+    r = np.asarray(r, dtype=float)
+    return float(np.mean(np.where(r >= 0, tau * r, (tau - 1.0) * r)))
+
+
+def _intercept_only(y: np.ndarray, tau: float, h: float) -> float:
+    """係数が全て 0 のときの最適な切片（丸めた損失の勾配の平均が 0 になる点）を二分法で返す。"""
+    lo, hi = float(np.min(y)) - h, float(np.max(y)) + h
+    for _ in range(_QR_BISECT):
+        mid = 0.5 * (lo + hi)
+        # 平均の ψ(y − q) は q について単調に減る
+        if np.mean(smoothed_pinball(y - mid, tau, h)[1]) > 0:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def quantile_alpha_grid(X: np.ndarray, y: np.ndarray, l1_ratio: float, tau: float = SELL_QUANTILE_TAU,
+                        h: float = _QR_SMOOTH_H, n_alphas: int = _EN_N_ALPHAS,
+                        eps: float = _EN_ALPHA_EPS) -> np.ndarray:
+    """丸めた分位回帰の α の経路（降順）。作り方は `enet_alpha_grid`（ElasticNetCV）と同じ（#1158）。
+
+    上端は係数が全て 0 のままになる最小の α＝ max_j |Σ_i x_ij ψ_i| / (n · l1_ratio)（ψ は切片だけの最適値での
+    損失の導関数）。そこから α_max·eps まで等比で n_alphas 点。
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    psi = smoothed_pinball(y - _intercept_only(y, tau, h), tau, h)[1]
+    alpha_max = float(np.max(np.abs(X.T @ psi))) / (X.shape[0] * l1_ratio)
+    if alpha_max <= np.finfo(np.float64).resolution:
+        return np.full(n_alphas, np.finfo(np.float64).resolution)
+    return np.geomspace(alpha_max, alpha_max * eps, num=n_alphas)
+
+
+def _lipschitz(X: np.ndarray, h: float) -> float:
+    """平均の丸めた損失の勾配（係数と切片）のリプシッツ定数 σ_max([X, 1])² / (2h·n)。"""
+    n = X.shape[0]
+    xm = X.sum(axis=0)
+    gram = np.empty((X.shape[1] + 1, X.shape[1] + 1))
+    gram[:-1, :-1] = X.T @ X
+    gram[:-1, -1] = xm
+    gram[-1, :-1] = xm
+    gram[-1, -1] = n
+    return float(np.linalg.eigvalsh(gram)[-1]) / (2.0 * h * n)
+
+
+def fit_quantile_enet_path(X: np.ndarray, y: np.ndarray, alphas, l1_ratio: float,
+                           tau: float = SELL_QUANTILE_TAU, h: float = _QR_SMOOTH_H,
+                           max_iter: int = _QR_MAX_ITER, tol: float = _QR_TOL) -> tuple:
+    """α の経路（降順）に沿って丸めた L1+L2 分位回帰を FISTA で解く（#1158）。
+
+    目的は mean(ρ_h(y − Xw − b)) + α(l1_ratio·|w|₁ + (1−l1_ratio)/2·|w|²)（罰則の形は sklearn の ElasticNet と
+    同じ・切片は罰しない）。各 α は前の α の解から始める（温める）。勾配のステップは 1 / (L + α(1−l1_ratio))、
+    L は `_lipschitz`。運動量は勾配の向きで再始動する（O'Donoghue & Candès 2015）。
+    返り値は (係数 (n_alphas, p), 切片 (n_alphas,), 反復の上限に当たった α の数)。
+    """
+    X = np.ascontiguousarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n, p = X.shape
+    lip = _lipschitz(X, h)
+    w = np.zeros(p)
+    b = _intercept_only(y, tau, h)
+    coefs = np.empty((len(alphas), p))
+    intercepts = np.empty(len(alphas))
+    n_capped = 0
+    for k, alpha in enumerate(alphas):
+        l2 = alpha * (1.0 - l1_ratio)
+        step = 1.0 / (lip + l2)
+        thresh = step * alpha * l1_ratio
+        zw, zb, t = w.copy(), b, 1.0
+        converged = False
+        for _ in range(max_iter):
+            psi = smoothed_pinball(y - X @ zw - zb, tau, h)[1]
+            gw = -(X.T @ psi) / n + l2 * zw
+            gb = -float(psi.mean())
+            vw = zw - step * gw
+            w_new = np.sign(vw) * np.maximum(np.abs(vw) - thresh, 0.0)
+            b_new = zb - step * gb
+            dw, db = w_new - w, b_new - b
+            # 勾配の向きで再始動: 進んだ向きが運動量と逆なら運動量を捨てる
+            if float((zw - w_new) @ dw + (zb - b_new) * db) > 0:
+                t = 1.0
+            t_new = 0.5 * (1.0 + math.sqrt(1.0 + 4.0 * t * t))
+            mom = (t - 1.0) / t_new
+            zw, zb = w_new + mom * dw, b_new + mom * db
+            w, b, t = w_new, b_new, t_new
+            if max(float(np.max(np.abs(dw))) if p else 0.0, abs(db)) <= tol * max(1.0, float(np.max(np.abs(w))) if p else 0.0):
+                converged = True
+                break
+        if not converged:
+            n_capped += 1
+        coefs[k] = w
+        intercepts[k] = b
+    return coefs, intercepts, n_capped
+
+
+def fit_quantile_enet(X: np.ndarray, y: np.ndarray, splits, *, l1_ratios: tuple, tau: float = SELL_QUANTILE_TAU,
+                      h: float = _QR_SMOOTH_H, n_alphas: int = _EN_N_ALPHAS, max_iter: int = _QR_MAX_ITER) -> dict:
+    """内側 CV で (α, l1_ratio) を選び、全学習行で解き直した結果を返す（#1158）。
+
+    α の経路は l1_ratio ごとに学習全体で 1 回作り（`quantile_alpha_grid`）、全 split で共有する（ElasticNetCV と同じ）。
+    点数は検証行の**丸めない**ピンボール損失の平均を split で平均したもの（ElasticNetCV の検証の二乗誤差に当たる）で、
+    最小の組を選ぶ。同点は先に来た組（α は大きい側・l1_ratio は与えた順）。選んだ組は経路を上端から選んだ α まで
+    温めて解き直す。返り値は {coef, intercept, alpha, l1_ratio, path_min, path_max, n_capped}。
+    """
+    grids = [quantile_alpha_grid(X, y, r, tau, h, n_alphas) for r in l1_ratios]
+    scores = np.zeros((len(l1_ratios), n_alphas))
+    n_capped = 0
+    for tr, te in splits:
+        X_tr, y_tr = np.ascontiguousarray(X[tr]), y[tr]
+        X_te, y_te = X[te], y[te]
+        for k, r in enumerate(l1_ratios):
+            coefs, ints, capped = fit_quantile_enet_path(X_tr, y_tr, grids[k], r, tau, h, max_iter)
+            n_capped += capped
+            for j in range(n_alphas):
+                scores[k, j] += pinball_loss(y_te - X_te @ coefs[j] - ints[j], tau) / len(splits)
+    best = None
+    for k in range(len(l1_ratios)):
+        for j in range(n_alphas):
+            if best is None or scores[k, j] < best[0]:
+                best = (scores[k, j], k, j)
+    _score, k, j = best
+    coefs, ints, capped = fit_quantile_enet_path(X, y, grids[k][: j + 1], l1_ratios[k], tau, h, max_iter)
+    n_capped += capped
+    return {"coef": coefs[-1], "intercept": float(ints[-1]), "alpha": float(grids[k][j]),
+            "l1_ratio": float(l1_ratios[k]), "path_min": float(grids[k].min()), "path_max": float(grids[k].max()),
+            "n_capped": n_capped}
+
+
+def make_quantile_enet_fit_predict(l1_ratios: tuple = _EN_L1_RATIOS,
+                                   n_alphas: int = _EN_N_ALPHAS,
+                                   cv_splits: int = _EN_CV_SPLITS,
+                                   max_iter: int = _QR_MAX_ITER,
+                                   diag: dict | None = None,
+                                   inner_cv: str = _EN_INNER_CV_PURGED,
+                                   tau: float = SELL_QUANTILE_TAU) -> Callable:
+    """売り専用の候補 S2 の fit_predict（#1158）。返す予測は 52 週先リターンの下側 τ 点の予測値（元の尺度）。
+
+    `_prep_matrices`（y は winsorize → zscore）の上で `fit_quantile_enet` を回し、`y*y_sd + y_mu` で戻す。
+    月で区切る内側 CV には各学習月の行数 `train_groups` が要る——`walk_forward_cv_monthly(pass_train_groups=True)`
+    で呼ぶこと。診断値には α・l1_ratio・非ゼロ係数の数・α パスの端への張り付き・反復の上限に当たった α の数を積む。
+    """
+    if inner_cv not in _EN_INNER_CV_CHOICES:
+        raise ValueError(f"未知の inner_cv: {inner_cv}（{', '.join(_EN_INNER_CV_CHOICES)} のみ）")
+
+    def fit_predict(train_samples, test_samples, train_groups=None):
+        if inner_cv in _EN_INNER_CV_BY_MONTH and train_groups is None:
+            raise ValueError(f"S2 の内側 CV（{inner_cv}）は train_groups が要る（pass_train_groups=True で呼ぶ）")
+        X_tr, y_tr, X_te, y_mu, y_sd, y_te = _prep_matrices(train_samples, test_samples)
+        cv = elasticnet_inner_cv(len(X_tr), cv_splits, inner_cv, train_groups)
+        splits = list(cv.split(X_tr)) if hasattr(cv, "split") else list(cv)
+        chosen = fit_quantile_enet(X_tr, y_tr, splits, l1_ratios=tuple(l1_ratios), tau=tau,
+                                   n_alphas=n_alphas, max_iter=max_iter)
+        yhat = ((X_te @ chosen["coef"] + chosen["intercept"]) * y_sd + y_mu).tolist()
+        if diag is not None:
+            diag["alpha"].append(chosen["alpha"])
+            diag["l1_ratio"].append(chosen["l1_ratio"])
+            diag["n_nonzero"].append(int(np.count_nonzero(chosen["coef"])))
+            diag["alpha_at_path_min"].append(int(math.isclose(chosen["alpha"], chosen["path_min"], rel_tol=1e-9)))
+            diag["alpha_at_path_max"].append(int(math.isclose(chosen["alpha"], chosen["path_max"], rel_tol=1e-9)))
+            diag["n_iter_capped"].append(chosen["n_capped"])
+        return yhat, y_te
+
+    return fit_predict
+
+
 # ── 2. ExtraTrees / QRF 相当（sklearn・改善案②）──────────────────────────────
 
 _ET_N_ESTIMATORS = 300

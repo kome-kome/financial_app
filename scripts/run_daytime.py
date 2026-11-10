@@ -608,6 +608,24 @@ JOBS: dict[str, Job] = {
         measured_min=245.5,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
+    # 売り専用の候補 S2（下側 20% 点の分位回帰）を売りの μ̂（M-6）と比べる（#1158）。判定は事前登録の規則。
+    "measure:sell-quantile": Job(
+        name="sell_quantile",
+        argv=("{python}", "-m", "scripts.sell_mu_source_bakeoff", "--sell-candidates", "--sell-set", "s2",
+              "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/sell-quantile-model.md",
+              "--prereg-sha", "91d540f1ca5ab31859049fe0fc52bb42c0bb7bd44e092fdf7ab4ad172b688ee7"),
+        why="当てる答えを「52 週先リターンの下側 20% 点」に替えた L1+L2 の分位回帰（S2・丸めたピンボール損失を FISTA で"
+            "解く）を、M-4 の中の M-6 と同じパネル・fold・規模の中立化で回し、M-6 の買いの並びの上位層の売り側spread と"
+            "全社の売り側spread で M-6 のμ̂ と比べる（#1158）。1 候補 × 2 指標・alpha 0.025。凍結値が合わなければ exit 2。"
+            "結果は scripts/.cache/sell_dedicated_s2.json。",
+        # 見積り（2026-11-10・合成データ 20.4 万行 × 72 列）。1 fold は 52.9 秒で、反復の上限に当たった α は 0。全ての
+        # α が上限（300 回）に当たる最悪でも、全行の経路 1 本が 166.9 秒＝1 fold 約 15 分・19 fold 約 290 分＋ M-4 約 13 分
+        # ≒ 305 分で窓に収まる。見積りは最悪の半分ほどに置き、×2 が窓の半分を超える＝他のジョブと同じ日に組まれない値にする
+        # （2 件の日は予算が 222 分に縮み、最悪に届かない）。実走の後に実測へ差し替える。
+        measured_min=160.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # 採点の物差しの点検（#1154）。答えが配当を含まない影響と、52 週以内の上場廃止で答えが消える影響を測る。
     "measure:label-audit": Job(
         name="label_audit",

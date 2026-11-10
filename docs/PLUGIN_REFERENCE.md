@@ -276,6 +276,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 - regime-switch 閾値線形（学習 fold 中央値で VIX 分割・regime 別 Ridge・pooled フォールバック）
 - LightGBM・CatBoost（**任意依存**・`requirements-optional.txt`・未導入なら `candidate_available()` が False）
 - XGBoost(M-2) 基準線
+- 売り専用の候補（候補メニュー `_CANDIDATES` には載せない・使い手は `scripts/sell_mu_source_bakeoff --sell-candidates`）: S1 `make_logistic_bottom_fit_predict`（その月の下位 1/5 に入る確率・#1152）、S2 `make_quantile_enet_fit_predict`（52 週先リターンの下側 20% 点の L1+L2 分位回帰・ピンボール損失を丸めて FISTA で解く・α 1 点あたりの反復に上限・#1158）。どちらも前処理・内側 CV・l1_ratio は M-6 と同じで、違うのは当てる答えだけ
 
 `wrap_macro_pca` はマクロ列だけを **fold 内 PCA** で直交少数因子へ畳む合成可能ラッパー（任意候補に被せられる／`*rest` 素通しで3引数候補にも対応）。前処理は全て学習 fold 内 fit（`fit_feature_columns`/`transform_feature_row` 流用）。
 
