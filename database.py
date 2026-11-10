@@ -1330,6 +1330,24 @@ def get_producer_asof(db, plugin_name: str) -> dict | None:
     }
 
 
+def get_producer_saved(db, plugin_name: str) -> dict | None:
+    """保存済みの μ̂ を `{"mu": {edinet_code: mu}, "saved_at": datetime|None}` で返す（書かない）。
+
+    分析画面の heavy タブが開いたときに出す「保存済みの結果」（ADR-0072）用。読むのは `mu` と
+    保存時刻だけ——`read_producer_scores` は R_macro のために macro_beta とマクロ値まで読むので、
+    一覧を出すだけには重い（Render の断面では Egress になる）。M-2/M-3/M-4/M-6 以外は None。
+    """
+    model = _PRODUCER_SCORE_MODELS.get(plugin_name)
+    if model is None:
+        return None
+    scores = _producer_score_map(db, model)
+    try:
+        saved_at = db.query(func.max(model.created_at)).scalar()
+    except Exception:
+        saved_at = None
+    return {"mu": scores, "saved_at": saved_at}
+
+
 # ── 5f-3. 株価鮮度（Issue #416）─────────────────────────────────────────────
 # 「株価が止まっているのに新しいランキングに見える」を防ぐための鮮度指標。
 # 全社 max は代表値にしない（実測 2026-08-02: max=07-31 は 2 銘柄のみ・3,677 銘柄は
