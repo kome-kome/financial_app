@@ -140,6 +140,12 @@ tr:hover td{background:var(--border-subtle)}
 .persist-toggle{display:flex;align-items:flex-start;gap:6px;margin:14px 0 0;font-size:12px;color:var(--text-secondary);cursor:pointer;line-height:1.5}
 .persist-toggle input{width:auto;margin:2px 0 0;flex-shrink:0}
 .persist-impact{color:var(--text-muted)}
+/* 保存済みの結果（heavy のタブの先頭・ADR-0072）と、その下の「設定を変えて再計算」の折りたたみ */
+.saved-meta{font-size:12px;color:var(--text-muted);margin-bottom:10px}
+details.rerun{margin-bottom:16px}
+details.rerun>summary{cursor:pointer;font-size:13px;color:var(--text-secondary);padding:8px 2px}
+details.rerun>summary:hover{color:var(--text)}
+details.rerun[open]>summary{margin-bottom:8px}
 /* 文字なので X-text を使う（--val-up / --val-down は線・点の色で、ダークとホバー行で対比 AA に届かない）。朝の推奨とそろえる */
 .gap-positive{color:var(--val-up-text);font-weight:600}
 .gap-negative{color:var(--val-down-text);font-weight:600}

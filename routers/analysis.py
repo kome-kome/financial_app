@@ -344,16 +344,95 @@ async def plugin_preflight(plugin_name: str, db: Session = Depends(api.get_db)):
         blocked = None
     except HTTPException as e:
         blocked = e.detail
-    last = None
+    return {"name": plugin_name, "label": entry["label"], "writes": entry.get("writes"),
+            "writes_impact": entry.get("writes_impact") or "",
+            "last_run_min": _last_run_min(db, plugin_name), "blocked_reason": blocked}
+
+
+def _last_run_min(db, plugin_name: str) -> Optional[float]:
+    """このアプリから前回回したときの所要（分）。記録が無い・読めないときは None。"""
     try:
         from database import get_setting
         raw = get_setting(db, LAST_RUN_KEY_PREFIX + plugin_name)
-        last = float(raw) if raw not in (None, "") else None
+        return float(raw) if raw not in (None, "") else None
     except Exception:                                  # noqa: BLE001 — 表示の補助で画面を殺さない
         log.warning("「%s」の前回所要を読めなかった", plugin_name, exc_info=True)
-    return {"name": plugin_name, "label": entry["label"], "writes": entry.get("writes"),
-            "writes_impact": entry.get("writes_impact") or "",
-            "last_run_min": last, "blocked_reason": blocked}
+        return None
+
+
+# 保存表を書き直すバッチの呼び名（`nightly_scores.HEAVY_AUTOMATION` のスクリプト名 → 画面の言葉）。
+# どの分析をどのバッチが回すかは HEAVY_AUTOMATION が唯一の源で、ここは呼び名だけ持つ。
+_BATCH_LABELS = {
+    "run_nightly": "毎晩の夜間バッチ",
+    "run_daytime": "平日の日中バッチ",
+    "run_monthly": "毎月の月次バッチ",
+    "run_monthly_m1": "毎月の M-1 バッチ",
+}
+
+SAVED_LIMIT_MAX = 200
+
+
+def _updated_by(plugin_name: str) -> Optional[str]:
+    from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+    entry = HEAVY_AUTOMATION.get(plugin_name, "")
+    if not entry.startswith(LOCAL_PREFIX):
+        return None
+    stem = entry[len(LOCAL_PREFIX):].rsplit("/", 1)[-1].removesuffix(".py")
+    return _BATCH_LABELS.get(stem, stem)
+
+
+@router.get("/api/plugins/{plugin_name}/saved")
+async def plugin_saved(plugin_name: str, limit: int = 50, db: Session = Depends(api.get_db)):
+    """heavy のタブを開いたときに出す**保存済みの結果**（読取専用・ADR-0072）。
+
+    分析画面の既定は「読む場所」。夜間などのバッチが保存した結果があるのに空のフォームから始めると、
+    見るだけで数分の再計算が要り、その再計算が保存済みの値を置き換えていた。
+
+    - M-2/M-3/M-6: 保存済みの μ̂ を今買える社（`tradable_results`）に絞り、μ̂ の降順で上位 `limit` 社
+    - sector_ols: 計算時刻・使ったモデル・社数だけ（一覧はバリュエーション分析タブが同じ表を読む）
+    - 保存しない分析（M-1・モデル比較）: `saved=False`
+    """
+    entry = _heavy_entry(plugin_name)
+    if entry is None:
+        raise HTTPException(404, f"heavy な分析 '{plugin_name}' が見つかりません")
+    if not (1 <= limit <= SAVED_LIMIT_MAX):
+        raise HTTPException(400, f"limit は 1〜{SAVED_LIMIT_MAX} の範囲で指定してください")
+    base = {"name": plugin_name, "label": entry["label"], "updated_by": _updated_by(plugin_name),
+            "last_run_min": _last_run_min(db, plugin_name)}
+    if not entry.get("writes"):
+        return {**base, "saved": False, "kind": "none"}
+
+    from sqlalchemy import func
+    from database import Company, RegressionResult, get_producer_asof, get_producer_saved
+
+    if plugin_name == "sector_ols":
+        from plugins.gap_analysis import plugin as gap_plugin
+        meta = gap_plugin._regression_meta(db, None)
+        n = (db.query(func.count(func.distinct(RegressionResult.edinet_code)))
+               .filter(RegressionResult.gap_ratio.isnot(None)).scalar() or 0)
+        return {**base, "saved": n > 0, "kind": "gap", "n_companies": n,
+                "computed_at": meta["computed_at"], "models": meta["models"]}
+
+    got = get_producer_saved(db, plugin_name)
+    mu = {ec: v for ec, v in ((got or {}).get("mu") or {}).items() if v is not None}
+    if not mu:
+        return {**base, "saved": False, "kind": "mu"}
+    from plugins.macro_snapshots import tradable_results
+    kept, excluded = tradable_results(db, [{"edinet_code": ec, "mu": v} for ec, v in mu.items()])
+    kept.sort(key=lambda r: r["mu"], reverse=True)
+    top = kept[:limit]
+    names = {ec: (sc, nm, ind) for ec, sc, nm, ind in
+             db.query(Company.edinet_code, Company.sec_code, Company.name, Company.industry)
+               .filter(Company.edinet_code.in_([r["edinet_code"] for r in top])).all()}
+    rows = []
+    for i, r in enumerate(top, 1):
+        sc, nm, ind = names.get(r["edinet_code"], (None, None, None))
+        rows.append({"rank": i, "edinet_code": r["edinet_code"], "sec_code": sc,
+                     "company_name": nm, "industry": ind, "mu": round(float(r["mu"]), 6)})
+    saved_at = got.get("saved_at")
+    return {**base, "saved": True, "kind": "mu", "n_total": len(kept),
+            "untradable_excluded": excluded, "asof": get_producer_asof(db, plugin_name),
+            "saved_at": saved_at.isoformat() if saved_at else None, "rows": rows}
 
 
 @router.get("/api/plugins/{plugin_name}/progress")

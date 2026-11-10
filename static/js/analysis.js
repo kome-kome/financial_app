@@ -1226,6 +1226,98 @@ function showTab(t) {
       history.replaceState(null, '', `${window.location.pathname}?${q}${window.location.hash}`);
     }
   }
+  _loadSaved(t);
+}
+
+// ── 保存済みの結果（heavy のタブを開いたら最初に見せる・ADR-0072）──────────────────
+// 画面の既定は「読む場所」。夜間などのバッチが保存した結果があるのに空のフォームから始めると、
+// 見るだけで数分の再計算が要る。再計算のフォームは「設定を変えて再計算」の折りたたみへ移し、
+// 保存済みがあれば閉じ、無ければ開いておく。
+const _tabPlugin = {};     // tabId → プラグイン名（initPlugins が埋める）
+const _savedLoaded = {};
+
+function _fmtSavedAt(iso) {
+  if (!iso) return '-';
+  const d = new Date(/[zZ]$|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');   // サーバは UTC の naive を返す
+  return d.toLocaleString('ja-JP', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+}
+
+function _wrapRerun(tabId, d) {
+  const tab = document.getElementById('tab-' + tabId);
+  if (!tab) return null;
+  const done = tab.querySelector(':scope > details.rerun');
+  if (done) return done;
+  const formCard = tab.querySelector(':scope > .card:not([id^="saved-"])');
+  if (!formCard) return null;
+  const det = document.createElement('details');
+  det.className = 'rerun';
+  const mins = d.last_run_min == null ? '数分かかります'
+    : d.last_run_min < 1 ? '1分未満' : `約 ${Math.round(d.last_run_min)} 分`;
+  const save = d.kind === 'none' ? '保存はしません' : '既定は保存しません';
+  det.innerHTML = `<summary>設定を変えて再計算（${mins}・${save}）</summary>`;
+  formCard.before(det);
+  det.appendChild(formCard);
+  return det;
+}
+
+function _savedHTML(d, tabId) {
+  const title = `<div class="section-title">${esc(d.label)} — 保存済みの結果</div>`;
+  const by = d.updated_by ? `${esc(d.updated_by)}が更新します` : '';
+  if (d.kind === 'none') {
+    return title + `<div class="info-box">この分析は結果を保存しません（画面に表示するだけ）。`
+      + '見るには下の「設定を変えて再計算」から実行してください。</div>';
+  }
+  if (!d.saved) {
+    return title + `<div class="info-box">まだ保存された結果がありません。${by ? by + '。' : ''}`
+      + '下の「設定を変えて再計算」で計算した結果を見ることもできます。</div>';
+  }
+  if (d.kind === 'gap') {
+    return title + `<div class="saved-meta">保存 ${esc(_fmtSavedAt(d.computed_at))} ・ `
+      + `${esc((d.models || []).join(' / ') || '-')} ・ ${Number(d.n_companies).toLocaleString()}社`
+      + `${by ? ' ・ ' + by : ''}</div>`
+      + '<div class="text-sm" style="margin-bottom:10px">各社の乖離率の一覧は、この結果を読むバリュエーション分析タブで見られます。</div>'
+      + '<button class="btn btn-primary btn-sm" data-click="showTab" data-arg="gap">→ バリュエーション分析で一覧を見る</button>';
+  }
+  const asof = d.asof && d.asof.snapshot_date ? d.asof.snapshot_date : '不明';
+  const rows = (d.rows || []).map(r => {
+    const mu = r.mu * 100;
+    return `<tr>
+      <td style="text-align:right;color:var(--text-muted)">${Number(r.rank)}</td>
+      <td><span class="tag tag-blue">${esc(r.sec_code || r.edinet_code)}</span></td>
+      <td><a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener">${esc(r.company_name || r.edinet_code)}</a></td>
+      <td><span class="tag tag-amber">${esc(r.industry || '-')}</span></td>
+      <td class="${mu > 0 ? 'gap-positive' : 'gap-negative'}" style="text-align:right;font-family:monospace">${mu > 0 ? '+' : ''}${mu.toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+  return title + `<div class="saved-meta">保存 ${esc(_fmtSavedAt(d.saved_at))} ・ データ基準日 ${esc(asof)} ・ `
+    + `今買える ${Number(d.n_total).toLocaleString()}社のうち μ̂ の上位 ${(d.rows || []).length}社${by ? ' ・ ' + by : ''}</div>`
+    + `<div style="overflow-x:auto"><table>
+        <thead><tr><th style="text-align:right">順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
+          <th style="text-align:right" title="1年先（52週）の期待リターンの予測（対数）。夜間などのバッチが保存した値">μ̂（1年先）</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+async function _loadSaved(tabId, force = false) {
+  const name = _tabPlugin[tabId];
+  if (!name || !(_pluginMeta[name] || {}).heavy) return;
+  if (_savedLoaded[tabId] && !force) return;
+  _savedLoaded[tabId] = true;
+  let d;
+  try { d = await apiFetch(`/api/plugins/${encodeURIComponent(name)}/saved`); }
+  catch (e) { _savedLoaded[tabId] = false; return; }    // 読めなくても再計算の道は残す
+  if (!d) return;
+  const det = _wrapRerun(tabId, d);
+  if (det && !force) det.open = !d.saved;
+  const tab = document.getElementById('tab-' + tabId);
+  if (!tab) return;
+  let card = document.getElementById('saved-' + tabId);
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'saved-' + tabId;
+    card.className = 'card';
+    tab.prepend(card);
+  }
+  card.innerHTML = _savedHTML(d, tabId);
 }
 
 // ── 自動調整済みハイパーパラメータ（Issue #264・読取専用・重い再計算はしない）───
@@ -1339,6 +1431,7 @@ async function initPlugins() {
     _pluginMeta[plugin.name] = plugin;
     if (plugin.href) continue;   // 外部リンク（例: スクリーニング→/collection）はタブを持たない
     const tabId = PLUGIN_TAB_MAP[plugin.name] || plugin.name;
+    _tabPlugin[tabId] = plugin.name;
     if (!_allTabs.includes(tabId)) _allTabs.push(tabId);
     // 既存タブにマッピングがないプラグイン（sector_ols 等）はタブを動的生成
     if (!PLUGIN_TAB_MAP[plugin.name]) _createDynamicTab(plugin, tabId);
@@ -1609,6 +1702,7 @@ async function runDynamicPlugin(pluginName, tabId) {
     content.innerHTML = (RESULT_RENDERERS[pluginName] || _renderGenericResult)(d);
     _showUntradableNote(tabId, d);
     card.classList.remove('hidden');
+    if (persist) _loadSaved(tabId, true);   // 保存したら上の「保存済みの結果」も読み直す
     // 業種別OLS: バリュエーション分析タブは保存済みの regression_results を読むので、保存した
     // ときだけそちらへ導く。保存しなかったときに導くと、前回の結果を今回の結果と取り違える
     if (pluginName === 'sector_ols' && !persist) {
