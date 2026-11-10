@@ -98,6 +98,9 @@ _cancel: contextvars.ContextVar[Optional[Cancellation]] = contextvars.ContextVar
 
 # persisting() が入るときに流すステップ名（画面のログに「ここから止まらない」と出す）
 PERSIST_STEP = "結果を保存（ここからは取消できません）"
+# 保存しない実行（`database.tuning_dry_run()` の内側・画面からの既定・ADR-0072）で流す名前。
+# 「保存」と出すと、保存しない設定で回したのに保存されたように読める。
+NO_PERSIST_STEP = "結果は保存しません（表示だけ・ここからは取消できません）"
 
 
 @contextlib.contextmanager
@@ -117,19 +120,22 @@ def progress_sink(fn: ProgressSink, cancel: Optional[Cancellation] = None) -> It
 
 
 @contextlib.contextmanager
-def persisting(step: str = PERSIST_STEP) -> Iterator[None]:
+def persisting(step: str = PERSIST_STEP, dry_step: str = NO_PERSIST_STEP) -> Iterator[None]:
     """保存の区間（#849）。**入る直前が最後の取消点**で、中では取消を受け付けない。
 
     保存する処理（`replace_macro_*_scores`・業種ごとの commit）を必ずこれで包む。包み忘れても
     失敗としては現れない（保存の途中で止まり、新旧が混ざる）ので、`writes` を持つ heavy は
     `tests/test_plugin_progress.py` が `progress.persisting(` の実在を照合する。
     取消状態が無い経路（バッチ・`/api/recommend`）では何もしない。
+
+    保存しない実行（`database.tuning_dry_run()` の内側）では `step` の代わりに `dry_step` を流す。
     """
+    from database import is_tuning_dry_run   # 遅延 import（progress は database に依存しない純粋な層）
     cancel = _cancel.get()
     if cancel is not None:
         cancel._enter_saving()
     try:
-        emit(step)
+        emit(dry_step if is_tuning_dry_run() else step)
         yield
     finally:
         if cancel is not None:

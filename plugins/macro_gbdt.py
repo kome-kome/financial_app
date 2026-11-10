@@ -406,6 +406,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
     depends_on: list[str] = []
     heavy: bool = True
     writes = ("macro_gbdt_scores",)
+    writes_impact = ("おすすめ銘柄で μ̂ の出所に M-2 を選んだときの値。"
+                     "次に日中の探索バッチが本番の設定で書き直すまで、この設定の値に置き換わります")
     category = "③ 将来リターンを予測"
     ui_order = 340
     # 種で結果が動く＝月次探索の確かめ直す段（`plugins.tuning.search(confirm_*)`・#984）の対象。値は既定の種

@@ -1368,6 +1368,8 @@ async function initPlugins() {
   // recommend: weights/preset は静的 HTML に温存、フィルター項目のみ注入
   _inject('params-form-recommend',    'recommend',
     ([k, v]) => v.type !== 'weights' && k !== 'preset');
+  // 静的タブ（M-1〜M-3）と動的タブ（業種別OLS・M-6 等）の実行ボタンが揃ってから差し込む
+  _injectPersistToggles();
 
   // 自動調整済みバッジ（M-1/M-2/M-3・Issue #264。未調整なら404で非表示のまま）
   ['macro_risk_return', 'macro_gbdt', 'macro_dlm'].forEach(_loadTunedBadge);
@@ -1539,17 +1541,43 @@ function _errDetail(e) {
   try { return JSON.parse(e.message).detail || e.message; } catch (_) { return e.message; }
 }
 
-// 押す直前の確認。始められない理由があれば知らせて false、なければ「何が置き換わるか」と
+// 「結果を保存する」のチェック（既定オフ・ADR-0072）。保存先（writes）を持つ heavy の実行ボタンの
+// 直前へ差し込む。画面の既定値は本番の設定と一致しないので、押しただけで夜間などのバッチが書いた
+// 結果を置き換えないよう、保存は利用者が影響先を読んで選んだときだけにする。
+function _injectPersistToggles() {
+  document.querySelectorAll('[data-click="runDynamicPlugin"]').forEach(btn => {
+    const name = btn.dataset.arg;
+    const meta = _pluginMeta[name] || {};
+    if (!meta.heavy || !(meta.writes || []).length) return;
+    if (document.getElementById(`persist-${name}`)) return;
+    const impact = meta.writes_impact || meta.writes.join('、');
+    btn.insertAdjacentHTML('beforebegin', `
+      <label class="persist-toggle">
+        <input type="checkbox" id="persist-${esc(name)}">
+        <span>結果を保存する<span class="persist-impact">（${esc(impact)}）</span></span>
+      </label>`);
+  });
+}
+
+function _persistChecked(name) {
+  const el = document.getElementById(`persist-${name}`);
+  return !!(el && el.checked);
+}
+
+// 押す直前の確認。始められない理由があれば知らせて false、なければ「保存するか・何が置き換わるか」と
 // 「前回の所要」を見せて confirm の結果を返す。
-async function _confirmHeavyRun(name) {
+async function _confirmHeavyRun(name, persist = false) {
   let d;
   try { d = await apiFetch(`/api/plugins/${encodeURIComponent(name)}/preflight`); }
   catch (e) { showNotif(`実行前の確認に失敗しました: ${_errDetail(e)}`); return false; }
   if (!d) return false;
   if (d.blocked_reason) { showNotif(d.blocked_reason); refreshBatchActivity(); return false; }
-  const writes = (d.writes || []).length
-    ? `・保存先: ${d.writes.join('、')}（保存済みの結果を置き換えます）`
-    : '・保存先: なし（画面に表示するだけで、保存済みの結果は変わりません）';
+  const hasWrites = (d.writes || []).length > 0;
+  const writes = !hasWrites
+    ? '・保存: なし（画面に表示するだけで、保存済みの結果は変わりません）'
+    : persist
+      ? `・保存します: ${d.writes_impact || d.writes.join('、')}`
+      : '・保存しません（画面に表示するだけで、保存済みの結果は変わりません。保存するには「結果を保存する」にチェック）';
   const last = d.last_run_min == null ? '・前回の所要: 記録なし'
     : d.last_run_min < 1 ? '・前回の所要: 1分未満'
     : `・前回の所要: 約 ${Math.round(d.last_run_min)} 分`;
@@ -1566,21 +1594,30 @@ async function runDynamicPlugin(pluginName, tabId) {
     return;
   }
   const btn = this instanceof HTMLElement ? this : null;
-  if (plugin.heavy && !(await _confirmHeavyRun(pluginName))) return;
+  const persist = plugin.heavy && _persistChecked(pluginName);
+  if (plugin.heavy && !(await _confirmHeavyRun(pluginName, persist))) return;
   const origHTML = btn ? btn.innerHTML : null;
   if (btn) { btn.disabled = true; btn.textContent = '実行中...'; }
   const params = _collectParamValues(tabId, plugin.params_schema);
   // 進捗 SSE は POST の応答を待たずに開く（POST は完了まで返らないため・#545）。
   const stopProgress = plugin.heavy ? _startPluginProgress(pluginName, tabId) : null;
   try {
-    const d = await apiFetch(`/api/plugins/${pluginName}/run`, {method:'POST', body:JSON.stringify(params)});
+    const d = await apiFetch(`/api/plugins/${pluginName}/run${persist ? '?persist=1' : ''}`,
+                             {method:'POST', body:JSON.stringify(params)});
     const card = document.getElementById(`dynresult-${tabId}`);
     const content = document.getElementById(`dynresult-content-${tabId}`);
     content.innerHTML = (RESULT_RENDERERS[pluginName] || _renderGenericResult)(d);
     _showUntradableNote(tabId, d);
     card.classList.remove('hidden');
-    // 業種別OLS が完了したらバリュエーション分析を解放し、結果に導線を出す
-    if (pluginName === 'sector_ols') {
+    // 業種別OLS: バリュエーション分析タブは保存済みの regression_results を読むので、保存した
+    // ときだけそちらへ導く。保存しなかったときに導くと、前回の結果を今回の結果と取り違える
+    if (pluginName === 'sector_ols' && !persist) {
+      content.insertAdjacentHTML('afterbegin',
+        `<div class="info-box" style="margin-bottom:14px">
+          ✓ 業種別OLSが完了しました（保存していません）。下の結果はこの設定で計算した値です。
+          バリュエーション分析タブと朝の推奨は、前回保存した結果のままです。
+        </div>`);
+    } else if (pluginName === 'sector_ols') {
       _olsRanThisSession = true;
       refreshGapAvailability();   // 即時: gap-ready を表示
       fetchModelStatus();          // 非同期: 鮮度バーを新しい計算結果で更新

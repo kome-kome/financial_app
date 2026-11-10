@@ -912,12 +912,23 @@ _tuning_dry_run: contextvars.ContextVar = contextvars.ContextVar("_tuning_dry_ru
 
 @contextmanager
 def tuning_dry_run():
-    """このブロック内では producer スコアの永続化（replace_macro_*_scores）を no-op にする。"""
+    """このブロック内では分析結果の永続化を no-op にする。
+
+    対象は heavy の保存先すべて——`replace_macro_*_scores` と `regression_results` の
+    upsert / delete（sector_ols）。**画面からの heavy 実行も既定でこの中で回す**
+    （`routers/analysis.py::run_plugin`・ADR-0072）。保存関数を足したら、ここを見ること
+    （`tests/test_screen_run_persist.py` が heavy の `writes` ごとに照合する）。
+    """
     token = _tuning_dry_run.set(True)
     try:
         yield
     finally:
         _tuning_dry_run.reset(token)
+
+
+def is_tuning_dry_run() -> bool:
+    """`tuning_dry_run()` の内側か（保存しない実行の進捗表示などに使う）。"""
+    return _tuning_dry_run.get()
 
 
 # ── ハイパーパラメータ探索中のスコアリング省略モード（Issue #299）───────────────────
@@ -2075,7 +2086,10 @@ def upsert_regression_result(db, *, edinet_code: str, year: int, period_end: str
 
     主キー (edinet_code, year, period_end) で merge するため PostgreSQL / SQLite の
     どちらでも動作する（pg_insert の ON CONFLICT は Postgres 専用のため使わない）。
+    `tuning_dry_run()` の内側では何もしない（ADR-0072）。
     """
+    if _tuning_dry_run.get():
+        return
     db.merge(RegressionResult(
         edinet_code=edinet_code, year=year, period_end=_parse_period_end(period_end),
         predicted_market_cap=predicted_market_cap, gap_ratio=gap_ratio,
@@ -2108,8 +2122,11 @@ def upsert_regression_results_batch(db, rows) -> int:
     なので Postgres は NOT NULL 違反で落ちる（merge 経路も同じ）が、PK に NULL を許す
     SQLite では ON CONFLICT が NULL を一意と見なさず**重複挿入**になる。テストで None を
     扱う経路は単数形（`test_empty_period_end_normalized`）に残してある。
+
+    `tuning_dry_run()` の内側では何もせず 0 を返す（`replace_macro_*_scores` と同じ作法・
+    画面からの「保存しない」実行・ADR-0072）。
     """
-    if not rows:
+    if not rows or _tuning_dry_run.get():
         return 0
     dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
     if dialect == "sqlite":
@@ -2147,8 +2164,10 @@ def delete_regression_results(db, keys) -> int:
     keys = [(edinet_code, year, period_end), ...]。`period_end` は文字列でも date でもよい
     （`_parse_period_end` を通す）。`period_end` が None のキーは飛ばす——Postgres では PK の
     一部で NOT NULL なので、その行はもともと存在しない。commit は呼び出し側に任せる（upsert と同じ）。
-    戻り値は消した行数。
+    戻り値は消した行数。`tuning_dry_run()` の内側では何もせず 0 を返す（ADR-0072）。
     """
+    if _tuning_dry_run.get():
+        return 0
     norm = sorted({
         (ec, int(y), pe)
         for ec, y, p in keys

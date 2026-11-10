@@ -382,6 +382,8 @@ class MacroDlmPlugin(AnalysisPlugin):
     depends_on: list[str] = []
     heavy: bool = True
     writes = ("macro_dlm_scores",)
+    writes_impact = ("おすすめ銘柄で μ̂ の出所に M-3 を選んだときの値。"
+                     "次に月次バッチが本番の設定で書き直すまで、この設定の値に置き換わります")
     category = "③ 将来リターンを予測"
     ui_order = 360                       # macro_gbdt(340) の次
 

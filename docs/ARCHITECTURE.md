@@ -1412,7 +1412,7 @@ graph LR
 
     subgraph ANALYSIS["📊 分析 /api/"]
         AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
-        AN2["POST /api/plugins/{name}/run\nプラグインを実行\n（heavy かつ writes_blocked＝RENDER_LIGHT_MODE または接続先 prod は 403・#733）\nheavy はローカルバッチ実行中・同じ heavy が実行中なら 409\nheavy は実行中の進捗を JobState へ流す（#545）"]
+        AN2["POST /api/plugins/{name}/run?persist=\nプラグインを実行\n（heavy かつ writes_blocked＝RENDER_LIGHT_MODE または接続先 prod は 403・#733）\nheavy はローカルバッチ実行中・同じ heavy が実行中なら 409\nheavy は実行中の進捗を JobState へ流す（#545）\nheavy は既定で保存しない（tuning_dry_run）。保存は persist=1 のときだけ（ADR-0072）"]
         AN14["GET /api/batch/activity\nいま走っているローカルバッチ（running）と\n期限切れで残った実行中マーカー（stale）\n分析画面が heavy のボタンを止める帯に使う"]
         AN15["GET /api/plugins/{name}/preflight\nheavy を押す直前の確認材料\n（blocked_reason / writes / last_run_min）"]
         AN12["GET /api/plugins/{name}/progress\nheavy プラグイン実行の進捗 SSE（#545）\n{running, progress, total, new_logs}\n画面は POST の応答を待たずに開く\n（POST が完了まで返らないため）"]

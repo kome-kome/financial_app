@@ -306,11 +306,14 @@ class SectorOLSPlugin(AnalysisPlugin):
     description = (
         "業種ごとに個別OLS回帰を実行し、業種内の割安・割高スコアリングを行います。"
         "目的変数は株価[円/株]、説明変数は per-share[円/株] に固定（次元整合性を構造的に強制）。"
-        "実行すると predicted_market_cap / gap_ratio が regression_results に書き込まれ、乖離分析タブに反映されます。"
+        "結果は毎晩の夜間バッチが保存し、バリュエーション分析と朝の推奨の乖離率になります。"
+        "ここで実行した結果は、「結果を保存する」にチェックを入れたときだけ保存されます。"
     )
     depends_on = []
     heavy = True   # 業種ごとの行列回帰。Render Free では OOM するためローカル実行に限定
-    writes = ("regression_results",)   # 朝の推奨・バリュエーション分析の乖離率
+    writes = ("regression_results",)
+    writes_impact = ("朝の推奨とバリュエーション分析の乖離率、乖離率を使うおすすめ銘柄のプリセット。"
+                     "次の夜間バッチまでこの設定の値に置き換わります")
     category = "② 割安度を測る"
     ui_order = 210
 
@@ -960,7 +963,8 @@ class SectorOLSPlugin(AnalysisPlugin):
         n_sectors = len(sectors)
         # 業種ごとに commit する（`_persist_and_rank`）ので、最初の業種から先は止めない（#849）。
         # 途中で止めると regression_results に新旧の業種が混ざる。取消はロードと前処理の間だけ。
-        with progress.persisting("業種ごとに回帰して保存（ここからは取消できません）"):
+        with progress.persisting("業種ごとに回帰して保存（ここからは取消できません）",
+                                 "業種ごとに回帰（保存しない・ここからは取消できません）"):
             for done, (sector, samples) in enumerate(sectors):
                 progress.emit(f"業種別に回帰: {sector}", done, n_sectors,
                               every=progress.EVERY_SECTORS)
