@@ -209,9 +209,15 @@ class TestDaytimeJob:
         assert argv[argv.index("--prereg-sha") + 1] == SHA
         assert "--smoke" not in argv
 
+    def test_result_section_records_the_decision(self):
+        # 2026-11-10 の実走で keep（据え置き）。書き写した結果を消さない（#1152）
+        section = prereg.appendix_section(prereg.read_document(B.SELL_PREREG), "### 結果")
+        assert not section.startswith(prereg.PLACEHOLDER)
+        assert "判定: keep（据え置き）" in section
+
 
 def test_sell_ranking_is_unchanged():
-    """本番の売りの並びは判定の後でしか変えない。"""
+    """本番の売りの並びは判定の後でしか変えない（#1152 の判定は keep＝M-6 の μ̂ のまま）。"""
     from plugins import sell_ranking
 
     assert sell_ranking.MU_SOURCE == B.SELL_BASE == "macro_enet"
