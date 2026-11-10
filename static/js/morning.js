@@ -85,10 +85,12 @@ function batchCard(b) {
   }
   const age = (night.age_h === null || night.age_h === undefined)
     ? '—' : `${Math.round(night.age_h)}時間前`;
+  // 日時は途中（「2026-」「11-02」）で折らない。狭いカードでは日時ごと次の行へ送る
+  const when = s => `<span class="nowrap">${esc(s)}</span>`;
   const sub = [
     `${LEVEL_LABEL[night.level] || '—'}・${age}（閾値 ${Math.round(night.stale_h || 0)}時間）`,
-    `最終成功 ${esc(night.last_success || '—')}`,
-    ...others.map(r => `${esc(r.label)}: ${esc(r.last_run || '未実行')}`
+    `最終成功 ${when(night.last_success || '—')}`,
+    ...others.map(r => `${esc(r.label)}: ${when(r.last_run || '未実行')}`
       + (r.level === 'fresh' ? '' : `（${LEVEL_LABEL[r.level] || '要確認'}）`)),
     b.command ? `手動実行 <code>${esc(b.command)}</code>` : '',
   ].filter(Boolean).join('<br>');
@@ -158,13 +160,28 @@ function renderRanking(rec, priceLevel) {
   </tr>`).join('');
 }
 
+// 応答は 3〜4.5 秒かかる。その間に選び直されたら、先に出した要求の応答は捨てる
+// （後から届いた古い応答が、新しいプリセットの並びを上書きしないように）。
+let loadSeq = 0;
+
+function setRankLoading(on) {
+  const wrap = document.querySelector('.rank-wrap');
+  wrap.classList.toggle('is-loading', on);
+  wrap.setAttribute('aria-busy', on ? 'true' : 'false');
+}
+
 async function loadMorning() {
+  const seq = ++loadSeq;
   const preset = document.getElementById('mor-preset').value;
   const topN   = document.getElementById('mor-topn').value;
   const dot    = document.getElementById('api-dot');
   const label  = document.getElementById('api-label');
+  setRankLoading(true);
+  document.getElementById('mor-generated').textContent = '読み込み中…';
   try {
     const d = await apiFetch(`/api/morning?preset=${encodeURIComponent(preset)}&top_n=${topN}`);
+    if (seq !== loadSeq) return;
+    setRankLoading(false);
     if (!d) return;
     renderVerdict(d.freshness);
     renderFreshness(d.freshness);
@@ -174,6 +191,13 @@ async function loadMorning() {
     dot.className = 'dot ' + (lv === 'fresh' ? 'dot-green' : lv === 'warn' ? 'dot-amber' : 'dot-red');
     label.textContent = lv === 'fresh' ? '最新データ' : (lv === 'warn' ? '一部が古い' : '古い/欠測あり');
   } catch (e) {
+    if (seq !== loadSeq) return;
+    setRankLoading(false);
+    document.getElementById('mor-generated').textContent = '';
+    // 前の並び（または「読み込み中…」）を残すと、取れなかったことに気づかず古い並びを読む
+    document.getElementById('rank-body').innerHTML =
+      '<tr><td colspan="10" class="muted rank-empty" style="padding:18px">'
+      + 'ランキングを取得できませんでした（上の判定の理由を確認してください）</td></tr>';
     dot.className = 'dot dot-red';
     label.textContent = '取得失敗';
     // 判定を出せなかった＝発注の根拠が無いので赤にする（読み込み中の黄のまま残さない）

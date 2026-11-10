@@ -136,8 +136,9 @@ tr:hover td{background:var(--border-subtle)}
 .checkbox-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 .checkbox-item{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer}
 .checkbox-item input{width:auto;margin:0}
-.gap-positive{color:var(--val-up);font-weight:600}
-.gap-negative{color:var(--val-down);font-weight:600}
+/* 文字なので X-text を使う（--val-up / --val-down は線・点の色で、ダークとホバー行で対比 AA に届かない）。朝の推奨とそろえる */
+.gap-positive{color:var(--val-up-text);font-weight:600}
+.gap-negative{color:var(--val-down-text);font-weight:600}
 .stat-card{background:var(--bg-sunken);border-radius:8px;padding:12px;text-align:center}
 .stat-label{font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
 .stat-value{font-size:20px;font-weight:700}
