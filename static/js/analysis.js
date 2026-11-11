@@ -199,6 +199,10 @@ async function runGapAnalysis() {
     if (params[k] != null && params[k] !== '' && !Number.isNaN(params[k])) qs.set(k, params[k]);
   }
   const url = '/api/gap-analysis' + (qs.toString() ? `?${qs}` : '');
+  // 実行中はボタンを止めて見せる（反応が見えず二重に押しやすかった・#1175）
+  const btn = document.getElementById('btn-gap-analysis');
+  const label = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 分析中...'; }
   try {
     const d = await apiFetch(url);
     gapResults = d.results;
@@ -207,7 +211,12 @@ async function runGapAnalysis() {
     renderGap(gapResults);
     renderGapCharts(gapResults);
   } catch(e) {
-    showNotif('バリュエーション分析失敗: ' + e.message + '（先に業種別OLS分析を実行してください）');
+    // 理由はサーバの文に任せる。404 は業種別OLS が未実行のときも入力の検証エラーのときもあり、
+    // 前者の文は既に「先に「業種別OLS」を実行してください」を含む（plugins.ensure_dependencies）。
+    // 画面で案内を足すと、検証エラーや 500 でも原因と違う案内が付いていた。
+    showNotif('バリュエーション分析に失敗しました: ' + _errDetail(e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = label; }
   }
 }
 
@@ -450,7 +459,7 @@ async function runRecommend() {
     }
     document.getElementById('rec-result-card').style.display = 'block';
   } catch(e) {
-    showNotif('分析エラー: ' + e.message);
+    showNotif('おすすめ銘柄の分析に失敗しました: ' + _errDetail(e));
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> おすすめ銘柄を分析';
@@ -496,7 +505,7 @@ async function runSellRanking() {
     const d = await apiFetch('/api/plugins/sell_ranking/run', {method:'POST', body:JSON.stringify({holdings})});
     renderSellRanking(d);
   } catch(e) {
-    showNotif('売り判定に失敗: ' + e.message);
+    showNotif('売り判定に失敗しました: ' + _errDetail(e));
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2 12 6 12 9 3 15 21 18 12 22 12"/></svg> 売り候補を判定';
@@ -618,7 +627,7 @@ async function runNetCash() {
     document.getElementById('nc-count').textContent = (d.count ?? 0) + '社 / 候補 ' + (d.n_total_candidates ?? 0) + '社';
     renderNetCash();
   } catch(e) {
-    showNotif('ネットキャッシュ分析失敗: ' + e.message);
+    showNotif('ネットキャッシュ分析に失敗しました: ' + _errDetail(e));
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> ネットキャッシュ分析を実行';
@@ -707,7 +716,7 @@ async function runBacktest() {
     document.getElementById('bt-results-card').classList.remove('hidden');
     showNotif(`バックテスト完了（${d.results.length}社）`, 'success');
   } catch(e) {
-    showNotif('バックテスト失敗: ' + e.message);
+    showNotif('バックテストに失敗しました: ' + _errDetail(e));
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> バックテストを実行';
@@ -901,7 +910,7 @@ async function runBtMulti() {
     _renderBtMulti(d);
     document.getElementById('bt-multi-card').classList.remove('hidden');
   } catch(e) {
-    showNotif('マルチピリオド比較失敗: ' + e.message);
+    showNotif('マルチピリオド比較に失敗しました: ' + _errDetail(e));
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg> マルチピリオド比較（3〜24ヶ月）';
@@ -1635,11 +1644,6 @@ async function refreshBatchActivity() {
     btn.disabled = !!_batchBlockReason;
     btn.title = _batchBlockReason ? '重い分析はローカルバッチの実行中は動かせません' : '';
   });
-}
-
-// サーバの 409 などは本文が JSON（{"detail": "..."}）で来る。生の JSON を通知に出さない。
-function _errDetail(e) {
-  try { return JSON.parse(e.message).detail || e.message; } catch (_) { return e.message; }
 }
 
 // 「結果を保存する」のチェック（既定オフ・ADR-0072）。保存先（writes）を持つ heavy の実行ボタンの

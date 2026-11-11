@@ -130,10 +130,32 @@ async function apiFetch(path, opts = {}) {
   if (!r.ok) {
     if (r.status === 502 || r.status === 503 || r.status === 504)
       throw new Error(`サーバー再起動中 (${r.status})。しばらく待ってから再試行してください`);
-    if (r.status === 404) throw new Error('NOT_FOUND');
-    throw new Error(await r.text());
+    // 本文の detail だけを message に持たせ、status を付けて投げる。404 でも理由の文を捨てない
+    // （以前は 'NOT_FOUND' に置き換えていて「先に業種別OLSを実行してください」が消え、
+    //  ほかの失敗は {"detail":…} の生の JSON が通知に出ていた・#1175）。見分けは e.status で行う。
+    const err = new Error(_detailText(await r.text()) || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
   }
   return r.json();
+}
+
+// API の失敗の本文から、人に見せる文だけを取り出す。FastAPI は {"detail": "…"}、
+// 入力の検証エラー（422）は {"detail": [{"msg": "…"}, …]} で返す。JSON でない本文はそのまま返す。
+function _detailText(body) {
+  if (typeof body !== 'string' || !body) return body || '';
+  let j;
+  try { j = JSON.parse(body); } catch (_) { return body; }
+  const d = j && j.detail;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) return d.map(x => (x && x.msg) || JSON.stringify(x)).join(' / ');
+  return d != null ? JSON.stringify(d) : body;
+}
+
+// 例外から通知に出す文を取り出す（全画面共通）。apiFetch の例外は既に detail だけを持つが、
+// fetch を直に使う経路の生の JSON もここで剥がす。
+function _errDetail(e) {
+  return _detailText(e && e.message != null ? String(e.message) : String(e));
 }
 
 // ── サーバー生存通知（ブラウザ連動自動停止） ─────────────────────────────
