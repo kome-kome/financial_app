@@ -123,7 +123,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
    @starting-style で保つ。本文の右端を越える用語は models.js が .tip-flip を付けて左へ開く。
    フォーカスでも開く（tabindex="0"・#893。:focus-visible ではタップで開かない）。models.js は
    --tip-room（外寸を本文の幅に収める上限）と --tip-shift（左へ開くと本文の左端を越える分だけ右へ戻す量）も入れる */
-.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:12px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
+.term::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:8px;padding:9px 11px;font-size:12px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s,transform .13s;pointer-events:none}
 .term:hover::after,.term:focus::after{display:block;opacity:1;transform:translateY(0)}
 .term.tip-flip::after{left:auto;right:calc(0px - var(--tip-shift,0px))}
 @starting-style{.term:hover::after,.term:focus::after{opacity:0;transform:translateY(-4px)}}
@@ -185,7 +185,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <a href="#recommend">おすすめ銘柄</a>
     <a href="#net_cash_analysis">ネットキャッシュ分析</a>
     <div class="toc-group">② 割安度を測る</div>
-    <a href="#sector_ols">業種別OLS分析</a>
+    <a href="#sector_ols">業種別OLS</a>
     <a href="#gap_analysis">バリュエーション分析</a>
     <div class="toc-group">③ 将来リターンを予測</div>
     <a href="#macro_risk_return">マクロ×リスク-リターン（M-1）</a>
@@ -423,9 +423,9 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="more">→ もっと詳しく：<a href="/models#m8">モデル解説：ネットキャッシュ分析（清原達郎式）</a></div>
 </div>
 
-<!-- ② 業種別OLS分析 ─────────────────────────── -->
+<!-- ② 業種別OLS ─────────────────────────── -->
 <div class="model-section" id="sector_ols">
-  <h2>業種別OLS分析 <span class="model-tag">② 割安度を測る</span></h2>
+  <h2>業種別OLS <span class="model-tag">② 割安度を測る</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -468,7 +468,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>土台として<a href="#sector_ols">業種別OLS分析</a>の結果が要ります（夜間バッチが毎晩作ります。まだ無いときは上の帯がそう知らせます）。</li>
+    <li>土台として<a href="#sector_ols">業種別OLS</a>の結果が要ります（夜間バッチが毎晩作ります。まだ無いときは上の帯がそう知らせます）。</li>
     <li>「対象年度」を空欄のまま実行すると、<strong>各社の最新の決算</strong>で1社1行ずつ並びます。決算期が社ごとに違うので、表の「年度」列で、どの年度の決算から出した値かを確かめられます。</li>
     <li>「最低配当利回り」に 3 と入れると、配当利回りが 3% 以上の会社だけに絞れます（0 は絞らない）。</li>
     <li>割安〜割高の順に会社が並びます。「ソート順」を変えると、押し直さなくても期待総リターン順などへその場で並べ替わります。</li>
@@ -717,11 +717,11 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <dt id="term-net-cash">ネットキャッシュ</dt>
     <dd>現金や換金しやすい資産から借金を引いた、手元に残るお金です。時価総額との比で割安さを見るのが<a href="#net_cash_analysis">ネットキャッシュ分析</a>です。</dd>
     <dt id="term-gap">理論時価総額・乖離率</dt>
-    <dd>理論時価総額は、<a href="#sector_ols">業種別OLS分析</a>が「同じ業種の会社の財務の数字と株価の関係」から計算した、業種内の平均的な値ごろです。乖離率は、実際の時価総額がそれよりどれだけ安いかを％で表したもので、<strong>プラスが割安</strong>、マイナスが割高です。</dd>
+    <dd>理論時価総額は、<a href="#sector_ols">業種別OLS</a>が「同じ業種の会社の財務の数字と株価の関係」から計算した、業種内の平均的な値ごろです。乖離率は、実際の時価総額がそれよりどれだけ安いかを％で表したもので、<strong>プラスが割安</strong>、マイナスが割高です。</dd>
     <dt id="term-dividend">配当利回り</dt>
     <dd>1株あたり配当 ÷ 株価。<a href="#gap_analysis">バリュエーション分析</a>の期待総リターンは、乖離率（値上がり余地）にこれを足したものです。</dd>
     <dt id="term-industry">業種</dt>
-    <dd>東京証券取引所の33業種の分類です。業種別OLS分析や、業種内での順位はこの分類ごとに計算します。</dd>
+    <dd>東京証券取引所の33業種の分類です。業種別OLSや、業種内での順位はこの分類ごとに計算します。</dd>
   </dl>
 </div>
 
