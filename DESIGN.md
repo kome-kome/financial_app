@@ -108,7 +108,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 平面が既定。奥行きは面の明るさの3段（`--bg-sunken` → `--bg` → `--bg-elevated`）と 1px の罫線で出し、影は使わない。
 
 ### Shadow Vocabulary
-- **浮いた層**（`0 10px 30px var(--shadow-color)` / `0 8px 24px var(--shadow-color)`）: 用語の吹き出しと通知トーストだけ。本文の流れから外れて重なるものに限る。
+- **浮いた層**（`0 10px 30px var(--shadow-color)` / `0 8px 24px var(--shadow-color)`）: 用語の吹き出し・通知トースト・実行前の確認の窓だけ。本文の流れから外れて重なるものに限る。
 - **飛んできた先の光**（`0 0 0 2px` の淡い輪）: ページ内リンクで飛んだ先の節（`:target`）を一瞬で見つけさせる。/guide は緑、/models は紫。
 
 ### Named Rules
@@ -183,6 +183,11 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 ### 通知トースト（`.notif` / `.notif-error`）
 - 画面の JS が `showNotif` を呼ぶなら、その画面にトーストの CSS を必ず置く。持ち上げた面・角 8px・浮いた層の影、失敗は赤の面。
+
+### 実行前の確認（`.confirm-dialog`・分析画面）
+- 重い分析と、株価が古いときの推奨の前に出す画面内の確認。ブラウザ標準の `confirm()` は使わない（既定のボタンが「OK」で Enter 一打で数分の計算が始まり、強調も持てず、テーマに従わない・#1185）。
+- `<dialog>` を `showModal()` で開く（背後は操作できず、Esc で閉じる）。中は `<form method="dialog">` で、押したボタンの `value` が結果になる。**既定のフォーカスは「やめる」**（`autofocus`）。閉じたら押したボタンへフォーカスを戻す。
+- 持ち上げた面・1px の `--border`・角 10px・浮いた層の影、幅は `min(480px, 100vw - 32px)`。読み手が見落とすと損をする行（保存の有無など）だけ太字にする。部品は `analysis.js` の `_confirmDialog`、配線は `tests/test_screen_run_persist.py::TestInPageConfirm` が照合する。
 
 ## Do's and Don'ts
 

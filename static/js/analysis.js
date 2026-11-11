@@ -388,10 +388,13 @@ async function runRecommend() {
   // 株価が古いときは実行をブロックせず確認だけ挟む（z_momentum を外した分析など
   // 正当な用途を殺さない・無意識のクリックだけ止める・Issue #416）。
   if (_priceFresh && _priceFresh.level === 'alert') {
-    const ok = confirm(
-      `株価が ${_priceFresh.p50} 時点で止まっています（${_priceFresh.bdays}営業日前・中央値）。\n` +
-      `PER・PBR・モメンタムを含むスコアはこの日付時点の値です。\n\n` +
-      `この結果で発注しないでください。分析だけ続けますか？`);
+    const ok = await _confirmDialog({
+      title: `株価が ${_priceFresh.p50} 時点で止まっています（${_priceFresh.bdays}営業日前・中央値）`,
+      lines: ['PER・PBR・モメンタムを含むスコアはこの日付時点の値です。',
+              {text: 'この結果で発注しないでください。', strong: true}],
+      question: '分析だけ続けますか？',
+      okLabel: '分析を続ける',
+    });
     if (!ok) return;
   }
   const btn = document.getElementById('btn-recommend');
@@ -1669,8 +1672,67 @@ function _persistChecked(name) {
   return !!(el && el.checked);
 }
 
+// 実行前の確認（画面内の <dialog>・#1185）。ブラウザ標準の confirm() は既定のボタンが「OK」で、Enter
+// 一打で数分の計算が始まり、文面に強調も持てない。showModal() で開くと背後は操作できず（フォーカスは
+// 窓の中に閉じる）、Esc で閉じる。既定のフォーカスは「やめる」（HTML の autofocus）。
+// lines の要素は文字列か {text, strong}。文面は textContent で入れる（分析名を HTML として読まない）。
+// <dialog> が使えない環境では confirm() へ戻す（確認を飛ばして実行する側へ倒さない）。
+function _confirmDialog({title, lines = [], question = '', okLabel = '実行する'}) {
+  const items = lines.map(l => (typeof l === 'string' ? {text: l, strong: false} : l));
+  const dlg = document.getElementById('confirm-dialog');
+  if (!dlg || typeof dlg.showModal !== 'function') {
+    return Promise.resolve(confirm(
+      `${title}\n\n${items.map(l => `・${l.text}`).join('\n')}${question ? `\n\n${question}` : ''}`));
+  }
+  if (dlg.open) return Promise.resolve(false);   // 開いている確認に重ねない
+  document.getElementById('confirm-dialog-title').textContent = title;
+  const ul = document.getElementById('confirm-dialog-lines');
+  ul.replaceChildren(...items.map(l => {
+    const li = document.createElement('li');
+    if (l.strong) {
+      const s = document.createElement('strong');
+      s.textContent = l.text;
+      li.appendChild(s);
+    } else {
+      li.textContent = l.text;
+    }
+    return li;
+  }));
+  const q = document.getElementById('confirm-dialog-question');
+  q.textContent = question;
+  q.classList.toggle('hidden', !question);
+  document.getElementById('confirm-dialog-ok').textContent = okLabel;
+  // Esc で閉じたときは returnValue が変わらない＝前回の 'ok' が残るので、開くたびに空へ戻す
+  dlg.returnValue = '';
+  const opener = document.activeElement;
+  const form = dlg.querySelector('form');
+  return new Promise(resolve => {
+    // 結果は submit（押したボタン）と cancel（Esc）で確定する。close イベントは閉じた後に遅れて届き、
+    // 次の確認を開いた後に前回の分が届くことがある（そのとき returnValue は空に戻っている＝「実行する」が
+    // 「やめる」にすり替わる）ので結果の主には使わない。close は Esc が cancel を出さずに閉じた場合
+    // （連打の抑止）の受け皿で、開き直した後に届いた前回の close には反応しない。
+    const finish = ok => {
+      form.removeEventListener('submit', onSubmit);
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('close', onClose);
+      // 閉じ終わってから押したボタンへフォーカスを戻す（submit・cancel は閉じる直前に届く）
+      setTimeout(() => {
+        if (!dlg.open && opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+      }, 0);
+      resolve(ok);
+    };
+    const onSubmit = e => finish(!!(e.submitter && e.submitter.value === 'ok'));
+    const onCancel = () => finish(false);
+    const onClose = () => { if (!dlg.open) finish(dlg.returnValue === 'ok'); };
+    form.addEventListener('submit', onSubmit);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
+
 // 押す直前の確認。始められない理由があれば知らせて false、なければ「保存するか・何が置き換わるか」と
-// 「前回の所要」を見せて confirm の結果を返す。
+// 「前回の所要」を見せて確認の結果を返す。保存の行は強調する（ADR-0072 の要点を他の文に埋もれさせない）。
 async function _confirmHeavyRun(name, persist = false) {
   let d;
   try { d = await apiFetch(`/api/plugins/${encodeURIComponent(name)}/preflight`); }
@@ -1679,16 +1741,20 @@ async function _confirmHeavyRun(name, persist = false) {
   if (d.blocked_reason) { showNotif(d.blocked_reason); refreshBatchActivity(); return false; }
   const hasWrites = (d.writes || []).length > 0;
   const writes = !hasWrites
-    ? '・保存: なし（画面に表示するだけで、保存済みの結果は変わりません）'
+    ? '保存: なし（画面に表示するだけで、保存済みの結果は変わりません）'
     : persist
-      ? `・保存します: ${d.writes_impact || d.writes.join('、')}`
-      : '・保存しません（画面に表示するだけで、保存済みの結果は変わりません。保存するには「結果を保存する」にチェック）';
-  const last = d.last_run_min == null ? '・前回の所要: 記録なし'
-    : d.last_run_min < 1 ? '・前回の所要: 1分未満'
-    : `・前回の所要: 約 ${Math.round(d.last_run_min)} 分`;
-  return confirm(`「${d.label}」を実行します。\n\n${writes}\n${last}\n`
-    + '・実行中は夜間・日中のバッチを手で起動しないでください（並行すると計算結果が変わります）\n\n'
-    + '実行しますか？');
+      ? `保存します: ${d.writes_impact || d.writes.join('、')}`
+      : '保存しません（画面に表示するだけで、保存済みの結果は変わりません。保存するには「結果を保存する」にチェック）';
+  const last = d.last_run_min == null ? '前回の所要: 記録なし'
+    : d.last_run_min < 1 ? '前回の所要: 1分未満'
+    : `前回の所要: 約 ${Math.round(d.last_run_min)} 分`;
+  return _confirmDialog({
+    title: `「${d.label}」を実行します`,
+    lines: [{text: writes, strong: true}, last,
+            '実行中は夜間・日中のバッチを手で起動しないでください（並行すると計算結果が変わります）'],
+    question: '実行しますか？',
+    okLabel: '実行する',
+  });
 }
 
 async function runDynamicPlugin(pluginName, tabId) {
