@@ -223,8 +223,10 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
         #604 でモメンタム2軸を除外・#615 で use_macro を除外・#791 で max_features を除外）。
 
         **軸は1本も無い**（`dims=[]`）。`search()` は `base_params` だけの1候補を評価して
-        完走し、月次の `tune:macro_risk_return` は best params での最終 execute で μ̂ を
-        永続化する（`--persist-scores`）——探索を残しているのはこのため。
+        完走し、月次の `tune:macro_risk_return` は `--persist` で base params と rank-IC を
+        `plugin_tuned_params` へ書く（watchdog の足跡・分析画面の初期値）——探索を残しているのは
+        このため。**μ̂ はここでは作らない**: execute は何も保存せず（`writes = ()`）、μ̂ は
+        macro_beta 推論バッチの結果から復元する（`read_producer_scores`・#1179）。
         `fin_features`/`macro_features` の部分集合探索は 2^N で不可能なため対象外
         （既定の候補プールを固定・#264 設計方針）。表示専用の lambda_risk/risk_axis/r3_gate/top_n
         も対象外。

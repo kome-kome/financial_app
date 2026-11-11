@@ -369,10 +369,11 @@ class TestChampionInjection:
 class TestNoAxisSpace:
     """軸が1本も無い探索空間でも、1候補で完走して永続化まで行う（#791）。
 
-    M-1 は最後の軸 `max_features` を外したが、`tune:macro_risk_return` は μ̂ の永続化
-    （`--persist-scores`）のために残す。`_grid_combos([])` は `[{}]`・`_random_combos` も
-    `[{}]` を返すので `search()` は `base_params` だけで1回評価する——ここが崩れると
-    「探索空間が空です」の `ValueError` で月次が落ち、**止まって最も困る M-1 の μ̂** が止まる。
+    M-1 は最後の軸 `max_features` を外したが、`tune:macro_risk_return` は `plugin_tuned_params`
+    （watchdog の足跡・分析画面の初期値）を書くために残す（M-1 の μ̂ は macro_beta 推論バッチが作る・
+    #1179）。`_grid_combos([])` は `[{}]`・`_random_combos` も `[{}]` を返すので `search()` は
+    `base_params` だけで1回評価する——ここが崩れると「探索空間が空です」の `ValueError` で月次の
+    M-1 が落ち、足跡が止まって watchdog が鳴る。
     """
 
     @pytest.mark.parametrize("strategy", ["grid", "random"])

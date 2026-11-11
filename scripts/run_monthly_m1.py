@@ -126,11 +126,14 @@ def steps_for(python: str) -> tuple[Step, ...]:
         Step(f"tune:{MODEL}",
              (python, "hyperparameter_search.py", "--model", MODEL,
               "--strategy", STRATEGY,
-              "--objective", "rank_ic", "--persist", "--persist-scores", "--seed", "0"),
-             why="M-1 の best params 探索と mu-hat の永続化（--persist-scores）。"
-                 "**止まって最も困るのが M-1 の μ̂**（`sell_ranking` の mu_source 候補）。"
-                 "実測 2.61分/件 × 288件 ＝ 約752分で月次本体の窓に入らないため、"
-                 "ここへ切り出してある（#584）"),
+              "--objective", "rank_ic", "--persist", "--seed", "0"),
+             why="M-1 の探索（軸なし・1 候補）。`--persist` で base params と rank-IC を "
+                 "`plugin_tuned_params` へ書く（watchdog の足跡・分析画面の初期値）。"
+                 "**M-1 の μ̂ はここでは作らない**——M-1 の execute は何も保存せず（`writes = ()`）、"
+                 "μ̂ と as-of は macro_beta 推論バッチ（run_monthly_beta.py）が作る。だから "
+                 "`--persist-scores`（最後に 1 回 execute するだけ）は渡さない（#1179）。"
+                 "当時の実測 2.61分/件 × 288件 ＝ 約752分で月次本体の窓に入らないため、"
+                 "ここへ切り出した（#584）"),
     ]
     # 予算は**名前で引く**（Step へ直書きしない）。付け忘れを `window_problem` が CI で落とす。
     return tuple(replace(s, budget_min=BUDGET_MIN.get(s.name)) for s in steps)

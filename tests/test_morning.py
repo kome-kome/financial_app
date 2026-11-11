@@ -213,26 +213,46 @@ class TestVerdictGatesOnRankingInputs:
 
 
 class TestMuDriver:
-    """μ̂ を前進させるバッチは `HEAVY_AUTOMATION` から引く（#743）。
+    """μ̂ を前進させるバッチは `MU_PRODUCER_OVERRIDES` → `HEAVY_AUTOMATION` の順に引く（#743・#1179）。
 
-    以前は「既定の macro_enet なら夜間、それ以外は全部月次」と推測しており、M-1 の μ̂ を
-    永続化するのは `run_monthly_m1.py`（ADR-0046）なのに `./run_monthly.ps1` を案内していた。
+    以前は「既定の macro_enet なら夜間、それ以外は全部月次」と推測していた。その後も M-1 は
+    `run_monthly_m1.py`（M-1 の探索）を案内していたが、M-1 の execute は何も保存せず、μ̂ と as-of は
+    macro_beta 推論バッチ（`run_monthly_beta.py`）が作る（#1179）。
     """
 
     @pytest.mark.parametrize("source", sorted(_mu_sources()))
     def test_driver_matches_the_registry(self, source):
-        from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+        from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX, MU_PRODUCER_OVERRIDES
 
-        entry = HEAVY_AUTOMATION.get(source, "")
+        entry = MU_PRODUCER_OVERRIDES.get(source) or HEAVY_AUTOMATION.get(source, "")
         expected = entry if entry.startswith(LOCAL_PREFIX) else None
         mu = client.get(f"/api/morning?mu_source={source}").json()["freshness"]["mu"]
         assert mu["driver"] == expected, source
 
-    def test_m1_points_at_its_own_batch(self):
-        """照合テストが「両辺とも同じ間違い」で通らないよう、M-1 は値で縛る。"""
+    def test_m1_points_at_the_macro_beta_batch(self):
+        """照合テストが「両辺とも同じ間違い」で通らないよう、M-1 は値で縛る（#1179）。"""
         mu = client.get("/api/morning?mu_source=macro_risk_return").json()["freshness"]["mu"]
-        assert mu["driver"] == "local:scripts/run_monthly_m1.py"
-        assert mu["command"] == "./run_monthly_m1.ps1"
+        assert mu["driver"] == "local:scripts/run_monthly_beta.py"
+        assert mu["command"] == "./run_monthly_beta.ps1"
+
+    def test_overrides_point_at_existing_batches(self):
+        """例外表の指すスクリプトと、案内する `.ps1` が実在する（名前の打ち間違いは案内を黙って壊す）。"""
+        from pathlib import Path
+
+        from nightly_scores import LOCAL_PREFIX, MU_PRODUCER_OVERRIDES
+
+        root = Path(__file__).resolve().parent.parent
+        for source, entry in MU_PRODUCER_OVERRIDES.items():
+            assert entry.startswith(LOCAL_PREFIX), source
+            script = entry[len(LOCAL_PREFIX):]
+            assert (root / script).is_file(), script
+            assert (root / f"{Path(script).stem}.ps1").is_file(), script
+
+    def test_m1_overrides_because_its_execute_writes_nothing(self):
+        """例外を持つ理由（M-1 は execute で保存しない）が崩れたら、例外表も見直す。"""
+        from plugins.macro_risk_return import MacroRiskReturnPlugin
+
+        assert MacroRiskReturnPlugin.writes == ()
 
     def test_default_points_at_the_nightly_batch(self):
         mu = client.get("/api/morning").json()["freshness"]["mu"]
