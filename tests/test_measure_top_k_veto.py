@@ -422,3 +422,9 @@ class TestPctRankDaytimeJob:
         assert "MDE ≤ 0.5 × |平均 − 0.5|" in text
         assert X.MODELS == ("macro_risk_return", "macro_gbdt", "macro_enet")
         assert X.CANDIDATE_K == (5, 10, 30)
+
+    def test_result_section_records_the_chosen_k(self):
+        # 2026-11-11 の実走でも K は該当なし（ADR-0069 の 2026-11-11 の実測）。書き写した結果を消さない（#1156）
+        section = prereg.appendix_section(PREREG_PCT.read_text(encoding="utf-8"), "### 結果")
+        assert not section.startswith(prereg.PLACEHOLDER)
+        assert "選ばれた K: 該当なし" in section
