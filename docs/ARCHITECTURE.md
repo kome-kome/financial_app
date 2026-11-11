@@ -1249,7 +1249,7 @@ classDiagram
 
     class MacroRiskReturnPlugin {
         +name = "macro_risk_return"
-        +label = "マクロ×リスク-リターン推奨"
+        +label = "M-1: マクロ×リスク-リターン推奨"
         +depends_on = []
         +heavy = True
         +ui_order = 330

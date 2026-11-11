@@ -83,7 +83,7 @@ def _pareto_frontier(
 
 class MacroRiskReturnPlugin(AnalysisPlugin):
     name = "macro_risk_return"
-    label = "マクロ×リスク-リターン推奨"
+    label = "M-1: マクロ×リスク-リターン推奨"
     description = (
         "財務比率を LassoLarsIC(BIC) で選択し、"
         "各銘柄を期待リターン（縦軸）×リスク（横軸）の散布図に配置して推奨集合を選びます。"

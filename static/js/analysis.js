@@ -20,15 +20,15 @@ function refreshGapAvailability() {
   const available = _gapDataExists || _olsRanThisSession;
   const ready = document.getElementById('gap-ready');
   if (ready) ready.style.display = available ? 'block' : 'none';
-  // サイドバーのロック演出を除去（鮮度バーに委譲）
-  const btn = document.querySelector('.sidebar-item[data-tab="gap"]');
-  if (btn) {
-    const baseLabel = (_pluginMeta['gap_analysis'] && _pluginMeta['gap_analysis'].label) || 'バリュエーション分析';
-    btn.textContent = baseLabel;
-    btn.classList.remove('locked');
-    btn.title = '';
-  }
   _updateFreshnessBar(available);
+  _updateGapHint(available);
+}
+
+// おすすめタブの「先に業種別OLS」の注意は、回帰結果が無いときだけ出す（夜間が毎晩作るので、
+// 常に出すと誤った案内になる・#1177）。
+function _updateGapHint(available) {
+  const el = document.getElementById('rec-gap-hint');
+  if (el) el.classList.toggle('hidden', !!available);
 }
 
 // /api/model/status を取得してキャッシュし、鮮度バーを再描画する。
@@ -46,9 +46,9 @@ function _updateFreshnessBar(available) {
   if (!available) {
     content.innerHTML =
       `<span class="freshness-badge freshness-none">モデル未計算</span>` +
-      ` 業種別OLSモデルがまだ実行されていません。先に` +
-      ` <button class="btn btn-primary btn-sm" style="margin:0 6px" data-click="showTab" data-arg="sector_ols">業種別OLSを実行</button>` +
-      ` してください。`;
+      ` 業種別OLSの結果がまだありません（夜間バッチが毎晩作ります）。今すぐ作るときは` +
+      ` <button class="btn btn-primary btn-sm" style="margin:0 6px" data-click="showTab" data-arg="sector_ols">業種別OLSのタブへ</button>` +
+      ` 移って実行してください。`;
     return;
   }
   const s = _modelStatus;
@@ -1365,7 +1365,7 @@ async function _loadTunedBadge(pluginName) {
     ? '<span title="保存された値は別のデータ断面で測ったものです。「調整済みの値に戻す」で手動適用できます">⚠ 測ったデータが現在と違うため自動適用していません</span>'
     : '<span title="現在のデータ断面を確認できませんでした。「調整済みの値に戻す」で手動適用できます">⚠ 測ったデータを確認できないため自動適用していません</span>');
   const lead = autoApply ? '🔧 自動調整済み' : '🔧 前回の探索結果';
-  host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:999px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap">
+  host.innerHTML = `<div style="display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg-sunken);border-radius:12px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap">
     <span>${lead}: ${esc(tuned.objective_name)}=${esc(val)}（${esc(dt)}）</span>
     ${panelNote}
     ${staleNote}
@@ -2329,7 +2329,7 @@ function _mrrPaintCoefBars(coefs, hostId, legendId) {
   if (legend) {
     const used = [...new Set(entries.map(([n]) => _mrrCoefType(n)))];
     legend.innerHTML = used.map(t =>
-      `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:${MRR_COEF_COLORS[t]};display:inline-block"></span>${MRR_COEF_TYPE_LABELS[t]}</span>`
+      `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:3px;background:${MRR_COEF_COLORS[t]};display:inline-block"></span>${MRR_COEF_TYPE_LABELS[t]}</span>`
     ).join('');
   }
   host.innerHTML = entries.map(([name, v]) => {

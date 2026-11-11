@@ -50,9 +50,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}
 .nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px;gap:4px}
-.nav-btn{padding:11px 18px;font-size:13px;color:var(--text-secondary);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
-.nav-btn.active{color:var(--accent-text);border-bottom-color:var(--accent-text)}
-.nav-btn.locked{color:var(--text-muted);opacity:.7}
 .nav-link{padding:11px 18px;font-size:13px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:5px;margin-left:auto}
 .nav-link:hover{color:var(--text-secondary)}
 /* 目的別IA: 左サイドバー型ハブ（カテゴリ→分析の2階層） */
@@ -63,7 +60,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .sidebar-item{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;font-size:13px;color:var(--text-secondary);background:none;border:none;border-radius:6px;cursor:pointer;text-decoration:none;transition:background .15s,color .15s}
 .sidebar-item:hover{background:var(--border-subtle);color:var(--text)}
 .sidebar-item.active{background:var(--accent-deep-bg);color:var(--accent-soft-text);font-weight:600}
-.sidebar-item.locked{color:var(--text-muted);opacity:.7}
 .sidebar-ext{font-size:11px;color:var(--text-muted);margin-left:4px}
 .layout .container{flex:1;min-width:0;max-width:none;margin:0}
 .container{padding:20px;max-width:1400px;margin:0 auto}
@@ -130,7 +126,7 @@ tr:hover td{background:var(--border-subtle)}
 .log-entry.success{color:var(--status-good)}.log-entry.error{color:var(--status-bad)}.log-entry.info{color:var(--status-info)}
 .progress-wrap{margin-top:10px}
 .progress-bar{height:6px;background:var(--bg-hover);border-radius:3px;overflow:hidden}
-.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-text));border-radius:3px;transition:width .4s}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .4s}
 .hidden{display:none}
 .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .flex-between{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
@@ -165,7 +161,7 @@ details.rerun[open]>summary{margin-bottom:8px}
    右端を越える用語は common.js の placeTip が .tip-flip を付けて左へ開き、--tip-room（外寸の上限）と
    --tip-shift（左端を越える分の戻し）を入れる（#1137）。2 行に割れると位置の基準がずれるので nowrap */
 .gloss{border-bottom:1px dotted var(--text-secondary);cursor:help;position:relative;white-space:nowrap}
-.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:7px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
+.gloss::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 7px);z-index:60;width:max-content;max-width:min(280px,var(--tip-room,280px));white-space:normal;text-align:left;text-transform:none;letter-spacing:normal;background:var(--bg-sunken);color:var(--text-body);border:1px solid var(--border-muted);border-radius:8px;padding:9px 11px;font-size:11px;font-weight:400;line-height:1.6;box-shadow:0 10px 30px var(--shadow-color);opacity:0;display:none;transform:translateY(-4px);transition:opacity .13s ease,transform .13s ease;pointer-events:none}
 .gloss:hover::after,.gloss:focus::after{display:block;opacity:1;transform:translateY(0)}
 .gloss.tip-flip::after{left:auto;right:calc(0px - var(--tip-shift,0px))}
 @starting-style{.gloss:hover::after,.gloss:focus::after{opacity:0;transform:translateY(-4px)}}
@@ -202,7 +198,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <span class="badge">分析</span>
   <a href="/guide#screen-analysis" class="help-link">❓ この画面の見方</a>
   <button id="theme-toggle" class="theme-toggle-btn" title="ライト/ダーク切替" aria-label="テーマ切替">🌙</button>
-  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid var(--border-muted);border-radius:4px;color:var(--text-secondary);font-size:12px;cursor:pointer">ログアウト</button>
+  <button id="logout-btn" data-click="logout" style="display:none;margin-left:8px;padding:5px 12px;background:transparent;border:1px solid var(--border-muted);border-radius:6px;color:var(--text-secondary);font-size:12px;cursor:pointer">ログアウト</button>
 </div>
 
 <nav class="gnav">
@@ -262,7 +258,7 @@ details.rerun[open]>summary{margin-bottom:8px}
       <span style="color:var(--status-warn);font-size:11px">⚠ 期待乖離・収束スコア・期待総リターンはヒューリスティック／参考値です。統計的な予測確率ではなく、投資判断の参考にすぎません。</span>
     </div>
     <div id="params-form-gap"></div>
-    <button class="btn btn-primary btn-sm" id="btn-gap-analysis" data-click="runGapAnalysis" style="margin-top:8px">分析を実行</button>
+    <button class="btn btn-primary" id="btn-gap-analysis" data-click="runGapAnalysis" style="margin-top:8px">分析を実行</button>
   </div>
 
   <div class="card" id="gap-results-card" style="display:none">
@@ -328,8 +324,9 @@ details.rerun[open]>summary{margin-bottom:8px}
   <div class="card">
     <h2 class="section-title">分析プリセット<a class="co-link" href="/guide#recommend" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
-      プリセットを選ぶか、下のスライダーで各指標の重要度を自分でカスタマイズできます。<br>
-      ★ 業種別OLS分析を先に実行すると「割安度」指標が使えるようになります。
+      プリセットを選ぶか、下のスライダーで各指標の重要度を自分でカスタマイズできます。
+      <!-- 業種別OLS の結果が無いときだけ出す（夜間が毎晩作るので、常に出すと誤った案内になる・#1177） -->
+      <span id="rec-gap-hint" class="hidden"><br>★ 業種別OLS を先に実行すると「割安度」指標が使えるようになります。</span>
     </div>
     <div class="flex" style="margin-bottom:16px">
       <button class="btn btn-secondary" data-click="applyPreset" data-arg="バランス型">⚖ バランス型</button>
@@ -354,7 +351,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <div class="card" id="rec-result-card" style="display:none">
     <div class="flex-between">
       <h2 class="section-title" style="margin-bottom:0" id="rec-result-title">分析結果</h2>
-      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="recommend">CSVダウンロード</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="recommend">CSV出力</button>
     </div>
     <div id="rec-notes" class="text-sm" style="margin-top:8px"></div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -415,7 +412,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <div class="card" id="sell-result-card" style="display:none">
     <div class="flex-between">
       <h2 class="section-title" style="margin-bottom:0" id="sell-result-title">判定結果</h2>
-      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="sell_ranking">CSVダウンロード</button>
+      <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="sell_ranking">CSV出力</button>
     </div>
     <div id="sell-notes" class="text-sm" style="margin-top:8px"></div>
     <div style="overflow-x:auto;margin-top:12px">

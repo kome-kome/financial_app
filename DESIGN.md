@@ -88,6 +88,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 - **本文・技術版**（400, 13px）: /models の段落。表と数式は 12px。
 - **本文・業務画面**（400, 12〜13px）: カード・表・入力欄。
 - **ラベル**（400〜500, 11px）: バッジ・タグ・カードの見出し。カードの見出しは大文字化＋字間 0.5px。
+- **要約の数字**（700, 20〜26px）: 業務画面の要約カードの大きな数字。`.stat-value` は 20px（企業詳細・分析）、`.card-value` は 22px（分析・収集）、ホームの `.stat-value` だけ 26px。新しい要約カードはこの3つから選ぶ（#1177）。
 
 ### Named Rules
 **11px の床の規則。** 意味を持つ文字は 11px より小さくしない（テンプレートと `static/js/*.js` の両方をテストが照合する）。
@@ -212,5 +213,6 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 | [tests/test_templates_nav.py](tests/test_templates_nav.py) | 全テンプレートがナビ有り・無しに分類済み／ナビのマークアップが `.active` 以外同一／`.active` は自分だけ／`.gnav*` の CSS がある／リンク先が実在する |
 | [tests/test_guide_links.py](tests/test_guide_links.py) | `/guide#…` のリンクが全部実在する／全プラグインに /guide の節がある／各画面の「この画面の見方」が自分の節を指し、`.help-link` の CSS がある |
 | [tests/test_security_headers.py](tests/test_security_headers.py) | テンプレートと JS が組み立てる HTML にインラインのスクリプト・イベントハンドラが無い／外部の `<script src>` が無い（CSP は `script-src 'self'`、`<style>` のために `style-src` だけ `'unsafe-inline'` を残す） |
+| [tests/test_design_scale.py](tests/test_design_scale.py) | 分析画面の角の丸みが「Shapes」の段の中／グラデーションが無い／CSV のボタンの文言が1つ／バリュエーション分析の実行ボタンが通常の大きさ／ロック演出の CSS が無い／★ の注意が業種別OLS の結果が無いときだけ出る（#1177） |
 
 **照合されていないこと**: 部品の CSS が画面間で同じであることは、どのテストも見ていない。トークンを変えるときは9枚すべてを同じように直す（同一性はテストが照合する）。
