@@ -317,7 +317,23 @@ class TestGapAnalysisDependency:
     def test_gap_analysis_404_when_sector_ols_not_run(self, db):
         # 回帰未実行（regression_results 空）→ depends_on 未充足で 404
         api.app.dependency_overrides[api.get_db] = lambda: db
-        assert client.get("/api/gap-analysis").status_code == 404
+        r = client.get("/api/gap-analysis")
+        assert r.status_code == 404
+        # 画面は案内を足さず、この detail をそのまま出す（#1175）。次の一手がここに無いと利用者は迷う
+        import plugins as plugin_registry
+        label = plugin_registry.get_plugin("sector_ols").label
+        assert r.json()["detail"] == f"先に「{label}」を実行してください"
+
+    def test_gap_analysis_validation_error_is_not_the_dependency_hint(self, db):
+        # 404 は入力の検証エラーにも使う。画面が「先に業種別OLS」を付け足すと原因と違う案内になっていた（#1175）
+        from database import RegressionResult
+        db.add(RegressionResult(edinet_code="E00001", year=2023, period_end=date(2023, 3, 31),
+                                predicted_market_cap=1.0, gap_ratio=5.0, model="ols", sector="x"))
+        db.commit()
+        api.app.dependency_overrides[api.get_db] = lambda: db
+        r = client.get("/api/gap-analysis?sort=sideways")
+        assert r.status_code == 404
+        assert "先に" not in r.json()["detail"]
 
     def test_run_plugin_400_when_dependency_unsatisfied(self, db):
         # 汎用 runner 経由は同じ前提条件未充足を 400 で返す

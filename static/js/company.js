@@ -205,7 +205,7 @@ async function loadCompany(code){
   try{
     d = await apiFetch('/api/financials/' + encodeURIComponent(code));
   }catch(e){
-    if (e.message === 'NOT_FOUND'){
+    if (e.status === 404){
       empty.querySelector('.big').textContent = '財務データが見つかりません';
       empty.querySelector('div:last-child').textContent = `企業コード ${code} の財務レコードがありません。`;
     } else {
