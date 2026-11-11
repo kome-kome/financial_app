@@ -641,6 +641,22 @@ JOBS: dict[str, Job] = {
         measured_min=18.6,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
+    # 52 週以内に上場廃止した行を採点に足すと M-6 − M-2 の判定が変わるか（#1197・親 #1195・ADR-0074）。
+    "measure:delisting-redesign": Job(
+        name="delisting_redesign",
+        argv=("{python}", "-m", "scripts.measure_delisting_redesign",
+              "--allow-full-pull", "--refresh-cache",
+              "--prereg", "docs/prereg/delisting-redesign.md",
+              "--prereg-sha", "2cf58db2288a59038cf8d6edbc2c6e3873842ed313811bcf2987ebe66aaebc41"),
+        why="M-4 の共通域の M-2・M-6 の OOF に、途中で上場廃止した行（特徴量はそろうのに 52 週先の株価が無い行）を"
+            "各 fold の学習済みモデルで予測して足し、最後の終値で手仕舞った答えで採点し直して、M-6 − M-2 の判定が"
+            "入れ替わるかを見る（#1197）。学習は変えない。凍結値が合わなければ exit 2、照合が合わなければ exit 3。"
+            "結果は scripts/.cache/delisting_redesign.json。",
+        # 見積り: `measure:label-audit` の 2026-11-11 の実測 18.6 分（M-4 1 回 899.6 秒を含む）＋消えた行の分類と
+        # 予測（学習は増えない）＋余裕。**次の実走で差し替える。**
+        measured_min=22.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # M-6 と本番の設定の M-2 を上位10社で公平に比べる（#1155）。12 月の探索の周回の反映後に単独で積む。
     "measure:selection-optimism": Job(
         name="selection_optimism",

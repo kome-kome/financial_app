@@ -51,6 +51,7 @@
 | [`scripts/sell_mu_source_bakeoff.py`](#scriptssell_mu_source_bakeoffpy) | 検証（実験） |
 | [`scripts/oof_portfolio_replay.py`](#scriptsoof_portfolio_replaypy) | 検証（計測） |
 | [`scripts/measure_label_audit.py`](#scriptsmeasure_label_auditpy) | 検証（計測） |
+| [`scripts/measure_delisting_redesign.py`](#scriptsmeasure_delisting_redesignpy) | 検証（計測） |
 | [`scripts/measure_selection_optimism.py`](#scriptsmeasure_selection_optimismpy) | 検証（計測） |
 | [`scripts/experiment_pooled_rhat.py`](#scriptsexperiment_pooled_rhatpy) | 検証（実験） |
 | [`scripts/bench_macro_beta.py`](#scriptsbench_macro_betapy) | 検証（計測） |
@@ -300,6 +301,12 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 **採点の物差しの点検**（#1154・事前登録 `docs/prereg/label-audit.md`）: `python -m scripts.measure_label_audit --prereg docs/prereg/label-audit.md --prereg-sha <凍結値> [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。答え（52 週先の対数リターン）が配当を含まない影響と、52 週以内の上場廃止で答えが消える影響を測る。予測は `oof_portfolio_replay` と同じく M-4 の共通域の OOF（`_run_config(keep_common=True)`）と本番の設定の M-2（`production_predictions`・共通域の行だけ）で、**予測は変えず答えだけを差し替えて採点する**（`oof_backtest`・`in_layer_short_side`）。守ること: **答えは週次終値からパネルと同じ規則（`month_end_indices`・`HORIZON_WEEKS`）で引き直し、パネルの答えと 1 行でも食い違えば終了コード 3**／値上がりだけの採点の rank-IC と全社の売り側spread が M-4 の `base_oof` と食い違っても終了コード 3／配当込みの答えは `log((c_fut + D) / c_snap)` で、D は「スナップ日より後に期末を迎える最初の通期」の `dps ÷ (split_factor × split_dps_lag)`（VIEW の `div_yield` と同じ補正・期末日を基準日とみなす近似。行が無ければ見えていた通期で代用し件数を出す）／**消えた行は `build_snapshots(return_no_future=True)` で取り、特徴量の条件を書き写さない**（M-4 の M-2 / M-6 のレグの構築にだけ足す）。株価の日付で直近（数えない）・途中で終わった・週の欠けに分け、途中で終わった行を終値の形で TOB/MBO の疑い・倒産の疑い・不明に分ける（参考）。判定は事前登録の規則を `dividend_decision`・`delisting_decision` が機械的に `prereg_decision` へ出す（M-6 − M-2 の主審 2 本の判定か上位10社超過の差の符号が入れ替われば切り替えの Issue、途中で終わった行の割合が 1% を超えれば答えの作り直しの Issue）。`--prereg-sha` が合わなければ終了コード 2。結果は既定 `scripts/.cache/label_audit.json`。日中枠（`measure:label-audit`・並走に敏感）で単独に回す。2026-11-11 の実走（18.6 分）の判定は配当 propose_switch（切り替えるかは #1187）・上場廃止 keep（初期の年に廃止社が居ない下限なので #1188 で見直す）で、数値は事前登録の追記節「結果」にある
 
 種別: 検証（計測） ／ 依存先: scripts/oof_portfolio_replay.py、scripts/sell_mu_source_bakeoff.py、scripts/ensemble_base_bakeoff.py、plugins/macro_snapshots.py（`build_snapshots(return_no_future=True)`）、scripts/prereg.py ／ テスト: tests/test_label_audit.py
+
+## `scripts/measure_delisting_redesign.py`
+
+**上場廃止した行を採点に足すと比較の判定が変わるか**（#1197・親 #1195・ADR-0074・事前登録 `docs/prereg/delisting-redesign.md`）: `python -m scripts.measure_delisting_redesign --prereg docs/prereg/delisting-redesign.md --prereg-sha <凍結値> [--smoke] [--allow-full-pull] [--refresh-cache] [--out <json>]`。M-4 を 1 回回して共通域の OOF を取り（`measure_label_audit` と同じ域・**学習は変えない**）、途中で上場廃止した行（特徴量はそろうのに 52 週先の株価が無く、`classify_no_future` が `ended` と分けた行）にも M-2・M-6 の予想を出して、最後の終値で手仕舞った答え `log(last / c_snap)` で採点し直す。M-6 − M-2 の主審 2 本（rank-IC・全社の売り側spread）の判定か上位10社超過の差の符号が入れ替われば `propose_include`、どちらも起きなければ `keep`（`include_decision`）。守ること: **消えた行の特徴量は `build_snapshots(return_no_future=True, return_no_future_rows=True)` で取り、特徴量の条件を書き写さない**／消えた行の予想は `ExtraPredictor` が M-2（`macro_ensemble._make_xgb_fit_predict`）と M-6（`model_candidates.make_elasticnet_fit_predict`）の fit_predict を包み、各 fold の test に連結して同じ学習済みモデルで出す（学習データには入れない・どちらの学習関数も予想する行を学習側の統計だけで変換するので、答えのある行の予想はビット一致する＝テストで照合）／**`walk_forward_cv_monthly` は fit_predict の例外を握るので、包む側で失敗・件数の食い違い・test 月を特定できない fold を記録し、走り終えてから終了コード 3**／M-6 の消えた行には同じ月の答えのある行の傾き b と x̄ で規模の中立化を掛け、答えのある行を補正し直して共通域の M-6 の予想と一致しなければ終了コード 3。M-1 は対象外（fit_predict の差し替え口が無い）。参考に、倒産の疑いを −99% にした版と 2024 年以降の test 月だけの判定も出す。`--prereg-sha` が合わなければ終了コード 2。結果は既定 `scripts/.cache/delisting_redesign.json`。日中枠（`measure:delisting-redesign`・並走に敏感）で単独に回す
+
+種別: 検証（計測） ／ 依存先: scripts/measure_label_audit.py、scripts/ensemble_base_bakeoff.py、scripts/sell_mu_source_bakeoff.py、plugins/macro_snapshots.py（`build_snapshots(return_no_future_rows=True)`）、plugins/macro_ensemble.py、plugins/model_candidates.py、scripts/prereg.py ／ テスト: tests/test_delisting_redesign.py
 
 ## `scripts/measure_selection_optimism.py`
 

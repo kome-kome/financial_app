@@ -1426,6 +1426,7 @@ def build_snapshots(
     price_features: list[str] | None = None,
     fin_nan_ok: bool = False,
     return_no_future: bool = False,
+    return_no_future_rows: bool = False,
 ) -> tuple:
     """M-1/M-2 共有スナップショット構築。
 
@@ -1462,6 +1463,12 @@ def build_snapshots(
       終わった社（上場廃止・売買停止）の両方が入る。見分けは呼び出し側が株価の日付で行う
       （`scripts/measure_label_audit.py`）。条件を書き写さずに数えるため、ここで記録する。
 
+    return_no_future_rows=False（既定）: 戻り値は従来どおり。
+    return_no_future_rows=True（計測専用・#1197・`return_no_future=True` と併用）: さらに末尾に
+      `no_future_rows_by_ym: dict[str, list[tuple]]` を足す。中身は上の消えた行の
+      `(edinet_code, feat_row, industry, size_val)`（答えのある行と同じ特徴量の並び）。消えた行にも OOF の
+      予想を出して採点し直すため（`scripts/measure_delisting_redesign.py`）。本番のプラグインは渡さない。
+
     行の並び: 各月の行（samples_by_ym / sample_meta_by_ym / stock_ids_by_ym）は edinet_code の
       昇順で、`prices_by_co` の挿入順に依らない（Issue #954）。M-2 は行の並びで木が変わるので、
       読み出し順のままだと同じパネルでも run ごとに結果が動いた。
@@ -1471,6 +1478,8 @@ def build_snapshots(
     構築してキャッシュする（Issue #298）。コンテキスト外では常にフル計算する。
     """
     price_features = list(price_features) if price_features else []
+    if return_no_future_rows and not return_no_future:
+        raise ValueError("return_no_future_rows は return_no_future=True と併用する（#1197）")
     cache = _shared_cache.get()
     if cache is None:
         return _build_snapshots_impl(
@@ -1478,14 +1487,15 @@ def build_snapshots(
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
             fin_nan_ok=fin_nan_ok, return_no_future=return_no_future,
+            return_no_future_rows=return_no_future_rows,
         )
     # fin_nan_ok もキーに入れる。入れないと、空欄を通した条件と通さない条件が同じ結果を共有する（#938）。
-    # return_no_future も戻り値の形を変えるのでキーに入れる（#1154）
+    # return_no_future / return_no_future_rows も戻り値の形を変えるのでキーに入れる（#1154・#1197）
     key = (
         id(prices_by_co), id(fin_by_co), id(companies), id(macro_cache),
         tuple(fin_features), tuple(macro_names), use_momentum, mom_window,
         min_coverage, build_interactions, macro_nan_ok, return_stock_ids,
-        tuple(price_features), fin_nan_ok, return_no_future,
+        tuple(price_features), fin_nan_ok, return_no_future, return_no_future_rows,
     )
     return _cached_or_computed(
         cache["build_snapshots"], key,
@@ -1494,6 +1504,7 @@ def build_snapshots(
             fin_features, macro_names, use_momentum, mom_window, min_coverage,
             build_interactions, macro_nan_ok, return_stock_ids, price_features,
             fin_nan_ok=fin_nan_ok, return_no_future=return_no_future,
+            return_no_future_rows=return_no_future_rows,
         ),
         "スナップショット",
     )
@@ -1515,6 +1526,7 @@ def _build_snapshots_impl(
     price_features: list[str] | None = None,
     fin_nan_ok: bool = False,
     return_no_future: bool = False,
+    return_no_future_rows: bool = False,
 ) -> tuple:
     """build_snapshots の実体（キャッシュなし・毎回フル計算）。"""
     use_macro = bool(macro_names)
@@ -1548,6 +1560,7 @@ def _build_snapshots_impl(
     sample_meta_by_ym: dict[str, list] = defaultdict(list)
     stock_ids_by_ym: dict[str, list] = defaultdict(list)
     no_future_by_ym: dict[str, list] = defaultdict(list)
+    no_future_rows_by_ym: dict[str, list] = defaultdict(list)
     current_snaps: dict[str, tuple] = {}
     min_rows = HORIZON_WEEKS + 4
     macro_memo: dict[str, dict] = {}
@@ -1665,6 +1678,9 @@ def _build_snapshots_impl(
             if return_no_future and not labelled:
                 # 計測専用（#1154）: 特徴量はそろったが答えを作れずに捨てた行
                 no_future_by_ym[snap_ym].append(edinet_code)
+                if return_no_future_rows:
+                    # 計測専用（#1197）: その行の特徴量も（消えた行にも予想を出すため）
+                    no_future_rows_by_ym[snap_ym].append((edinet_code, feat_row, industry, size_val))
 
             if is_current:
                 comp = companies.get(edinet_code)
@@ -1683,6 +1699,8 @@ def _build_snapshots_impl(
         out += (dict(stock_ids_by_ym),)
     if return_no_future:
         out += (dict(no_future_by_ym),)
+    if return_no_future_rows:
+        out += (dict(no_future_rows_by_ym),)
     return out
 
 
