@@ -83,7 +83,8 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   .grid4{grid-template-columns:repeat(2,1fr)}
   .grid3{grid-template-columns:repeat(2,1fr)}
   /* 狭幅ではサイドバーを上部の横スクロール帯に切り替える */
-  .layout{flex-direction:column}
+  /* stretch: 縦並びで flex-start のままだと本文が表の幅まで広がり、表の横スクロールが効かずページごとはみ出す（#1176 の 375px 確認で発見） */
+  .layout{flex-direction:column;align-items:stretch}
   .sidebar{flex:none;width:100%;min-height:0;border-right:none;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 12px}
   .sidebar-cat{width:100%;margin:8px 4px 2px}
   .sidebar-item{width:auto}
@@ -98,7 +99,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .card-title{font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .card-value{font-size:22px;font-weight:700}
 .card-sub{font-size:11px;color:var(--text-muted);margin-top:3px}
-.section-title{font-size:14px;font-weight:600;color:var(--accent-text);margin-bottom:12px}
+.section-title{margin:0 0 12px;font-size:14px;font-weight:600;color:var(--accent-text)}
 .btn{padding:8px 16px;border-radius:6px;border:none;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s}
 .btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent-hover)}
 .btn-secondary{background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border-muted)}.btn-secondary:hover{background:var(--border-muted);color:var(--text)}
@@ -113,6 +114,11 @@ th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--accent-text)}
 td{padding:9px 10px;border-bottom:1px solid var(--border-subtle)}
 tr:hover td{background:var(--border-subtle)}
+/* 行の詳細を開くボタン（順位の欄・#1176）。行のクリックと同じ働きを Tab で届く形にする */
+.row-detail{min-width:28px;min-height:24px;padding:3px 8px;font:inherit;font-variant-numeric:tabular-nums;color:var(--text-secondary);background:none;border:1px solid var(--border-muted);border-radius:6px;cursor:pointer}
+.row-detail:hover{color:var(--text);border-color:var(--accent-text)}
+.row-detail[aria-pressed="true"]{color:var(--accent-soft-text);background:var(--accent-deep-bg);border-color:var(--accent)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .tag{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500}
 .tag-blue{background:var(--status-info-bg);color:var(--status-info-text)}
 .tag-green{background:var(--status-good-bg);color:var(--status-good-text)}
@@ -180,9 +186,13 @@ details.rerun[open]>summary{margin-bottom:8px}
 .gnav-link.active{color:var(--text);border-bottom-color:var(--accent)}
 .gnav-ref{color:var(--text-muted)}
 .gnav-spacer{margin-left:auto}
+/* 本文へのスキップリンク（ナビ 8・サイドバー 12 を Tab で抜けずに済む・#1176）。フォーカスで現れる */
+.skip-link{position:absolute;left:8px;top:-60px;z-index:1000;padding:8px 14px;background:var(--bg-elevated);color:var(--accent-text);border:1px solid var(--accent);border-radius:6px;font-size:13px;font-weight:600;text-decoration:none}
+.skip-link:focus{top:8px}
 </style>
 </head>
 <body>
+<a class="skip-link" href="#analysis-main">本文へ移動</a>
 
 <div class="header">
   <div style="width:30px;height:30px;background:var(--accent-soft-bg);border-radius:8px;display:flex;align-items:center;justify-content:center">
@@ -225,11 +235,11 @@ details.rerun[open]>summary{margin-bottom:8px}
 </div>
 
 <div class="layout">
-<aside class="sidebar" id="analysis-sidebar">
+<aside class="sidebar" id="analysis-sidebar" aria-label="分析メニュー">
   <!-- 分析メニュー（目的別カテゴリ）は initPlugins() が /api/plugins のメタから生成 -->
 </aside>
 
-<div class="container">
+<main class="container" id="analysis-main">
 
 <!-- バリュエーション分析 -->
 <div id="tab-gap" class="hidden">
@@ -242,7 +252,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
   <div id="gap-ready" style="display:none">
   <div class="card">
-    <div class="section-title">バリュエーション分析（割安度・平均回帰・期待総リターン）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">バリュエーション分析（割安度・平均回帰・期待総リターン）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:12px">
       乖離率 = (予測時価総額 − 実際時価総額) / 実際時価総額 × 100<br>
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
@@ -257,9 +267,9 @@ details.rerun[open]>summary{margin-bottom:8px}
 
   <div class="card" id="gap-results-card" style="display:none">
     <div class="flex-between">
-      <div class="section-title" style="margin-bottom:0">
+      <h2 class="section-title" style="margin-bottom:0">
         結果 <span id="gap-count" class="tag tag-purple">-</span>
-      </div>
+      </h2>
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="gap_analysis">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -287,7 +297,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card" id="gap-charts-card" style="display:none">
-    <div class="section-title">横断分布（理論 vs 実績）</div>
+    <h2 class="section-title">横断分布（理論 vs 実績）</h2>
     <div class="info-box" style="margin-bottom:12px">
       散布図: 対角線より上＝理論＞実際（モデル上は割安寄り）、下＝割高寄り。両軸は対数（億円）。<br>
       ヒストグラム: 乖離率の分布。<span class="gap-positive">正（緑）</span>＝割安側、<span class="gap-negative">負（赤）</span>＝割高側。
@@ -316,7 +326,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card">
-    <div class="section-title">分析プリセット<a class="co-link" href="/guide#recommend" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">分析プリセット<a class="co-link" href="/guide#recommend" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       プリセットを選ぶか、下のスライダーで各指標の重要度を自分でカスタマイズできます。<br>
       ★ 業種別OLS分析を先に実行すると「割安度」指標が使えるようになります。
@@ -328,12 +338,12 @@ details.rerun[open]>summary{margin-bottom:8px}
       <button class="btn btn-secondary" data-click="applyPreset" data-arg="高収益重視">★ 高収益重視</button>
       <button class="btn btn-secondary" data-click="applyPreset" data-arg="統計的最適化">Σ 統計的最適化</button>
     </div>
-    <div class="section-title" style="font-size:12px;margin-bottom:10px">指標ウェイト（スライダー）</div>
+    <h3 class="section-title" style="font-size:12px;margin-bottom:10px">指標ウェイト（スライダー）</h3>
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px" id="weight-grid"></div>
   </div>
 
   <div class="card">
-    <div class="section-title">フィルター</div>
+    <h2 class="section-title">フィルター</h2>
     <div id="params-form-recommend"></div>
     <button class="btn btn-primary" id="btn-recommend" data-click="runRecommend" style="margin-top:8px">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -343,7 +353,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 
   <div class="card" id="rec-result-card" style="display:none">
     <div class="flex-between">
-      <div class="section-title" style="margin-bottom:0" id="rec-result-title">分析結果</div>
+      <h2 class="section-title" style="margin-bottom:0" id="rec-result-title">分析結果</h2>
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="recommend">CSVダウンロード</button>
     </div>
     <div id="rec-notes" class="text-sm" style="margin-top:8px"></div>
@@ -367,7 +377,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <div id="tab-sell_ranking" class="hidden">
 
   <div class="card">
-    <div class="section-title">使い方<a class="co-link" href="/guide#sell_ranking" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">使い方<a class="co-link" href="/guide#sell_ranking" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:12px">
       <strong>何をするか:</strong> 持っている銘柄を、<strong>M-6 の期待リターン（μ̂＝今後 52 週で見込まれるリターン）の低い順</strong>に並べ、
       <strong>下から 1/5 に「売却」</strong>、残りに「保有継続」を付けます。設定はありません。
@@ -389,7 +399,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card">
-    <div class="section-title">保有銘柄を入力</div>
+    <h2 class="section-title">保有銘柄を入力</h2>
     <div class="info-box" style="margin-bottom:14px">
       書式: <code>証券コード[, @取得単価][, 購入日]</code>（証券コードだけでも可）　例: <code>7203, @1500, 2024-03-10</code> / <code>6758 @12000</code> / <code>9984</code><br>
       取得単価を入れると損益も表示します。入力内容はこのブラウザに自動保存されます。
@@ -404,7 +414,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 
   <div class="card" id="sell-result-card" style="display:none">
     <div class="flex-between">
-      <div class="section-title" style="margin-bottom:0" id="sell-result-title">判定結果</div>
+      <h2 class="section-title" style="margin-bottom:0" id="sell-result-title">判定結果</h2>
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="sell_ranking">CSVダウンロード</button>
     </div>
     <div id="sell-notes" class="text-sm" style="margin-top:8px"></div>
@@ -426,7 +436,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <!-- ネットキャッシュ分析（清原達郎『わが投資術』） -->
 <div id="tab-net_cash" class="hidden">
   <div class="card">
-    <div class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">ネットキャッシュ分析 — 清原達郎『わが投資術』<a class="co-link" href="/guide#net_cash_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="すぐ換金できる資産から全負債を引いた、実質的な手元現金。流動資産＋投資有価証券×0.7−総負債で計算する清原達郎式の指標。">ネットキャッシュ</strong> = 流動資産 + 投資有価証券 × 0.7 − 総負債&nbsp;<span style="color:var(--text-muted)">[円]（清原式）</span><br>
       <strong style="color:var(--status-info-text)" class="gloss" tabindex="0" data-tip="ネットキャッシュ÷時価総額。1.0で会社をまるごと買える現金を保有、0.5で時価総額の半分が現金。大きいほど割安。">ネットキャッシュ比率</strong> = ネットキャッシュ ÷ 時価総額&nbsp;<span style="color:var(--text-muted)">[無次元]</span><br>
@@ -445,7 +455,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card hidden" id="nc-summary-card">
-    <div class="section-title">サマリー</div>
+    <h2 class="section-title">サマリー</h2>
     <div class="grid4" style="margin-bottom:8px">
       <div class="stat-card">
         <div class="stat-label">現金で買える（NC比率 ≥ 1.0）</div>
@@ -470,9 +480,9 @@ details.rerun[open]>summary{margin-bottom:8px}
 
   <div class="card hidden" id="nc-results-card">
     <div class="flex-between">
-      <div class="section-title" style="margin-bottom:0">
+      <h2 class="section-title" style="margin-bottom:0">
         結果 <span id="nc-count" class="tag tag-purple" style="margin-left:6px">-</span>
-      </div>
+      </h2>
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="net_cash_analysis">CSV出力</button>
     </div>
     <div style="overflow-x:auto;margin-top:12px">
@@ -509,7 +519,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <div id="tab-backtest" class="hidden">
   <div class="card">
     <div class="flex-between" style="margin-bottom:12px">
-      <div class="section-title" style="margin-bottom:0">バックテスト — 過去のスコアリング精度検証<a class="co-link" href="/guide#backtest" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+      <h2 class="section-title" style="margin-bottom:0">バックテスト — 過去のスコアリング精度検証<a class="co-link" href="/guide#backtest" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     </div>
     <div class="info-box" style="margin-bottom:14px">
       Nヶ月前の時点で確定していた財務データを使い、スコアリング上位N社のその後の実績株価リターンを検証します。<br>
@@ -517,14 +527,14 @@ details.rerun[open]>summary{margin-bottom:8px}
     </div>
     <div class="grid4" style="margin-bottom:14px">
       <div class="form-group">
-        <label>検証する手法（scoring source）</label>
+        <label for="bt-source">検証する手法（scoring source）</label>
         <select id="bt-source">
           <option value="recommend" selected>おすすめ（複合スコア）</option>
           <option value="valuation">バリュエーション（期待総リターン）</option>
           <option value="net_cash">ネットキャッシュ（清原式）</option>        </select>
       </div>
       <div class="form-group">
-        <label>プリセット（おすすめ手法のみ）</label>
+        <label for="bt-preset">プリセット（おすすめ手法のみ）</label>
         <select id="bt-preset">
           <option value="バランス型">バランス型</option>
           <option value="成長重視">成長重視</option>
@@ -534,7 +544,7 @@ details.rerun[open]>summary{margin-bottom:8px}
         </select>
       </div>
       <div class="form-group">
-        <label>保有期間（ヶ月前を起点）</label>
+        <label for="bt-months">保有期間（ヶ月前を起点）</label>
         <select id="bt-months">
           <option value="3">3ヶ月前</option>
           <option value="6" selected>6ヶ月前</option>
@@ -544,7 +554,7 @@ details.rerun[open]>summary{margin-bottom:8px}
         </select>
       </div>
       <div class="form-group">
-        <label>上位N社</label>
+        <label for="bt-topn">上位N社</label>
         <select id="bt-topn">
           <option value="10">上位10社</option>
           <option value="20" selected>上位20社</option>
@@ -553,11 +563,11 @@ details.rerun[open]>summary{margin-bottom:8px}
         </select>
       </div>
       <div class="form-group">
-        <label>業種フィルタ（任意）</label>
+        <label for="bt-industry">業種フィルタ（任意）</label>
         <input type="text" id="bt-industry" placeholder="例: 電気機器">
       </div>
       <div class="form-group">
-        <label>往復売買コスト（bp・任意）</label>
+        <label for="bt-cost-bps">往復売買コスト（bp・任意）</label>
         <input type="number" id="bt-cost-bps" value="0" min="0" max="100" step="1" placeholder="片道bp">
       </div>
     </div>
@@ -576,7 +586,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <div class="card hidden" id="bt-results-card">
     <div class="flex-between" style="margin-bottom:12px">
       <div>
-        <div class="section-title" style="margin-bottom:4px">バックテスト結果</div>
+        <h2 class="section-title" style="margin-bottom:4px">バックテスト結果</h2>
         <div class="text-sm" id="bt-period-label"></div>
       </div>
       <button class="btn btn-secondary btn-sm" data-click="exportCSV" data-arg="backtest">CSV出力</button>
@@ -606,7 +616,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card hidden" id="bt-multi-card">
-    <div class="section-title" style="margin-bottom:8px">マルチピリオド比較</div>
+    <h2 class="section-title" style="margin-bottom:8px">マルチピリオド比較</h2>
     <div class="text-sm" style="color:var(--text-muted);margin-bottom:12px">同じプリセット・上位N社で、3〜24ヶ月保有した場合のリターンを比較します。</div>
     <div style="overflow-x:auto">
       <table>
@@ -632,7 +642,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <div id="tab-model_comparison" class="hidden">
   <div class="card">
     <div class="flex-between" style="margin-bottom:12px">
-      <div class="section-title" style="margin-bottom:0">モデル比較（OOF）— 将来リターン予測モデルの横並び</div>
+      <h2 class="section-title" style="margin-bottom:0">モデル比較（OOF）— 将来リターン予測モデルの横並び</h2>
       <a class="co-link" href="/models#model-comparison" target="_blank" rel="noopener" style="font-size:12px;font-weight:400">❓ モデル解説</a>
     </div>
     <div class="info-box" style="margin-bottom:14px">
@@ -662,7 +672,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div class="card hidden" id="mc-results-card">
-    <div class="section-title" style="margin-bottom:4px">比較結果 — アウトオブサンプル検証（OOF）</div>
+    <h2 class="section-title" style="margin-bottom:4px">比較結果 — アウトオブサンプル検証（OOF）</h2>
     <div class="text-sm" id="mc-computed-at" style="color:var(--text-muted);margin-bottom:12px"></div>
     <div id="mc-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px"></div>
     <div id="mc-matrix" style="margin-top:16px"></div>
@@ -673,7 +683,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <div id="tab-macro_risk_return" class="hidden">
   <div class="grid2">
     <div class="card">
-      <div class="section-title">マクロ×リスク-リターン設定<a class="co-link" href="/guide#macro_risk_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+      <h2 class="section-title">マクロ×リスク-リターン設定<a class="co-link" href="/guide#macro_risk_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
       <div class="info-box" style="margin-bottom:14px">
         財務指標 × マクロ要因の交差項 OLS（前進 BIC）で1年先リターンを推定し、<br>
         R2（実現ボラ）・R1（予測不確実性）・R3（セクター×サイズ別のモデル信頼性）を<br>
@@ -704,7 +714,7 @@ details.rerun[open]>summary{margin-bottom:8px}
       </div>
     </div>
     <div class="card">
-      <div class="section-title">モデル品質（Walk-forward CV）</div>
+      <h2 class="section-title">モデル品質（Walk-forward CV）</h2>
       <div id="mrr-cv-waiting" class="text-sm" style="padding:40px 0;text-align:center">
         左のパネルで設定し「実行」をクリックしてください
       </div>
@@ -721,7 +731,7 @@ details.rerun[open]>summary{margin-bottom:8px}
         </div>
         <div id="mrr-coef-legend" style="font-size:11px;color:var(--text-secondary);display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px"></div>
         <div id="mrr-coef-bars" style="margin-bottom:12px"></div>
-        <div class="section-title" style="font-size:13px">フォルド別 CV 詳細</div>
+        <h3 class="section-title" style="font-size:13px">フォルド別 CV 詳細</h3>
         <div style="overflow-x:auto">
           <table>
             <thead><tr><th>Fold</th><th>学習 N</th><th>テスト N</th><th>R²</th><th>RMSE</th></tr></thead>
@@ -735,9 +745,9 @@ details.rerun[open]>summary{margin-bottom:8px}
 
   <div class="card hidden" id="mrr-chart-card">
     <div class="flex-between" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
-      <div class="section-title" style="margin-bottom:0">リスク-リターン散布図
+      <h2 class="section-title" style="margin-bottom:0">リスク-リターン散布図
         <span class="tag tag-purple" style="margin-left:6px">効率的フロンティア</span>
-      </div>
+      </h2>
       <div style="font-size:12px;color:var(--text-secondary);display:flex;gap:16px;align-items:center;flex-wrap:wrap">
         <span>全社を描画・効用上位N社を強調（やや大・濃）</span>
         <span>横軸 = リスク / 縦軸 = μ_raw（モデル素の期待リターン）</span>
@@ -758,7 +768,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 
 <div id="tab-macro_gbdt" class="hidden">
   <div class="card">
-    <div class="section-title">M-2: マクロ×財務 勾配ブースティング設定<a class="co-link" href="/guide#macro_gbdt" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">M-2: マクロ×財務 勾配ブースティング設定<a class="co-link" href="/guide#macro_gbdt" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       財務指標 × マクロ要因を <b>勾配ブースティング木（XGBoost）</b>で学習し、1年先リターンの非線形推定を行います。<br>
       同一特徴量の OLS ベースラインと Walk-Forward CV で比較し、特徴量寄与は mean|SHAP|（大きさのみ）で提示します。<br>
@@ -788,14 +798,14 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div id="dynresult-macro_gbdt" class="card hidden">
-    <div class="section-title">結果</div>
+    <h2 class="section-title">結果</h2>
     <div id="dynresult-content-macro_gbdt"></div>
   </div>
 </div>
 
 <div id="tab-macro_dlm" class="hidden">
   <div class="card">
-    <div class="section-title">M-3: ベイズ状態空間（時変マクロβ DLM）設定<a class="co-link" href="/guide#macro_dlm" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+    <h2 class="section-title">M-3: ベイズ状態空間（時変マクロβ DLM）設定<a class="co-link" href="/guide#macro_dlm" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       銘柄ごとに<b>週次リターン</b>を主要マクロの<b>週次変化</b>へ回帰し、係数（α/β）が時間変動する <b>動的線形モデル（DLM）</b> をカルマン型逐次ベイズ更新で推定します。<br>
       最新の潜在アルファ α を期待リターン µ̂ とし、マクロ感応度 β の時系列と<b>信用区間</b>を可視化します（M-1/M-2 が静的係数なのに対し、係数の時間変化そのものを捉えます）。<br>
@@ -824,12 +834,12 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 
   <div id="dynresult-macro_dlm" class="card hidden">
-    <div class="section-title">結果</div>
+    <h2 class="section-title">結果</h2>
     <div id="dynresult-content-macro_dlm"></div>
   </div>
 </div>
 
-</div><!-- container -->
+</main><!-- container -->
 </div><!-- layout -->
 
 <script src="/static/vendor/chart.umd.js?v=4.4.1"></script>

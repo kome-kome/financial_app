@@ -65,7 +65,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 **騰落色は数値だけの規則。** `--val-*` は数値の上げ下げを塗るためのもので、リンク・ボタン・見出しの文字色に流用しない（過去に「やさしい解説」へのリンクが `--val-up` で青くずれた経緯は [ARCHITECTURE.md](docs/ARCHITECTURE.md) のグローバルナビの注記）。
 
-**直書きしない規則。** 色は `var(--…)` で書く。グラフや JS で塗る色も `common.js` の `cssVar('--…')` で描画時に読み、`window.onThemeChange` で塗り直す。直書きが許されているのは、塗りボタンの上の白文字（`#fff`）と、`:target` の淡い光（`rgba(…, .2)`）だけ。
+**直書きしない規則。** 色は `var(--…)` で書く。グラフや JS で塗る色も `common.js` の `cssVar('--…')` で描画時に読み、`window.onThemeChange` で塗り直す。JS が組み立てる inline style も `var(--…)` で書く（分析画面の `#c084fc` はライトの白地で約 2.6:1 だった・#1176）。直書きが許されているのは、塗りボタンの上の白文字（`#fff`）と、`:target` の淡い光（`rgba(…, .2)`）だけ。
 
 ### テーマの切り替え
 - [static/js/theme-init.js](static/js/theme-init.js) を各テンプレートの `<head>` で**描画より前に**読み、`localStorage` の `theme`、無ければ OS の `prefers-color-scheme` から `<html data-theme>` を決める（読み込み直後に一瞬違う色で描かれるのを防ぐ）。
@@ -155,9 +155,11 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 ### カード（`.card`）
 - 持ち上げた面・1px の `--border`・角 10px・内側 16px（狭い幅で 12px）。見出し（`.card-title`）は 11px の大文字化した注記色。
+- 業務画面のカードの題（`.section-title`）は `h2`、カードの中の小見出しは `h3` で書く（`div` だと見出しで移動できない・#1176）。
 
 ### 入力欄
 - 沈んだ面（`--bg-sunken`）・`--border-muted` の枠・角 6px・13px。フォーカスは全画面共通の紫の枠に任せる。
+- `<label>` は `for` で欄の id と結ぶか、欄を中に含める（無いと読み上げで欄の名前が出ない・#1176）。
 
 ### タグ（`.tag` と `.tag-green` / `-amber` / `-red` / `-blue` / `-purple`）
 - 短い語の丸い札。`X-bg` の面に `X-text` の文字。状態を示すときは状態色の意味（緑＝良い、琥珀＝注意、赤＝悪い・止める）に従う。
@@ -206,7 +208,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 | テスト | 照合すること |
 |---|---|
-| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開き、右端では左へ開く（`placeTip` は common.js だけ）／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132） |
+| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開き、右端では左へ開く（`placeTip` は common.js だけ）／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132）／JS の inline style に直書きの色が無い／分析画面のラベルが欄と結ばれ、題が `h2`、本文へのスキップリンク・サイドバーの `aria-current`・結果の行のボタンと企業リンクがある（#1176） |
 | [tests/test_templates_nav.py](tests/test_templates_nav.py) | 全テンプレートがナビ有り・無しに分類済み／ナビのマークアップが `.active` 以外同一／`.active` は自分だけ／`.gnav*` の CSS がある／リンク先が実在する |
 | [tests/test_guide_links.py](tests/test_guide_links.py) | `/guide#…` のリンクが全部実在する／全プラグインに /guide の節がある／各画面の「この画面の見方」が自分の節を指し、`.help-link` の CSS がある |
 | [tests/test_security_headers.py](tests/test_security_headers.py) | テンプレートと JS が組み立てる HTML にインラインのスクリプト・イベントハンドラが無い／外部の `<script src>` が無い（CSP は `script-src 'self'`、`<style>` のために `style-src` だけ `'unsafe-inline'` を残す） |
