@@ -1032,7 +1032,7 @@ function _mcModelCard(m) {
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px">
         <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
-        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
+        <div style="font-size:15px;font-weight:700;color:var(--accent-text)">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> / ${oof.n_periods_quantile||0}期</span></div>
       </div>
       <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="分位idxと分位平均リターンの期毎Spearman。+1=完全単調増。p値は「単調増が偶然でない」片側ブートストラップ検定（<0.05で有意）。">
         <div style="font-size:11px;color:var(--text-muted)">分位単調性（Spearman・隣接正順率）</div>
@@ -1178,7 +1178,7 @@ function _mcMatrixHTML(sm) {
   ).join('');
   const header = `<tr><th></th>${keys.map(b => `<th style="padding:4px 8px;color:var(--text-secondary)">${esc(b)}</th>`).join('')}</tr>`;
   return `
-    <div class="section-title" style="font-size:13px;margin-bottom:4px">rank-IC 差の有意性マトリクス</div>
+    <h3 class="section-title" style="font-size:13px;margin-bottom:4px">rank-IC 差の有意性マトリクス</h3>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
       共通 test 期でペアリングした per-fold rank-IC 差を、系列相関を保存する定常ブートストラップ
       （Politis-Romano 1994・n_boot=2000）で検定し、${rule}。<b>▲</b>=行モデルが有意に優位
@@ -1214,8 +1214,12 @@ function showTab(t) {
     const el = document.getElementById('tab-' + x);
     if (el) el.classList.toggle('hidden', x !== t);
   });
+  // 現在地は色だけでなく aria-current でも示す（読み上げに伝わらない・#1176）
   document.querySelectorAll('.sidebar-item').forEach(b => {
-    b.classList.toggle('active', b.dataset.tab === t);
+    const on = b.dataset.tab === t;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'true');
+    else b.removeAttribute('aria-current');
   });
   // 開いているタブを URL に残す（再読込・戻る・共有で同じタブへ戻れるように）。入口の読み取りは
   // `_urlTab`。pushState にしない＝タブ切替で履歴を積むと「戻る」が画面を出られなくなる。
@@ -1261,7 +1265,7 @@ function _wrapRerun(tabId, d) {
 }
 
 function _savedHTML(d, tabId) {
-  const title = `<div class="section-title">${esc(d.label)} — 保存済みの結果</div>`;
+  const title = `<h2 class="section-title">${esc(d.label)} — 保存済みの結果</h2>`;
   const by = d.updated_by ? `${esc(d.updated_by)}が更新します` : '';
   if (d.kind === 'none') {
     return title + `<div class="info-box">この分析は結果を保存しません（画面に表示するだけ）。`
@@ -1515,7 +1519,7 @@ function _createDynamicTab(plugin, tabId) {
   div.className = 'hidden';
   div.innerHTML = `
     <div class="card">
-      <div class="section-title">${esc(plugin.label)}<a class="co-link" href="/guide#${esc(plugin.name)}" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></div>
+      <h2 class="section-title">${esc(plugin.label)}<a class="co-link" href="/guide#${esc(plugin.name)}" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
       ${plugin.description ? `<div class="info-box" style="margin-bottom:14px">${esc(plugin.description)}</div>` : ''}
       ${plugin.depends_on.length ? `<div class="info-box" style="border-color:${cssVar('--status-warn')};margin-bottom:14px">⚠ 事前実行が必要: ${esc(plugin.depends_on.join('、'))}</div>` : ''}
       ${blocked ? `<div class="info-box" style="border-color:${cssVar('--status-bad')};margin-bottom:14px">⚠ この分析は計算が重いため、Render 環境では実行できません。ローカルPCで実行してください（結果はローカルの正本 DB に保存されます。Render は閲覧専用で、ここには反映されません）。</div>` : ''}
@@ -1534,7 +1538,7 @@ function _createDynamicTab(plugin, tabId) {
       </div>` : ''}
     </div>
     <div class="card hidden" id="dynresult-${tabId}">
-      <div class="section-title">結果</div>
+      <h2 class="section-title">結果</h2>
       <div id="dynresult-content-${tabId}"></div>
     </div>`;
   document.querySelector('.container').appendChild(div);
@@ -1543,15 +1547,19 @@ function _createDynamicTab(plugin, tabId) {
 function _renderParamsForm(schema, tabId) {
   let html = '';
   for (const [key, field] of Object.entries(schema)) {
-    html += `<div class="form-group"><label>${esc(field.label)}${field.optional ? '（任意）' : ''}</label>`;
+    // label の for と入力欄の id を結ぶ（無いと読み上げで「textbox」としか読まれない・#1176）。
+    // 説明文は aria-describedby で同じ欄へ結ぶ。
+    const fid = esc(`param-${tabId}-${key}`);
+    const desc = field.description ? ` aria-describedby="${fid}-desc"` : '';
+    html += `<div class="form-group"><label for="${fid}">${esc(field.label)}${field.optional ? '（任意）' : ''}</label>`;
     if (field.type === 'select') {
-      html += `<select id="param-${esc(tabId)}-${esc(key)}">`;
+      html += `<select id="${fid}"${desc}>`;
       (field.options || []).forEach(opt => {
         html += `<option value="${esc(opt.value)}"${opt.value == field.default ? ' selected' : ''}>${esc(opt.label)}</option>`;
       });
       html += '</select>';
     } else if (field.type === 'multiselect') {
-      html += `<select id="param-${esc(tabId)}-${esc(key)}" multiple style="height:110px;width:100%">`;
+      html += `<select id="${fid}"${desc} multiple style="height:110px;width:100%">`;
       (field.options || []).forEach(opt => {
         const sel = (field.default || []).includes(opt.value) ? ' selected' : '';
         html += `<option value="${esc(opt.value)}"${sel}>${esc(opt.label)}</option>`;
@@ -1562,16 +1570,16 @@ function _renderParamsForm(schema, tabId) {
       // これにより int スライダーが端数値を吐いて coerce_params に弾かれることはない。
       const step = field.step ?? (field.dtype === 'int' ? 1 : 'any');
       html += `<div style="display:flex;align-items:center;gap:8px">
-        <input type="range" id="param-${tabId}-${key}" min="${field.min}" max="${field.max}" step="${step}" value="${field.default}"
+        <input type="range" id="${fid}"${desc} min="${field.min}" max="${field.max}" step="${step}" value="${field.default}"
           data-input="syncVal" data-target="val-${tabId}-${key}" style="flex:1;accent-color:var(--accent)">
         <span id="val-${tabId}-${key}" style="color:var(--accent-text);font-weight:600;min-width:36px">${field.default}</span>
       </div>`;
     } else if (field.type === 'checkbox') {
-      html += `<input type="checkbox" id="param-${tabId}-${key}"${field.default ? ' checked' : ''} style="width:auto;accent-color:var(--accent)">`;
+      html += `<input type="checkbox" id="${fid}"${desc}${field.default ? ' checked' : ''} style="width:auto;accent-color:var(--accent)">`;
     } else {
-      html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="param-${tabId}-${key}" value="${field.default ?? ''}" placeholder="${field.default ?? ''}">`;
+      html += `<input type="${field.type === 'number' ? 'number' : 'text'}" id="${fid}"${desc} value="${field.default ?? ''}" placeholder="${field.default ?? ''}">`;
     }
-    if (field.description) html += `<div class="text-sm" style="margin-top:4px">${field.description}</div>`;
+    if (field.description) html += `<div class="text-sm" id="${fid}-desc" style="margin-top:4px">${field.description}</div>`;
     html += '</div>';
   }
   return html;
@@ -1971,7 +1979,7 @@ const MRR_FEAT_LABELS = {
   momentum_12m1: 'モメンタム(12-1)',
 };
 // 種別 → 色（財務/マクロ/交差項/テクニカル）。
-const MRR_COEF_COLOR_TOKENS = { fin: '--status-info', macro: '--status-warn-text', cross: '#c084fc', tech: '#34d399' };
+const MRR_COEF_COLOR_TOKENS = { fin: '--status-info', macro: '--status-warn-text', cross: '--accent-text', tech: '--status-good' };
 const MRR_COEF_COLORS = new Proxy({}, { get: (_, t) => { const v = MRR_COEF_COLOR_TOKENS[t]; return v && v.startsWith('--') ? cssVar(v) : v; } });
 const MRR_COEF_TYPE_LABELS = { fin: '財務', macro: 'マクロ', cross: '交差項', tech: 'テクニカル' };
 let _mrrChart = null;
@@ -2242,7 +2250,7 @@ function _mrrOofHTML(data) {
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
         <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
-        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
+        <div style="font-size:15px;font-weight:700;color:var(--accent-text)">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
         <div style="font-size:11px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
@@ -2490,12 +2498,12 @@ function _mrrTableHTML(v) {
 
   return `
     <div class="flex-between" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
-      <div class="section-title" style="margin-bottom:0">
+      <h2 class="section-title" style="margin-bottom:0">
         リスク-リターンランキング
         <span class="tag tag-purple" style="margin-left:6px">上位${v.top.length} / 全${total}社</span>
         <span class="tag" style="margin-left:6px">横軸: ${MRR_AXIS_LABELS[v.axis]}</span>
         <span class="tag" style="margin-left:6px">λ=${v.lambda}</span>
-      </div>
+      </h2>
       <div class="text-sm" style="color:var(--text-muted)">λ・リスク軸・表示件数は即時反映（再計算不要）</div>
     </div>
     ${_mrrLambdaNoteHTML(v)}
@@ -2671,10 +2679,24 @@ function _rrPaintChart(view, v) {
 // 表の共通の列（先頭4列と末尾4列）。間の μ 列だけモデルごとに違う。
 function _rrLeadHead() { return '<th>#</th><th>コード</th><th>銘柄名</th><th>業種</th>'; }
 function _rrTailHead(axis) { return `<th>${axis==='r2'?'R2 ボラ':'R_macro'}</th><th>U=μ−λR</th><th>R3</th><th>F</th>`; }
-function _rrLeadCells(r, i) {
-  return `<td>${i+1}</td>
+// 行の詳細を開く入口（#1176）。行のクリックはマウス専用なので、Tab で届くボタンを順位の欄に置く。
+// 見える文字は順位のまま（読み上げの名前はその文字で始める＝声で押せる）、銘柄名を後ろに足す。
+function _rowDetailBtn(rank, name, attrs) {
+  return `<button type="button" class="row-detail" ${attrs}>${rank}<span class="sr-only"> 位・${esc(name)}の詳細</span></button>`;
+}
+// 銘柄名を企業詳細へのリンクにする（M-1 の表と同じ・新しいタブ）。行の data-click は起こさない（_wireDelegate）。
+function _companyLink(edinetCode, name) {
+  return edinetCode
+    ? `<a href="/company/${esc(edinetCode)}" class="co-link" target="_blank" rel="noopener">${esc(name)}</a>`
+    : esc(name);
+}
+function _rrLeadCells(r, i, c) {
+  const name = r.company_name || r.edinet_code;
+  const btn = _rowDetailBtn(i + 1, name,
+    `data-click="_rrSelectRow" data-arg="${esc(c.tabId)}" data-arg2="${esc(r.edinet_code)}" aria-controls="${esc(c.prefix)}-detail-panel"`);
+  return `<td>${btn}</td>
       <td>${esc(r.sec_code||'-')}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name||r.edinet_code)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_companyLink(r.edinet_code, name)}</td>
       <td>${esc(r.industry||'-')}</td>`;
 }
 function _rrTailCells(r, axis) {
@@ -2692,10 +2714,10 @@ function _rrTableHTML(view, v) {
   }
   // 行クリックは data-click＋委譲（インラインの onclick は CSP の script-src-attr で遮断される・#807）
   const rows = v.top.map((r, i) =>
-    `<tr style="cursor:pointer" data-click="_rrSelectRow" data-arg="${esc(c.tabId)}" data-arg2="${esc(r.edinet_code)}">${c.rowCells(r, i, v)}</tr>`
+    `<tr style="cursor:pointer" data-click="_rrSelectRow" data-arg="${esc(c.tabId)}" data-arg2="${esc(r.edinet_code)}">${c.rowCells(r, i, v, c)}</tr>`
   ).join('');
   return `${c.tableNote(v, view.data || {})}
-    <div id="${c.prefix}-detail-panel" class="hidden" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
+    <div id="${c.prefix}-detail-panel" class="hidden" role="region" aria-label="選んだ銘柄の詳細" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)"></div>
     <div style="overflow-x:auto">
       <table>
         <thead><tr>${c.headCells(v)}</tr></thead>
@@ -2724,7 +2746,7 @@ function _rrSignedBarsHTML(entries, fmt) {
     const w = (Math.abs(v) / maxAbs) * 50;
     const pos = v >= 0;
     const bar = pos
-      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:#c084fc;border-radius:0 3px 3px 0"></div>`
+      ? `<div style="position:absolute;left:50%;width:${w}%;height:14px;background:var(--accent-text);border-radius:0 3px 3px 0"></div>`
       : `<div style="position:absolute;right:50%;width:${w}%;height:14px;background:var(--status-info);border-radius:3px 0 0 3px"></div>`;
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
       <div style="width:160px;flex:none;font-size:11px;color:var(--text-body);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(label)}">${esc(label)}</div>
@@ -2793,9 +2815,9 @@ const _mgView = _riskReturnView({
   tableNote: v => `
     ${_mgLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると SHAP 寄与を表示します</div>`,
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">順位のボタンか行をクリックすると SHAP 寄与を表示します。銘柄名は企業詳細を新しいタブで開きます</div>`,
   headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th>${_rrTailHead(v.axis)}`,
-  rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
+  rowCells: (r, i, v, c) => `${_rrLeadCells(r, i, c)}
       <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
       ${_rrTailCells(r, v.axis)}`,
   tooltipLines: (p, axisKey) => [`μ=${p.mu_raw!=null?(p.mu_raw*100).toFixed(2)+'%':'-'}  R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`],
@@ -2825,7 +2847,7 @@ function _mgHeaderHTML(data) {
       </tr></thead>
       <tbody>
         <tr>
-          <td style="padding:4px 8px;color:#c084fc;font-weight:600">XGBoost（M-2）</td>
+          <td style="padding:4px 8px;color:var(--accent-text);font-weight:600">XGBoost（M-2）</td>
           <td style="padding:4px 8px;text-align:right;color:${(xgb.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${xgb.mean_r2!=null?xgb.mean_r2.toFixed(3):'-'}</td>
           <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${xgb.mean_rmse!=null?xgb.mean_rmse.toFixed(4):'-'}</td>
           <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${xgb.n_folds||0}</td>
@@ -2884,7 +2906,7 @@ function _mgShapHTML(item) {
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
     .map(([name, v]) => [MRR_FEAT_LABELS[name] || name, v]);
   return `
-    <div style="font-size:12px;color:#c084fc;font-weight:600;margin-bottom:8px">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:8px">
       SHAP 寄与内訳: ${esc(item.company_name||item.edinet_code)}（${esc(item.sec_code||'')}）
     </div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">正（紫）= 予測リターン↑方向　負（青）= 予測リターン↓方向</div>
@@ -2921,9 +2943,9 @@ const _enetView = _riskReturnView({
   tableNote: (v, data) => `
     ${_enetLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で検証済み。</div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">行をクリックすると予測の内訳を表示します</div>`,
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">順位のボタンか行をクリックすると予測の内訳を表示します。銘柄名は企業詳細を新しいタブで開きます</div>`,
   headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" tabindex="0" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
-  rowCells: (r, i, v) => `${_rrLeadCells(r, i)}
+  rowCells: (r, i, v, c) => `${_rrLeadCells(r, i, c)}
       <td class="${r.mu_rel>0?'text-green':''}">${_rrPct(r.mu_rel, true)}</td>
       <td>${_rrPct(r.mu_raw)}</td>
       ${_rrTailCells(r, v.axis)}`,
@@ -2953,7 +2975,7 @@ function _enetHeaderHTML(data) {
         <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">フォールド数</th>
       </tr></thead>
       <tbody><tr>
-        <td style="padding:4px 8px;color:#c084fc;font-weight:600">ElasticNet（M-6）</td>
+        <td style="padding:4px 8px;color:var(--accent-text);font-weight:600">ElasticNet（M-6）</td>
         <td style="padding:4px 8px;text-align:right;color:${(cv.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${cv.mean_r2!=null?cv.mean_r2.toFixed(3):'-'}</td>
         <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.mean_rmse!=null?cv.mean_rmse.toFixed(4):'-'}</td>
         <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.n_folds||0}</td>
@@ -2991,7 +3013,7 @@ function _enetBreakdownHTML(item, data) {
   const row = (label, val, bold) =>
     `<div style="color:var(--text-secondary)${bold ? ';font-weight:600' : ''}">${label}</div><div style="text-align:right${bold ? ';font-weight:600' : ''}">${val}</div>`;
   return `
-    <div style="font-size:12px;color:#c084fc;font-weight:600;margin-bottom:8px">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:8px">
       予測の内訳: ${esc(item.company_name||item.edinet_code)}（${esc(item.sec_code||'')}）
     </div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
@@ -3140,7 +3162,7 @@ function _dlmDiagHTML(data) {
       1期先予測診断（バーンイン除外・全 ${data.n_companies || 0} 銘柄平均）
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:#c084fc">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
+      <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">校正（標準化誤差² 平均・1 が理想）</div><div style="font-size:15px;font-weight:700;color:var(--accent-text)">${d.calibration != null ? d.calibration.toFixed(3) : '-'}</div></div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">予測 RMSE（週次リターン）</div><div style="font-size:15px;font-weight:700;color:var(--text-secondary)">${d.pred_rmse != null ? d.pred_rmse.toFixed(4) : '-'}</div></div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px"><div style="font-size:11px;color:var(--text-muted)">95% 信用区間カバレッジ</div><div style="font-size:15px;font-weight:700;color:${(d.coverage95 || 0) >= 0.9 ? cssVar('--val-up-text') : cssVar('--status-warn-text')}">${d.coverage95 != null ? (d.coverage95 * 100).toFixed(1) + '%' : '-'}</div></div>
     </div>
@@ -3180,7 +3202,7 @@ function _dlmOofHTML(data) {
       </div>
       <div style="padding:8px;background:var(--bg-sunken);border-radius:6px">
         <div style="font-size:11px;color:var(--text-muted)">hit-rate（top&gt;bottom の期）</div>
-        <div style="font-size:15px;font-weight:700;color:#c084fc">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
+        <div style="font-size:15px;font-weight:700;color:var(--accent-text)">${oof.hit_rate!=null?(oof.hit_rate*100).toFixed(0)+'%':'-'}</div>
         <div style="font-size:11px;color:var(--text-muted)">${oof.n_periods_quantile||0} 期</div>
       </div>
     </div>
@@ -3227,10 +3249,13 @@ function _dlmTableHTML(data, v) {
     const frontier = ui && ui._pareto ? '★' : ui && ui._anti_pareto ? '▼' : '';
     const frontColor = ui && ui._pareto ? cssVar('--val-up-text') : ui && ui._anti_pareto ? cssVar('--val-down-text') : cssVar('--text-muted');
     // 行クリックは data-click＋委譲（インラインの onclick は CSP の script-src-attr で遮断される・#811）
+    const name = r.company_name || r.edinet_code;
+    const btn = _rowDetailBtn(i + 1, name,
+      `data-click="_dlmSelectRow" data-arg="${esc(r.edinet_code)}" aria-controls="chart-dlm" aria-pressed="${seld}"`);
     return `<tr style="cursor:pointer;${seld ? 'background:rgba(124,58,237,0.14)' : ''}" data-click="_dlmSelectRow" data-arg="${esc(r.edinet_code)}">
-      <td>${i + 1}</td>
+      <td>${btn}</td>
       <td>${esc(r.sec_code || '-')}</td>
-      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.company_name || r.edinet_code)}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_companyLink(r.edinet_code, name)}</td>
       <td>${esc(r.industry || '-')}</td>
       <td class="${mu > 0 ? 'text-green' : 'text-red'}" style="text-align:right;font-family:monospace">${mu != null ? (mu * 100).toFixed(1) + '%' : '-'}</td>
       <td style="text-align:right;font-family:monospace;color:var(--accent-text)">${r.r_macro != null ? (r.r_macro * 100).toFixed(2) + '%' : '-'}</td>
@@ -3244,7 +3269,7 @@ function _dlmTableHTML(data, v) {
   const lambdaTag = lambda != null ? `<span class="tag" style="margin-left:6px">λ=${lambda}</span>` : '';
   return _dlmDiagHTML(data) + _dlmOofHTML(data) + `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
-      <div style="font-size:11px;color:var(--text-muted)">行クリックで銘柄を選択 → 下に α/β の時系列（信用区間バンド）を表示${lambdaTag}</div>
+      <div style="font-size:11px;color:var(--text-muted)">順位のボタンか行をクリックすると、下に α/β の時系列（信用区間バンド）を表示します。銘柄名は企業詳細を新しいタブで開きます${lambdaTag}</div>
       <span style="flex:1"></span>
       <label style="font-size:11px;color:var(--text-secondary)">表示系列
         <select id="dlm-series" style="margin-left:6px;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:4px 6px;font-size:12px">${seriesOpts}</select>
@@ -3306,8 +3331,15 @@ function _dlmRepaint() {
 }
 // 行クリック（_wireDelegate から呼ばれる）。選択銘柄の α/β 経路を描き直す。
 function _dlmSelectRow(edinetCode) {
+  // 表を描き直すとボタンが入れ替わってフォーカスが消える。キーボードで押したときは同じ銘柄のボタンへ戻す
+  const refocus = document.activeElement && document.activeElement.classList.contains('row-detail');
   _dlmSel = edinetCode;
   _dlmRepaint();
+  if (refocus) {
+    const b = [...document.querySelectorAll('.row-detail[data-click="_dlmSelectRow"]')]
+      .find(x => x.dataset.arg === edinetCode);
+    if (b) b.focus();
+  }
 }
 function _dlmScheduleRepaint() {
   if (!_dlmData) return;
@@ -3380,6 +3412,9 @@ function _wireDelegate(eventType, key){
   document.addEventListener(eventType, function(e){
     const el = e.target.closest('[data-'+key+']');
     if(!el) return;
+    // 行の中のリンク（銘柄名→企業詳細）はリンクとしてだけ働かせ、行の data-click を起こさない（#1176）
+    const link = e.target.closest('a[href]');
+    if(link && link !== el && el.contains(link)) return;
     const fn = window[el.dataset[key]];
     if(typeof fn !== 'function') return;
     const args=[];

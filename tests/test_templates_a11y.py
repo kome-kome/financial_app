@@ -209,3 +209,107 @@ def test_pages_that_raise_toasts_style_them():
             missing = [s for s in NOTIF_CSS_SELECTORS if s not in text]
             assert not missing, f"{_name(path)} は showNotif を呼ぶがトーストの CSS が無い: {missing}"
     assert callers, "showNotif を呼ぶ画面を1つも拾えない（検出の正規表現が実体とずれた）"
+
+
+# ── 分析画面のキーボード・読み上げ・ライトテーマの対比（#1176）────────────────────────────
+# どれも破っても画面は壊れず、マウスと目で使う人には違いが見えない。
+
+_ANALYSIS_HTML = os.path.join(BASE_DIR, "templates", "analysis.html")
+_ANALYSIS_JS = os.path.join(BASE_DIR, "static", "js", "analysis.js")
+
+# JS が組み立てる inline style の中の直書きの色。トークン（var(--…)）ならテーマに追随するが、
+# 直書きはライトテーマの白地で読めなくなる（#c084fc は白地で約 2.6:1 だった）。
+_JS_INLINE_HEX_RE = re.compile(
+    r"\b(?:color|background(?:-color)?|border(?:-[a-z]+)*|fill|stroke)\s*:\s*#[0-9a-fA-F]{3,8}\b")
+# 色トークンの表などに置いた引用符付きの色の値
+_QUOTED_HEX_RE = re.compile(r"""['"]#[0-9a-fA-F]{3,8}['"]""")
+_LABEL_RE = re.compile(r"<label\b([^>]*)>(.*?)</label>", re.S)
+_HEADING_DIV_RE = re.compile(r'<div class="section-title"')
+
+
+def test_js_inline_styles_use_color_tokens():
+    hits = [
+        f"{_name(p)}:{text.count(chr(10), 0, m.start()) + 1} {m.group(0)}"
+        for p in STATIC_JS
+        for text in [_read(p)]
+        for m in _JS_INLINE_HEX_RE.finditer(text)
+    ]
+    assert not hits, "JS の inline style は var(--…) のトークンで書く（DESIGN.md）:\n" + "\n".join(hits)
+
+
+def test_js_inline_hex_detector_catches_the_old_form():
+    # 測定器の較正: #1176 で直した形を必ず拾う（正規表現が外れると上のテストが素通りする）
+    assert _JS_INLINE_HEX_RE.search('<div style="font-size:15px;font-weight:700;color:#c084fc">')
+    assert _JS_INLINE_HEX_RE.search("background:#c084fc;border-radius:0 3px 3px 0")
+    assert not _JS_INLINE_HEX_RE.search("color:var(--accent-text)")
+
+
+def test_analysis_js_has_no_hex_color_values():
+    # 色の表（例: MRR_COEF_COLOR_TOKENS）もトークン名で持つ。cssVar() で描く直前に解決する。
+    # 企業詳細（company.js）のチャートの系列パレットは未移行のため、ここでは分析画面だけを縛る。
+    text = _read(_ANALYSIS_JS)
+    hits = [f"analysis.js:{text.count(chr(10), 0, m.start()) + 1} {m.group(0)}"
+            for m in _QUOTED_HEX_RE.finditer(text)]
+    assert not hits, "\n".join(hits)
+
+
+def test_analysis_labels_name_their_field():
+    """`<label>` は for で入力欄と結ぶか、入力欄を中に含む（無いと読み上げで「textbox」としか読まれない）。"""
+    unbound = []
+    for path in (_ANALYSIS_HTML, _ANALYSIS_JS):
+        text = _read(path)
+        labels = _LABEL_RE.findall(text)
+        assert labels, f"{_name(path)}: <label> を1つも拾えない（検出の正規表現が実体とずれた）"
+        for attrs, inner in labels:
+            if "for=" in attrs or re.search(r"<(?:input|select|textarea)\b", inner):
+                continue
+            unbound.append(f"{_name(path)}: <label{attrs}>{inner[:40]}")
+    assert not unbound, "\n".join(unbound)
+
+
+def test_analysis_label_for_targets_exist():
+    """静的な `<label for>` の行き先の id が同じテンプレートにある（id の書き換えで黙って外れる）。"""
+    text = _read(_ANALYSIS_HTML)
+    targets = re.findall(r'<label\b[^>]*\bfor="([^"]+)"', text)
+    assert targets, "テンプレートの <label for> を拾えない"
+    missing = [t for t in targets if f'id="{t}"' not in text]
+    assert not missing, missing
+
+
+def test_analysis_section_titles_are_headings():
+    """カードの見出しは h2（小見出しは h3）。div のままだと見出しで移動できない（h1 しか無かった）。"""
+    for path in (_ANALYSIS_HTML, _ANALYSIS_JS):
+        text = _read(path)
+        assert not _HEADING_DIV_RE.search(text), f"{_name(path)}: section-title が div のまま"
+        assert re.search(r'<h2 class="section-title"', text), f"{_name(path)}: h2 の見出しを拾えない"
+
+
+def test_analysis_skip_link_reaches_the_main_content():
+    text = _read(_ANALYSIS_HTML)
+    m = re.search(r'<a class="skip-link" href="#([\w-]+)">', text)
+    assert m, "本文へのスキップリンクが無い（ナビ 8・サイドバー 12 を Tab で抜ける必要がある）"
+    assert re.search(rf'<main\b[^>]*\bid="{m.group(1)}"', text), "スキップリンクの行き先が main に無い"
+    assert ".skip-link:focus{" in text, "スキップリンクがフォーカスで現れない"
+    # 本文より前（ナビより前）に置く。後ろに置くと Tab で先にナビを抜けることになる
+    assert text.index('class="skip-link"') < text.index('<nav class="gnav">')
+
+
+def test_analysis_sidebar_marks_the_current_tab():
+    js = _read(_ANALYSIS_JS)
+    body = js[js.index("function showTab("):]
+    body = body[:body.index("\n}\n")]
+    assert "setAttribute('aria-current', 'true')" in body, "現在のタブが色だけで示されている"
+    assert "removeAttribute('aria-current')" in body, "前のタブの aria-current が残る"
+
+
+def test_analysis_result_rows_have_keyboard_entry_and_company_links():
+    """M-2/M-3/M-6 の結果の行: 詳細はボタンで開け、銘柄名は企業詳細へのリンク（M-1 の表と同じ）。"""
+    js = _read(_ANALYSIS_JS)
+    for click in ("_rrSelectRow", "_dlmSelectRow"):
+        assert re.search(rf'_rowDetailBtn\([^;]*data-click="{click}"', js, re.S), \
+            f"{click} を開くボタンが無い（行のクリックはマウス専用）"
+    assert 'class="row-detail"' in js and ".row-detail{" in _read(_ANALYSIS_HTML)
+    assert js.count("_companyLink(r.edinet_code, name)") >= 2, "M-2/M-6 と M-3 の銘柄名がリンクになっていない"
+    # 行の中のリンクは行の data-click を起こさない（企業詳細を開くたびに詳細パネルも開いてしまう）
+    delegate = js[js.index("function _wireDelegate("):]
+    assert "closest('a[href]')" in delegate[:800]
