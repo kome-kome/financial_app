@@ -82,6 +82,7 @@
 | [0071](0071-sell-ranking-keeps-only-the-measured-best.md) | **売り候補ランキングは実測で最良の 1 手法（M-6 の μ̂ の下位 1/5）だけを残す** | #1043, #1073 | accepted（2026-11-05） |
 | [0072](0072-screen-heavy-runs-do-not-save-by-default.md) | **画面からの heavy 実行は既定で保存しない（保存は「結果を保存する」を選んだときだけ）** | — | accepted（2026-11-11） |
 | [0073](0073-labels-stay-price-only.md) | **学習と採点の答えは値上がりだけのまま（配当込みへ切り替えない）** | #1154, #1187 | accepted（2026-11-11） |
+| [0074](0074-delisting-share-is-judged-on-covered-years.md) | **上場廃止で答えが消える割合は、廃止社の株価がそろう年で判定する（#1154 の keep を redesign に覆す）** | #1154, #1188, #1195 | accepted（2026-11-11） |
 
 ## 運用
 
