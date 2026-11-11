@@ -103,14 +103,15 @@ HEAVY_AUTOMATION: dict[str, str] = {
     # 日次（タスクスケジューラ JST 17:20 → run_nightly.ps1 → nightly_scores.py）
     "sector_ols": "local:scripts/run_nightly.py",
     "macro_enet": "local:scripts/run_nightly.py",
-    # 月次（タスクスケジューラ 毎月1日 JST 01:00 → run_monthly.ps1）。μ̂ は月次探索の
+    # 月次（タスクスケジューラ 毎月1日 JST 01:00 → run_monthly.ps1）。M-3 の μ̂ は月次探索の
     # --persist-scores 副作用で更新される。cadence が探索に縛られている点は #423 子2 の
     # 宿題として残っている（GHA 時代は M-1 が 300分 timeout で cancelled を続けており＝
     # 子7、**登録があっても鮮度は出ていない**実例になっていた）。
     # M-1 だけ別タスク（毎月3日 JST 01:00 → run_monthly_m1.ps1・#579 で2日から移動）。
-    # 2日は macro_beta（M-1 の入力）が使う。実測 約752分で月次本体の窓に入らないため
-    # 切り出した（#584）。**切り出しの判断は #638 以後も変わらない**——畳めば結果は残るが、
-    # 残るのは探索空間の一部を見た結果であって、毎月それでよいわけではない。
+    # 2日は macro_beta（M-1 の入力）が使う。当時の実測 約752分で月次本体の窓に入らないため
+    # 切り出した（#584）。**M-1 の execute は何も保存しない（`writes = ()`）**ので、このタスクが
+    # 書くのは `plugin_tuned_params` だけ（足跡と分析画面の初期値）。M-1 の μ̂ そのものは
+    # macro_beta 推論バッチが作る（下の `MU_PRODUCER_OVERRIDES`・#1179）。
     "macro_risk_return": "local:scripts/run_monthly_m1.py",
     # M-2 は日中枠（平日 JST 08:00 → run_daytime.ps1）の探索の周回が月 1 回回し切って反映する（#1114・#1118）。
     "macro_gbdt": "local:scripts/run_daytime.py",
@@ -124,6 +125,16 @@ HEAVY_AUTOMATION: dict[str, str] = {
         "exempt: producer を持たない（produced_output=False）。スコアが順位で"
         "リターン単位ではないため永続化する μ̂ が無い（#362）。"
         "#570 で退役（hidden=True・ADR-0044）",
+}
+
+# μ̂ を前進させるバッチが、プラグインを回すバッチ（上の `HEAVY_AUTOMATION`）と違う源だけを書く（#1179）。
+# 朝の画面の「μ̂ を進めるコマンド」（`routers/morning._mu_driver`）が先に引く。
+# - M-1（`macro_risk_return`）: μ̂ と as-of は `macro_beta_loadings` / `macro_beta_meta` から復元する
+#   （`read_producer_scores` → `get_producer_scores`・`database.get_producer_asof`・ADR-0002）。
+#   月次の M-1 探索（`run_monthly_m1.py`）は M-1 を回すが、μ̂ を進めない。
+# 指すスクリプトと `.ps1` の実在は `tests/test_morning.py::TestMuDriver` が照合する。
+MU_PRODUCER_OVERRIDES: dict[str, str] = {
+    "macro_risk_return": "local:scripts/run_monthly_beta.py",
 }
 
 EXEMPT_PREFIX = "exempt:"

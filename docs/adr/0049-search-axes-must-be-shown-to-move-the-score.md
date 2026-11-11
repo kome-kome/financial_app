@@ -136,6 +136,11 @@ use_macro` のときしか作られない。BIC の選択は上限で切るだ�
 空の combo へ投影されて重複排除されるので、`search()` は1回だけ評価して完走する
 （`tests/test_hyperparameter_search.py::TestNoAxisSpace`）。
 
+> **訂正（2026-11-11・#1179）**: 「探索そのものは μ̂ の永続化（`--persist-scores`）のために残す」は誤り。M-1 の
+> execute は何も保存しない（`writes = ()`）ので、M-1 の μ̂ は macro_beta 推論バッチが作る。探索が残っている
+> 実際の理由は、`--persist` で `plugin_tuned_params`（watchdog の足跡・分析画面の初期値）を毎月書くこと。
+> #1179 で `run_monthly_m1.py` から `--persist-scores` を外した。
+
 同点の扱い（同点なら既定を選ぶ）は採らなかった。全モデルの「同点なら champion を保つ」性質を
 変える話で、軸を外せば M-1 では同点が起きない。
 

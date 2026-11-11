@@ -134,16 +134,18 @@ def _gap_ratio_block(db: Session) -> dict:
 
 
 def _mu_driver(mu_source: str) -> tuple[Optional[str], Optional[str]]:
-    """μ̂ を前進させるバッチと、手で回すコマンドを `HEAVY_AUTOMATION` から引く（#743）。
+    """μ̂ を前進させるバッチと、手で回すコマンドを登録簿から引く（#743）。
 
-    **推測しない。** 以前は「既定の macro_enet なら夜間、それ以外は月次」と決め打ちしており、
-    M-1 の μ̂ を永続化するのは `run_monthly_m1.py`（ADR-0046）なのに `./run_monthly.ps1` を
-    案内していた。コマンドはスクリプト名から導く（対応表を書くと登録簿と二重管理になる）。
+    **推測しない。** 以前は「既定の macro_enet なら夜間、それ以外は月次」と決め打ちしていた。
+    引くのは `MU_PRODUCER_OVERRIDES`（μ̂ を作るバッチがプラグインを回すバッチと違う源）→
+    `HEAVY_AUTOMATION` の順。M-1 の μ̂ は macro_beta 推論バッチ（`run_monthly_beta.py`）が作り、
+    M-1 の探索（`run_monthly_m1.py`）は何も保存しない（#1179。以前はこちらを案内していた）。
+    コマンドはスクリプト名から導く（コマンドの対応表を書くと登録簿と二重管理になる）。
     `exempt:` や未登録の producer は自動で前進させる経路が無いので `(None, None)`。
     """
-    from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
+    from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX, MU_PRODUCER_OVERRIDES
 
-    entry = HEAVY_AUTOMATION.get(mu_source, "")
+    entry = MU_PRODUCER_OVERRIDES.get(mu_source) or HEAVY_AUTOMATION.get(mu_source, "")
     if not entry.startswith(LOCAL_PREFIX):
         return None, None
     stem = entry[len(LOCAL_PREFIX):].rsplit("/", 1)[-1].removesuffix(".py")

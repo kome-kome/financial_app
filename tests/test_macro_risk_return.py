@@ -774,7 +774,8 @@ class TestTuningSearchSpace:
     def test_returns_base_params_and_dims(self):
         """軸は1本も残らない（#791 で最後の `max_features` も外した）。
 
-        探索そのものは μ̂ の永続化（`--persist-scores`）のために残る＝1候補で完走する。
+        探索そのものは `plugin_tuned_params`（足跡・分析画面の初期値）を書くために残る＝1候補で
+        完走する。M-1 の μ̂ は macro_beta 推論バッチが作る（#1179）。
         """
         base_params, dims = self.plugin.tuning_search_space()
         assert isinstance(base_params, dict)

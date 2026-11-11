@@ -57,10 +57,17 @@ class TestMigrationIsComplete:
                 f"{model} の HEAVY_AUTOMATION 登録がこのバッチを指していない"
             )
 
-    def test_persists_scores(self):
-        """`--persist-scores` が無いと μ̂ が更新されない＝走っても鮮度が出ない。"""
+    def test_persists_tuned_params_but_not_scores(self):
+        """`--persist` が `plugin_tuned_params` を書く（watchdog の足跡はこの `tuned_at`）。
+
+        `--persist-scores` は渡さない。M-1 の execute は何も保存しない（`writes = ()`）ので、最後に
+        1 回 execute するだけで μ̂ は進まない。M-1 の μ̂ は macro_beta 推論バッチが作る（#1179）。
+        """
+        from plugins.macro_risk_return import MacroRiskReturnPlugin
+
         argv = [s.argv for s in rm1.steps_for("py") if s.name.startswith("tune:")][0]
-        assert "--persist" in argv and "--persist-scores" in argv
+        assert "--persist" in argv and "--persist-scores" not in argv
+        assert MacroRiskReturnPlugin.writes == ()
 
     def test_footprint_keys_do_not_collide_with_the_monthly_body(self):
         """足跡が混ざると「M-1 が走らなかった月」が本体の成功で隠れる。"""
