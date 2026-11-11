@@ -367,3 +367,11 @@ class TestDaytimeJob:
         assert argv[argv.index("--prereg") + 1] == X.PREREG
         assert argv[argv.index("--prereg-sha") + 1] == SHA
         assert "--smoke" not in argv
+
+    def test_result_section_records_the_decision(self):
+        # 2026-11-11 の実走で配当 propose_switch（#1187 を起票）・上場廃止 keep（#1188 で見直す）。
+        # 書き写した結果を消さない（#1154）
+        section = prereg.appendix_section(prereg.read_document(X.PREREG), "### 結果")
+        assert not section.startswith(prereg.PLACEHOLDER)
+        assert "判定: 配当 = propose_switch" in section
+        assert "判定: 上場廃止 = keep" in section
