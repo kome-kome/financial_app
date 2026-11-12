@@ -176,11 +176,8 @@ class TestDaytimeJob:
         assert argv[argv.index("--prereg-sha") + 1] == SHA
         assert "--smoke" not in argv
 
-    def test_runs_alone(self):
-        """最悪の所要（約 305 分）が 2 件の日の予算に届かないので、他の仕事と同じ日に組まれない見積りにしてある。"""
-        job = rd.JOBS["measure:sell-quantile"]
-        assert job.measured_min * rd.JOB_HEADROOM > rd.budget_share(2)
-        assert job.measured_min <= rd.JOB_BUDGET_MIN
-
-    def test_result_is_not_recorded_before_the_run(self):
-        assert not prereg.section_recorded(prereg.read_document(S2_SET.prereg), "### 結果")
+    def test_result_section_records_the_decision(self):
+        # 2026-11-12 の実走で adopt（採用）。書き写した結果を消さない（#1158）。本番の切り替えは #1201
+        section = prereg.appendix_section(prereg.read_document(S2_SET.prereg), "### 結果")
+        assert not section.startswith(prereg.PLACEHOLDER)
+        assert "判定: adopt（採用）" in section
