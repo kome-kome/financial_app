@@ -2623,7 +2623,7 @@ class PredictionSnapshot(Base):
     r1_prime           = Column(Float)     # コンフォーマル区間半幅（持つモデルだけ）
     gap_ratio          = Column(Float)     # 乖離率 %（sector_ols の行だけ）
     # 予測が使ったデータの時点。μ̂ は源の代表 as-of（`get_producer_asof`）、gap はその行の決算期末。
-    # 月次で回るモデルは写した日より古い＝突き合わせる 52 週の起点はこちら。
+    # 月次で回るモデルは写した日より古い。答え合わせ（#1157）の 52 週の起点は写した日にそろえ、こちらは参考。
     data_asof          = Column(String(10))
     code_version       = Column(String(48))   # 写した夜の作業ツリー（`nightly_scores._code_version`）
     preprocess_version = Column(String(20))   # plugins.utils.PREPROCESS_VERSION
