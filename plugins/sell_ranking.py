@@ -14,6 +14,9 @@
 割高警戒型・業績悪化重視）と観点ウェイト、μ の出所の切替（M-1・M-3）、売りスコアの絶対閾値と
 「一部売却」、価格トレンドによる札の補正、R3 足切り。価格トレンド（13週リターン・52週高値からの下落）と
 損益は**参考として表示するだけ**で、並びにも札にも使わない。
+
+売り専用の候補 S2（52 週先リターンの下側 20% 点・#1158 の事前登録で採用）で並べる経路も持つが、**既定では
+使わない**（`SELL_KEY_SOURCE`・#1202）。本番の切り替えは新しい ADR を添えて #1201 で行う。
 """
 import re
 from collections import namedtuple
@@ -27,6 +30,14 @@ from .base import AnalysisPlugin
 MU_SOURCE = "macro_enet"
 # 下位 1/SELL_QUANTILES を売る。`in_layer_short_side(n_quantiles=5)` と同じ切り方（m // 5 社）。
 SELL_QUANTILES = 5
+
+# 並びのキーの出どころ（#1202）。既定は MU_SOURCE（M-6 の μ̂）＝ADR-0071 のまま。`SELL_KEY_S2` にすると、M-6 が
+# 同じパネルで解いて `sell_quantile_scores` へ保存した S2 の予測（#1158 で採用）で並べる。**画面のパラメータには
+# しない**（ADR-0071 決定 4 で μ の出所の選択を外した）。切り替えは新しい ADR を添えて #1201 で行う。
+# S2 の表が空（未保存・全社同値の回）か、断面の日付が M-6 と食い違う（S2 だけ古い）ときは、保有**全体**を M-6 の
+# μ̂ で並べ、倒した理由を応答に出す。保有ごとに混ぜない（下側の分位と平均は尺度が違い、混ぜると順位が壊れる）。
+SELL_KEY_S2 = "sell_quantile"
+SELL_KEY_SOURCE = MU_SOURCE
 
 # ── 転送列の契約（Issue #482）────────────────────────────────────────────────
 # financial_metrics は派生値込みの計算 VIEW。ここで読むのは表示と損益のフォールバックに使う列だけ。
@@ -163,6 +174,28 @@ def assign_actions(mus: dict[str, float | None]) -> tuple[list[str], dict[str, s
     return ranked + missing, actions
 
 
+def choose_sell_keys(source: str, mus: dict[str, float | None], ec_by_key: dict[str, str | None],
+                     s2: dict, mu_snapshot_date: str | None) -> tuple[dict, str, str | None]:
+    """並びに使う {キー: 値} と、実際に使った出どころ・M-6 へ倒した理由を返す（#1202）。
+
+    `source` が MU_SOURCE なら μ̂ のまま（理由 None）。`SELL_KEY_S2` なら `s2`（`database.get_sell_quantile_scores`
+    の戻り）の q20 で並べる。ただし S2 の表が空か、S2 の断面の日付が M-6 の代表値（`mu_snapshot_date`）と違えば、
+    保有全体を μ̂ で並べて理由を返す。S2 だけ欠けた保有は「データ不足」（μ̂ と混ぜない）。
+    """
+    if source == MU_SOURCE:
+        return mus, MU_SOURCE, None
+    if source != SELL_KEY_S2:
+        raise ValueError(f"未知の並びのキーの出どころ: {source}（{MU_SOURCE} / {SELL_KEY_S2} のみ）")
+    q20 = s2.get("q20") or {}
+    if not q20:
+        return mus, MU_SOURCE, "S2 の予測が保存されていない（未実行・全社同値の回・読めない）ので M-6 の μ̂ で並べた"
+    s2_date = s2.get("snapshot_date")
+    if not mu_snapshot_date or s2_date != mu_snapshot_date:
+        return mus, MU_SOURCE, (f"S2 の予測の日付（{s2_date}）が M-6 の μ̂（{mu_snapshot_date}）と違う"
+                                "ので M-6 の μ̂ で並べた")
+    return {k: (q20.get(ec) if ec else None) for k, ec in ec_by_key.items()}, SELL_KEY_S2, None
+
+
 class SellRankingPlugin(AnalysisPlugin):
     name = "sell_ranking"
     label = "売り候補ランキング"
@@ -197,7 +230,8 @@ class SellRankingPlugin(AnalysisPlugin):
         if not holdings:
             return {"count": 0, "n_sell": 0, "n_hold": 0, "n_no_data": 0,
                     "results": [], "not_found": [], "invalid": invalid,
-                    "mu_source": MU_SOURCE, "mu_available": False, "mu_asof": None}
+                    "mu_source": MU_SOURCE, "mu_available": False, "mu_asof": None,
+                    "sell_key_source": MU_SOURCE, "sell_key_fallback": None}
 
         # ── μ̂（M-6 の producer）──────────────────────────────────────────────
         producer = get_plugin(MU_SOURCE)
@@ -272,7 +306,19 @@ class SellRankingPlugin(AnalysisPlugin):
                 "delisted_date": r.delisted_date.isoformat() if r.delisted_date else None,
             }
 
-        order, actions = assign_actions({c: s["mu"] for c, s in by_code.items()})
+        # 並びのキー（#1202）: 既定は μ̂。S2 のときは表と日付を確かめ、だめなら保有全体を μ̂ で並べる
+        s2 = {}
+        if SELL_KEY_SOURCE == SELL_KEY_S2:
+            from database import get_sell_quantile_scores
+            s2 = get_sell_quantile_scores(db)
+        keys, key_source, key_fallback = choose_sell_keys(
+            SELL_KEY_SOURCE, {c: s["mu"] for c, s in by_code.items()},
+            {c: s["edinet_code"] for c, s in by_code.items()}, s2,
+            (mu_asof or {}).get("snapshot_date"))
+        if key_source == SELL_KEY_S2:
+            for c, s in by_code.items():
+                s["q20"] = round(float(keys[c]), 4) if keys[c] is not None else None
+        order, actions = assign_actions(keys)
         scored = [by_code[c] for c in order]
         for rank, item in enumerate(scored, 1):
             item["rank"] = rank
@@ -300,6 +346,9 @@ class SellRankingPlugin(AnalysisPlugin):
             "mu_source":     MU_SOURCE,
             "mu_available":  mu_available,
             "mu_asof":       mu_asof,
+            # 実際に並べたキーの出どころ（#1202・既定は M-6）と、S2 から M-6 へ倒した理由（倒していなければ None）
+            "sell_key_source":   key_source,
+            "sell_key_fallback": key_fallback,
             "results":       scored,
             "not_found":     not_found,
             "invalid":       invalid,

@@ -890,6 +890,144 @@ class TestProducer:
         assert m.call_count == 0
 
 
+class TestSellQuantileRide:
+    """売り専用の候補 S2 の相乗り（#1202）: M-6 と同じ学習行・現断面・規模の中立化で解き、別の表へ保存する。
+
+    合成の DB（4 社）では S2 の予測が全社同じになるかがデータで揺れるので、保存までの配線は学習器を差し替えて
+    決め打ちにし、学習器そのものは月ごとのパネル（`_noisy_months`・信号あり）で確かめる。
+    """
+
+    @staticmethod
+    def _const_maker(value=0.05):
+        """全社に同じ値を返す fit_predict を作る差し替え（係数が全て 0 の回を模す）。"""
+        def maker(**_kw):
+            return lambda train, test, train_groups=None: ([value] * len(test), [0.0] * len(test))
+        return maker
+
+    @staticmethod
+    def _ramp_maker():
+        """社ごとに違う値を返す fit_predict を作る差し替え。"""
+        def maker(**_kw):
+            return lambda train, test, train_groups=None: ([0.01 * i for i in range(len(test))],
+                                                           [0.0] * len(test))
+        return maker
+
+    def test_table_round_trip(self, db):
+        import database
+        from database import get_sell_quantile_scores, replace_sell_quantile_scores
+        n = replace_sell_quantile_scores(
+            db, [{"edinet_code": "E1", "q20": -0.12}, {"edinet_code": "E2", "q20": None}], "2026-11-12")
+        assert n == 1                                   # q20 が None の行は保存しない
+        assert get_sell_quantile_scores(db) == {"q20": {"E1": -0.12}, "snapshot_date": "2026-11-12"}
+        assert replace_sell_quantile_scores(db, [], "2026-11-13") == 0   # 全社同値の回は空で全置換
+        assert get_sell_quantile_scores(db) == {"q20": {}, "snapshot_date": None}
+        with database.tuning_dry_run():
+            assert replace_sell_quantile_scores(db, [{"edinet_code": "E1", "q20": 0.1}], None) == 0
+        assert get_sell_quantile_scores(db)["q20"] == {}
+
+    def test_writes_declares_the_table(self):
+        """画面の実行前の確認（ADR-0072）に「保存します」として出る。"""
+        assert plugin.writes == ("macro_enet_scores", "sell_quantile_scores")
+
+    def test_fit_is_the_measured_learner_with_m6_settings(self):
+        """予測は計測（#1158）と同じ学習器・M-6 の l1_ratio・内側 CV・分割数から出る（書き写さない）。"""
+        from plugins.macro_enet import _CV_SPLITS, _INNER_CV, _final_training_rows
+        from plugins.model_candidates import make_quantile_enet_fit_predict
+
+        by_ym, current = _noisy_months()
+        rows, groups = _final_training_rows(by_ym, _INNER_CV)
+        l1 = MacroEnetPlugin._l1_ratios("auto")
+        got = MacroEnetPlugin._fit_sell_quantile(rows, current, groups, l1, None)
+        want, _ = make_quantile_enet_fit_predict(l1_ratios=l1, cv_splits=_CV_SPLITS, inner_cv=_INNER_CV)(
+            rows, [(r, 0.0) for r in current], groups)
+        assert got["info"]["flat"] is False
+        assert got["preds"] == pytest.approx(want, abs=1e-12)
+        assert got["info"]["n_rows"] == len(current)
+        assert set(got["info"]) == {"flat", "n_rows", "alpha", "l1_ratio", "n_nonzero", "alpha_at_path_min",
+                                    "alpha_at_path_max", "n_iter_capped", "seconds"}
+
+    def test_size_neutralization_is_the_same_as_m6(self):
+        from plugins.macro_enet import _INNER_CV, _final_training_rows
+        from plugins.macro_snapshots import neutralize_size
+
+        by_ym, current = _noisy_months()
+        rows, groups = _final_training_rows(by_ym, _INNER_CV)
+        l1 = MacroEnetPlugin._l1_ratios("auto")
+        raw = MacroEnetPlugin._fit_sell_quantile(rows, current, groups, l1, None)["preds"]
+        caps = [float(i % 7) + 20.0 if i % 5 else None for i in range(len(current))]   # 時価総額の無い社も混ぜる
+        got = MacroEnetPlugin._fit_sell_quantile(rows, current, groups, l1, caps)["preds"]
+        assert got == pytest.approx(neutralize_size(raw, caps)[0], abs=1e-12)
+
+    def test_flat_predictions_are_not_kept(self, monkeypatch):
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", self._const_maker())
+        by_ym, current = _noisy_months()
+        got = MacroEnetPlugin._fit_sell_quantile([s for v in by_ym.values() for s in v], current, None,
+                                                 (0.5,), [20.0 + i for i in range(len(current))])
+        assert got["preds"] is None
+        assert got["info"]["flat"] is True and got["info"]["n_rows"] == 0
+
+    def test_execute_saves_the_same_companies_and_asof_as_m6(self, monkeypatch):
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", self._ramp_maker())
+        with patch("database.replace_macro_enet_scores") as m6, \
+             patch("database.replace_sell_quantile_scores", return_value=4) as s2:
+            res = _run(_params(use_macro=False))
+        assert m6.call_count == 1 and s2.call_count == 1
+        m6_rows, s2_rows = m6.call_args[0][1], s2.call_args[0][1]
+        assert {r["edinet_code"] for r in s2_rows} == {r["edinet_code"] for r in m6_rows}
+        assert set(s2_rows[0]) == {"edinet_code", "q20"}
+        assert s2.call_args[0][2] == m6.call_args[0][2]                       # 同じ断面の日付
+        assert s2.call_args.kwargs["n_stale"] == m6.call_args.kwargs["n_stale"]
+        assert res["sell_quantile"]["flat"] is False and res["sell_quantile"]["n_saved"] == 4
+
+    def test_execute_empties_the_table_when_flat(self, monkeypatch):
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", self._const_maker())
+        with patch("database.replace_macro_enet_scores"), \
+             patch("database.replace_sell_quantile_scores", return_value=0) as s2:
+            res = _run(_params(use_macro=False))
+        assert s2.call_count == 1 and s2.call_args[0][1] == []
+        assert res["sell_quantile"]["flat"] is True
+
+    def test_failure_does_not_stop_m6_and_is_reported(self, monkeypatch):
+        def boom(**_kw):
+            raise RuntimeError("S2 が解けない")
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", boom)
+        with patch("database.replace_macro_enet_scores") as m6, \
+             patch("database.replace_sell_quantile_scores") as s2:
+            res = _run(_params(use_macro=False))
+        assert m6.call_count == 1                          # M-6 の μ̂ は保存される
+        assert s2.call_count == 0                          # S2 の表は前回のまま（M-6 と日付が食い違えば倒れる）
+        assert "RuntimeError: S2 が解けない" in res["sell_quantile"]["error"]
+        assert res["results"]                              # 画面の結果も返る
+
+    def test_save_failure_is_reported_not_swallowed(self, monkeypatch):
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", self._ramp_maker())
+        with patch("database.replace_macro_enet_scores"), \
+             patch("database.replace_sell_quantile_scores", side_effect=RuntimeError("書けない")):
+            res = _run(_params(use_macro=False))
+        assert "RuntimeError: 書けない" in res["sell_quantile"]["persist_error"]
+
+    def test_cancel_is_not_swallowed(self, monkeypatch):
+        from plugins import progress
+
+        def cancelled(**_kw):
+            raise progress.AnalysisCancelled()
+        monkeypatch.setattr("plugins.macro_enet.make_quantile_enet_fit_predict", cancelled)
+        by_ym, current = _noisy_months()
+        with pytest.raises(progress.AnalysisCancelled):
+            MacroEnetPlugin._fit_sell_quantile([s for v in by_ym.values() for s in v], current, None, (0.5,), None)
+
+    def test_objective_only_does_not_fit_or_save_s2(self, monkeypatch):
+        """探索の早期 return は最終学習より前＝S2 も解かない・書かない。"""
+        from database import tuning_objective_only
+        spy = []
+        monkeypatch.setattr(MacroEnetPlugin, "_fit_sell_quantile",
+                            staticmethod(lambda *a, **k: spy.append(1) or {"preds": None, "info": {}}))
+        with patch("database.replace_sell_quantile_scores") as s2:
+            with tuning_objective_only():
+                res = _run(_params(use_macro=False))
+        assert spy == [] and s2.call_count == 0 and "sell_quantile" not in res
+
+
 class TestUntradableHidden:
     """廃止・価格停止の社は results から外れ、保存する μ̂ には残る（#806）。
 

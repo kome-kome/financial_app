@@ -588,6 +588,16 @@ class TestDiagnosticsExtraction:
         # 規模の中立化（#995）は件数と傾きだけ（社別の補正量は入れない）
         assert set(diag["size_neutral"]) == {"slope", "n_companies", "n_without_cap",
                                              "oof_rows_without_cap"}
+        # 売り専用の候補 S2 の相乗り（#1202）は要約だけ（予測そのものは入らない＝上の社名・コードの検査が通る）
+        assert {"flat", "seconds"} <= set(diag["sell_quantile"]) or "error" in diag["sell_quantile"]
+
+    def test_macro_enet_keeps_the_s2_summary(self):
+        """S2 の行数・全社同値・所要・失敗を夜間の診断値に残す（本番の切り替え #1201 の前に読む・#1202）。"""
+        info = {"flat": False, "n_rows": 3, "alpha": 0.1, "l1_ratio": 0.5, "n_nonzero": 2,
+                "alpha_at_path_min": False, "alpha_at_path_max": False, "n_iter_capped": 4,
+                "seconds": 61.2, "n_saved": 3}
+        assert _extract_macro_enet({"sell_quantile": info})["sell_quantile"] == info
+        assert _extract_macro_enet({})["sell_quantile"] == {}
 
     def test_macro_enet_drops_unlisted_oof_keys(self):
         diag = _extract_macro_enet({"oof_backtest": {"rank_ic": {"mean": 0.1}, "unlisted": 1}})

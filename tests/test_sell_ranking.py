@@ -319,3 +319,87 @@ class TestDependencyGate:
         _seed_m6(db, {"E0001": 0.01})
         res = asyncio.run(execute_plugin(plugin, {"holdings": "1001"}, db))
         assert res["count"] == 1 and res["results"][0]["mu"] == pytest.approx(0.01)
+
+
+# ── 並びのキーの出どころ（#1202）: 既定は M-6 の μ̂・S2 は定数で切り替える経路だけ持つ ──────────
+
+def _seed_s2(db, q20s, snapshot_date="2026-07-29"):
+    from database import replace_sell_quantile_scores
+    replace_sell_quantile_scores(db, [{"edinet_code": ec, "q20": v} for ec, v in q20s.items()], snapshot_date)
+
+
+class TestSellKeySource:
+    def test_default_is_m6_and_not_a_parameter(self):
+        """既定は M-6 の μ̂（ADR-0071 のまま）。S2 への切り替えは画面のパラメータにしない（決定 4）。"""
+        assert sr.SELL_KEY_SOURCE == MU_SOURCE == "macro_enet"
+        assert sr.SELL_KEY_S2 == "sell_quantile"
+        assert set(plugin.params_schema()) == {"holdings"}
+
+    def test_choose_default_keeps_mu(self):
+        mus = {"a": 0.1, "b": None}
+        assert sr.choose_sell_keys(MU_SOURCE, mus, {"a": "E1", "b": "E2"}, {}, None) == (mus, MU_SOURCE, None)
+
+    def test_choose_s2_uses_q20_and_leaves_missing_as_no_data(self):
+        keys, src, why = sr.choose_sell_keys(
+            sr.SELL_KEY_S2, {"a": 0.1, "b": 0.2, "c": 0.3}, {"a": "E1", "b": "E2", "c": None},
+            {"q20": {"E1": -0.3, "E2": -0.1}, "snapshot_date": "2026-11-12"}, "2026-11-12")
+        assert (keys, src, why) == ({"a": -0.3, "b": -0.1, "c": None}, sr.SELL_KEY_S2, None)
+
+    def test_choose_s2_falls_back_when_empty(self):
+        mus = {"a": 0.1}
+        keys, src, why = sr.choose_sell_keys(sr.SELL_KEY_S2, mus, {"a": "E1"},
+                                             {"q20": {}, "snapshot_date": None}, "2026-11-12")
+        assert keys is mus and src == MU_SOURCE and "保存されていない" in why
+
+    def test_choose_s2_falls_back_when_the_dates_differ(self):
+        """S2 だけ古い（学習に失敗して前回のまま）なら M-6 へ倒す。M-6 の日付が無いときも倒す。"""
+        s2 = {"q20": {"E1": -0.3}, "snapshot_date": "2026-11-11"}
+        for m6_date in ("2026-11-12", None):
+            keys, src, why = sr.choose_sell_keys(sr.SELL_KEY_S2, {"a": 0.1}, {"a": "E1"}, s2, m6_date)
+            assert src == MU_SOURCE and "2026-11-11" in why
+
+    def test_choose_unknown_source_is_rejected(self):
+        with pytest.raises(ValueError):
+            sr.choose_sell_keys("macro_dlm", {}, {}, {}, None)
+
+    def test_execute_default_does_not_read_s2(self, db, make_metric):
+        db.add_all(_universe(make_metric, 5))
+        db.commit()
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
+        _seed_s2(db, {f"E{i:04d}": -0.01 * i for i in range(1, 6)})   # 逆の並び
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
+        assert res["results"][0]["sec_code"] == "1001"                # μ̂ の最小
+        assert (res["sell_key_source"], res["sell_key_fallback"]) == (MU_SOURCE, None)
+        assert "q20" not in res["results"][0]
+
+    def test_execute_s2_ranks_by_q20_and_keeps_mu_for_display(self, db, make_metric, monkeypatch):
+        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+        db.add_all(_universe(make_metric, 5))
+        db.commit()
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
+        _seed_s2(db, {f"E{i:04d}": -0.01 * i for i in range(1, 6)})
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
+        assert [r["sec_code"] for r in res["results"]] == ["1005", "1004", "1003", "1002", "1001"]
+        assert res["results"][0]["action"] == "SELL" and res["n_sell"] == 1
+        assert res["results"][0]["q20"] == pytest.approx(-0.05)
+        assert res["results"][0]["mu"] == pytest.approx(0.05)         # 表示する μ̂ は M-6 のまま
+        assert (res["sell_key_source"], res["sell_key_fallback"]) == (sr.SELL_KEY_S2, None)
+
+    def test_execute_s2_falls_back_to_m6_when_s2_is_empty(self, db, make_metric, monkeypatch):
+        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+        db.add_all(_universe(make_metric, 5))
+        db.commit()
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
+        assert res["results"][0]["sec_code"] == "1001"
+        assert res["sell_key_source"] == MU_SOURCE and res["sell_key_fallback"]
+
+    def test_execute_s2_falls_back_when_s2_is_older_than_m6(self, db, make_metric, monkeypatch):
+        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+        db.add_all(_universe(make_metric, 5))
+        db.commit()
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})   # 2026-07-29
+        _seed_s2(db, {f"E{i:04d}": -0.01 * i for i in range(1, 6)}, snapshot_date="2026-07-22")
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
+        assert res["results"][0]["sec_code"] == "1001"
+        assert res["sell_key_source"] == MU_SOURCE and "2026-07-22" in res["sell_key_fallback"]

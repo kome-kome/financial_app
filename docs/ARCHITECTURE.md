@@ -449,6 +449,15 @@ erDiagram
         datetime created_at      "計算日時"
     }
 
+    sell_quantile_scores {
+        string  edinet_code   PK "企業（最新スナップショットのみ・全置換。全社同値の回は空）"
+        float   q20              "売り専用の候補 S2 の予測＝52週先リターンの下側20%点（M-6 の実行が同じパネルで解く・#1202）"
+        string  snapshot_date    "M-6 と同じ代表値（sell_ranking が M-6 と食い違えば M-6 へ倒す）"
+        string  snapshot_date_min "最古の銘柄のスナップ日"
+        int     n_stale          "代表値より古いスナップ日を持つ銘柄数"
+        datetime created_at      "計算日時"
+    }
+
     macro_beta_meta {
         int      id               PK "自動採番ID"
         string   run_id           UK "推論ランID（UNIQUE）"
@@ -1264,7 +1273,7 @@ classDiagram
         +heavy = True
         +ui_order = 390
         +params_schema() fin_features/use_macro/macro_features/use_momentum/price_features 等（α・l1_ratio は fold 内で選ぶ）
-        +execute() ElasticNet（build_interactions=False）で μ̂ 推定 → macro_enet_scores へ保存（売り推奨の既定 mu_source）
+        +execute() ElasticNet（build_interactions=False）で μ̂ 推定 → macro_enet_scores へ保存（売り推奨の既定 mu_source）。同じパネルで S2（下側20%点）も解き sell_quantile_scores へ（#1202）
     }
 
     class MacroGbdtRankPlugin {
@@ -1549,7 +1558,7 @@ graph TB
 | `plugins/macro_dlm.py` | バックエンド | **M-3** ベイズ状態空間モデル（時変マクロβ DLM・週次・財務不使用）。producer＝`macro_dlm_scores`（`r1_prime` なし＝R3 ゲート無効）・`heavy=True`・`ui_order=360`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_dlmpy) | numpy, scipy, plugins/utils.py |
 | `plugins/macro_ensemble.py` | バックエンド | **M-4** 兄弟μ̂スタッキング（ADR-0015・基底 M-1+M-2+M-6 を `BASE_MODELS` 定数駆動・二段ウォークフォワード NNLS）。**退役＝`hidden=True`**（#570/ADR-0044・統合が M-6 単体を上回らない。サイドバーと `mu_source` から除外・実行経路と比較行は残す）。producer＝`macro_ensemble_scores`・`heavy=True`・`ui_order=370`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_ensemblepy) | plugins/macro_snapshots.py, plugins/macro_gbdt.py, plugins/macro_risk_return.py, scipy, xgboost |
 | `plugins/macro_gbdt_rank.py` | バックエンド | **M-5** マクロ×財務 ランク学習（ADR-0017・M-2 を継承し4フックのみ override）。**退役＝`hidden=True`**（#570/ADR-0044・実測で M-2 に有意劣後＝数値は ADR-0017 の実測節。サイドバーから除外・実行経路と比較行は残す）。**producer なし＝OOF 比較専用**・`heavy=True`・`ui_order=380`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdt_rankpy) | plugins/macro_gbdt.py, plugins/utils.py, xgboost, shap |
-| `plugins/macro_enet.py` | バックエンド | **M-6** マクロ×財務 正則化線形（ElasticNet・ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格）。producer＝`macro_enet_scores`・**売り推奨の既定 `mu_source`**・`heavy=True`・`ui_order=390`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_enetpy) | plugins/model_candidates.py, plugins/macro_snapshots.py, plugins/utils.py, scikit-learn |
+| `plugins/macro_enet.py` | バックエンド | **M-6** マクロ×財務 正則化線形（ElasticNet・ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格）。producer＝`macro_enet_scores`・**売り推奨の既定 `mu_source`**・`heavy=True`・`ui_order=390`。同じパネルで売り専用の候補 S2（下側20%点の分位回帰）も解いて `sell_quantile_scores` へ保存する（#1202・既定の売りの並びでは読まない・切り替えは #1201）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_enetpy) | plugins/model_candidates.py, plugins/macro_snapshots.py, plugins/utils.py, scikit-learn |
 | `plugins/model_candidates.py` | バックエンド | **兄弟モデル候補メニュー（探索枠・ADR-0021）**。`walk_forward_cv_monthly(fit_predict=…)` へ注入する候補ファクトリ集約。**プラグインではない**（レジストリ非登録・API 非公開）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmodel_candidatespy) | plugins/utils.py, recommend_factor_premia.py, scikit-learn, (lightgbm/catboost 任意) |
 | `plugins/utils.py` | バックエンド | `coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv_monthly()`・`get_macro_features()` 等の共通ユーティリティ。ベクトル化後も旧実装とビット単位で同一値。`get_macro_features` は `macro_data` を3列指定で引く（`_preload_macro_impl` と同一・#482）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsutilspy) | — |
 | `plugins/progress.py` | バックエンド | heavy な分析の実行進捗を画面へ流す唯一の経路（#545・#593 で `SPECIAL_ANALYSES` の heavy 特例へも拡張）。**`PROGRESS_COVERAGE` は `AnalysisPlugin` だけでなく heavy 特例エントリ（`model_comparison`）も対象**で、`tests/test_plugin_progress.py` が両方を実体と照合する（`own` の名乗りは `progress.emit(` の実在まで確かめる）。`emit()` / `progress_sink()`（ContextVar・`asyncio.to_thread` を跨いで伝播）＋ `PROGRESS_COVERAGE`（heavy ごとの `common`/`own`/`exempt: 理由`）。**sink 未設定なら完全な no-op** ＝月次バッチ・`/api/recommend` 経路は素通り。進捗は必ず「ステップ名」を持ち、数えられる場面では「処理済み/全体」も持つ（**heartbeat は生存を示すが進行を示さない**・#504）。表と実体の照合は `tests/test_plugin_progress.py`。**画面からの取消（#849）も同じ経路**で、`emit` が送った後に取消を見て止める協調型。保存は `persisting()` で包み、中では取消を受け付けない（sector_ols は業種ごとに commit するので途中で止めると新旧が混ざる）。`writes` を持つ heavy が包んでいることは `tests/test_analysis_cancel.py` が照合する（詳細は PLUGIN_REFERENCE.md） | — |
