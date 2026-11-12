@@ -146,7 +146,7 @@ tr:hover td{background:var(--border-subtle)}
   <a href="/morning" class="gnav-link">朝の推奨</a>
   <a href="/analysis" class="gnav-link">分析</a>
   <a href="/company" class="gnav-link">企業詳細</a>
-  <a href="/collection" class="gnav-link active">収集</a>
+  <a href="/collection" class="gnav-link active" aria-current="page">収集</a>
   <span class="gnav-spacer"></span>
   <a href="/guide" class="gnav-link gnav-ref" style="color:var(--status-good-text)">やさしい解説</a>
   <a href="/models" class="gnav-link gnav-ref" style="color:var(--accent-text)">モデル解説</a>
@@ -226,7 +226,7 @@ tr:hover td{background:var(--border-subtle)}
       <span style="color:var(--text-muted)">EDINETに保管されている過去5年分が取得可能な最大範囲です。最新の有価証券報告書（直近の決算）も含まれます。</span>
     </div>
     <div class="form-group" style="max-width:240px;margin-bottom:12px">
-      <label>遡及年数</label>
+      <label for="smart-years-back">遡及年数</label>
       <select id="smart-years-back">
         <option value="1">1年</option>
         <option value="3">3年</option>
@@ -284,7 +284,7 @@ tr:hover td{background:var(--border-subtle)}
         全上場企業（約3,900社）の有価証券報告書 XBRL を取り込みます。初回または長期未収集時に使用してください。
       </div>
       <div class="form-group">
-        <label>遡及年数</label>
+        <label for="years-back">遡及年数</label>
         <select id="years-back">
           <option value="1">1年</option>
           <option value="3">3年</option>
@@ -325,7 +325,7 @@ tr:hover td{background:var(--border-subtle)}
     </summary>
     <div style="padding-top:12px">
       <div class="form-group" style="margin-bottom:0">
-        <label>EDINETコードを指定して単体企業の財務データを再取得します</label>
+        <label for="refresh-code">EDINETコードを指定して単体企業の財務データを再取得します</label>
         <div class="flex">
           <input type="text" id="refresh-code" placeholder="例: E02167" style="flex:1">
           <button class="btn btn-secondary btn-sm" data-writes data-click="refreshSingle">再取得</button>
@@ -411,7 +411,7 @@ tr:hover td{background:var(--border-subtle)}
           <span style="color:var(--text-muted)">※ 要設定: <code>JQUANTS_API_KEY</code> を .env に設定（J-Quants ダッシュボード → API Keys）</span>
         </div>
         <div class="form-group">
-          <label>取得日数</label>
+          <label for="jq-days">取得日数</label>
           <select id="jq-days">
             <option value="7">7日（1週間）</option>
             <option value="14" selected>14日（2週間）</option>
@@ -520,7 +520,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
 
     <div class="form-group" style="max-width:280px">
-      <label>取得年数（過去〜現在）</label>
+      <label for="macro-years">取得年数（過去〜現在）</label>
       <select id="macro-years">
         <option value="1">1年</option>
         <option value="3">3年</option>
@@ -584,12 +584,12 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="display:flex;gap:12px;margin-bottom:14px;align-items:flex-end">
       <div class="form-group" style="margin:0;max-width:140px">
-        <label style="font-size:11px">年度フィルタ（任意）</label>
+        <label for="reparse-year" style="font-size:11px">年度フィルタ（任意）</label>
         <input type="number" id="reparse-year" placeholder="例: 2024" min="2015" max="2030"
                style="width:100%;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px">
       </div>
       <div class="form-group" style="margin:0;flex:1;max-width:220px">
-        <label style="font-size:11px">EDINET コード（任意）</label>
+        <label for="reparse-edinet" style="font-size:11px">EDINET コード（任意）</label>
         <input type="text" id="reparse-edinet" placeholder="例: E00000（空欄=全社）"
                style="width:100%;background:var(--bg-hover);border:1px solid var(--border-muted);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px">
       </div>
@@ -661,27 +661,27 @@ tr:hover td{background:var(--border-subtle)}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:12px">
       <div>
         <div class="text-sm" style="color:var(--accent-text);margin-bottom:8px">PL指標</div>
-        <div class="form-group"><label>売上高成長率% ≥</label><input type="number" id="sc-rev-growth" placeholder="例: 5"></div>
-        <div class="form-group"><label>営業利益率% ≥</label><input type="number" id="sc-op-margin" placeholder="例: 10"></div>
-        <div class="form-group"><label>純利益率% ≥</label><input type="number" id="sc-net-margin" placeholder="例: 5"></div>
+        <div class="form-group"><label for="sc-rev-growth">売上高成長率% ≥</label><input type="number" id="sc-rev-growth" placeholder="例: 5"></div>
+        <div class="form-group"><label for="sc-op-margin">営業利益率% ≥</label><input type="number" id="sc-op-margin" placeholder="例: 10"></div>
+        <div class="form-group"><label for="sc-net-margin">純利益率% ≥</label><input type="number" id="sc-net-margin" placeholder="例: 5"></div>
       </div>
       <div>
         <div class="text-sm" style="color:var(--status-good);margin-bottom:8px">BS指標</div>
-        <div class="form-group"><label>ROE% ≥</label><input type="number" id="sc-roe" placeholder="例: 8"></div>
-        <div class="form-group"><label>自己資本比率% ≥</label><input type="number" id="sc-equity-ratio" placeholder="例: 40"></div>
-        <div class="form-group"><label>D/Eレシオ ≤</label><input type="number" id="sc-de" placeholder="例: 1.5"></div>
+        <div class="form-group"><label for="sc-roe">ROE% ≥</label><input type="number" id="sc-roe" placeholder="例: 8"></div>
+        <div class="form-group"><label for="sc-equity-ratio">自己資本比率% ≥</label><input type="number" id="sc-equity-ratio" placeholder="例: 40"></div>
+        <div class="form-group"><label for="sc-de">D/Eレシオ ≤</label><input type="number" id="sc-de" placeholder="例: 1.5"></div>
       </div>
       <div>
         <div class="text-sm" style="color:var(--status-warn);margin-bottom:8px">バリュエーション・CF</div>
-        <div class="form-group"><label>PER ≤</label><input type="number" id="sc-per" placeholder="例: 20"></div>
-        <div class="form-group"><label>PBR ≤</label><input type="number" id="sc-pbr" placeholder="例: 2"></div>
-        <div class="form-group"><label>配当利回% ≥</label><input type="number" id="sc-div" placeholder="例: 2"></div>
-        <div class="form-group"><label>CF/売上比% ≥</label><input type="number" id="sc-cf" placeholder="例: 8"></div>
+        <div class="form-group"><label for="sc-per">PER ≤</label><input type="number" id="sc-per" placeholder="例: 20"></div>
+        <div class="form-group"><label for="sc-pbr">PBR ≤</label><input type="number" id="sc-pbr" placeholder="例: 2"></div>
+        <div class="form-group"><label for="sc-div">配当利回% ≥</label><input type="number" id="sc-div" placeholder="例: 2"></div>
+        <div class="form-group"><label for="sc-cf">CF/売上比% ≥</label><input type="number" id="sc-cf" placeholder="例: 8"></div>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px">
-      <div class="form-group"><label>業種</label><select id="sc-industry"><option value="">全業種</option></select></div>
-      <div class="form-group"><label>市場</label><select id="sc-market"><option value="">全市場</option><option>プライム</option><option>スタンダード</option><option>グロース</option></select></div>
+      <div class="form-group"><label for="sc-industry">業種</label><select id="sc-industry"><option value="">全業種</option></select></div>
+      <div class="form-group"><label for="sc-market">市場</label><select id="sc-market"><option value="">全市場</option><option>プライム</option><option>スタンダード</option><option>グロース</option></select></div>
     </div>
     <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary)">
       <input type="checkbox" id="sc-include-delisted" style="width:auto;accent-color:var(--accent)">

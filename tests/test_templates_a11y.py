@@ -17,6 +17,8 @@ import glob
 import os
 import re
 
+import pytest
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = sorted(glob.glob(os.path.join(BASE_DIR, "templates", "*.html")))
 STATIC_JS = sorted(glob.glob(os.path.join(BASE_DIR, "static", "js", "*.js")))
@@ -253,10 +255,19 @@ def test_analysis_js_has_no_hex_color_values():
     assert not hits, "\n".join(hits)
 
 
-def test_analysis_labels_name_their_field():
+# ラベルを照合する画面 → `<label>` を持つファイル（先頭がテンプレート）。収集画面は #1186 で足した
+# （collection.js は `<label>` を組み立てない）
+_LABEL_SCREENS = {
+    "analysis": (_ANALYSIS_HTML, _ANALYSIS_JS),
+    "collection": (os.path.join(BASE_DIR, "templates", "collection.html"),),
+}
+
+
+@pytest.mark.parametrize("screen", sorted(_LABEL_SCREENS))
+def test_labels_name_their_field(screen):
     """`<label>` は for で入力欄と結ぶか、入力欄を中に含む（無いと読み上げで「textbox」としか読まれない）。"""
     unbound = []
-    for path in (_ANALYSIS_HTML, _ANALYSIS_JS):
+    for path in _LABEL_SCREENS[screen]:
         text = _read(path)
         labels = _LABEL_RE.findall(text)
         assert labels, f"{_name(path)}: <label> を1つも拾えない（検出の正規表現が実体とずれた）"
@@ -267,9 +278,10 @@ def test_analysis_labels_name_their_field():
     assert not unbound, "\n".join(unbound)
 
 
-def test_analysis_label_for_targets_exist():
+@pytest.mark.parametrize("screen", sorted(_LABEL_SCREENS))
+def test_label_for_targets_exist(screen):
     """静的な `<label for>` の行き先の id が同じテンプレートにある（id の書き換えで黙って外れる）。"""
-    text = _read(_ANALYSIS_HTML)
+    text = _read(_LABEL_SCREENS[screen][0])
     targets = re.findall(r'<label\b[^>]*\bfor="([^"]+)"', text)
     assert targets, "テンプレートの <label for> を拾えない"
     missing = [t for t in targets if f'id="{t}"' not in text]

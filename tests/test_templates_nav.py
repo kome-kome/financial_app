@@ -68,7 +68,8 @@ def _nav_blocks(text):
 
 
 def _normalize(nav):
-    """`.active` を剥がして正規化する（ページ間の唯一許される差分が active のため）。"""
+    """現在地の印（`.active` と `aria-current="page"`）を剥がして正規化する（ページ間の唯一許される差分のため）。"""
+    nav = re.sub(r'\s+aria-current="page"', "", nav)
     return re.sub(r"\s+active(?=[\s\"])", "", nav)
 
 
@@ -121,6 +122,9 @@ def test_active_marks_only_self():
         active = re.findall(r'<a href="([^"]+)"[^>]*\bclass="[^"]*\bactive\b', nav)
         expected = [] if self_href is None else [self_href]
         assert active == expected, f"{name}: active が {active}（期待 {expected}）"
+        # 現在地は色と下線だけでは読み上げに伝わらない（#1186）。`.active` と同じリンクにだけ付ける
+        current = re.findall(r'<a href="([^"]+)"[^>]*\baria-current="page"', nav)
+        assert current == expected, f"{name}: aria-current が {current}（期待 {expected}・.active と同じリンク）"
 
 
 def test_gnav_css_present():
