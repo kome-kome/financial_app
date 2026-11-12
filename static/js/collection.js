@@ -232,7 +232,15 @@ async function startSmartCollection(force=false){
     _startSmartSSE();
   }catch(e){
     if(!force && /既に実行中/.test(e.message)){
-      if(confirm('実行中の収集ジョブがあります。\n強制的に上書きして再開しますか？\n（裏で動いているジョブのデータは不完全になる可能性があります）')){
+      // 画面内の確認（#1199・common.js の confirmDialog）。既定のフォーカスは「やめる」
+      const ok = await confirmDialog({
+        title: '実行中の収集ジョブがあります',
+        lines: ['強制的に上書きして再開します。',
+                {text: '裏で動いているジョブのデータは不完全になる可能性があります。', strong: true}],
+        question: '上書きして再開しますか？',
+        okLabel: '上書きして再開する',
+      });
+      if(ok){
         return startSmartCollection(true);
       }
     }
@@ -242,7 +250,13 @@ async function startSmartCollection(force=false){
 
 // ── スタックジョブの強制リセット ───────────────────────────────────
 async function resetStuckJobs(){
-  if(!confirm('実行中状態（running）の収集ジョブを強制的にerror扱いに戻します。\n本当に裏で動いているジョブがある場合、データが不完全になる可能性があります。\n続行しますか？')) return;
+  const ok = await confirmDialog({
+    title: '実行中状態（running）の収集ジョブを強制的に error 扱いに戻します',
+    lines: [{text: '本当に裏で動いているジョブがある場合、データが不完全になる可能性があります。', strong: true}],
+    question: '続行しますか？',
+    okLabel: 'error に戻す',
+  });
+  if(!ok) return;
   try{
     const d = await apiFetch('/api/collect/reset-stuck',{method:'POST'});
     log(d.message,'success');
@@ -311,7 +325,13 @@ async function startIncremental(){
 
 async function startFullCollection(){
   const years = parseInt(document.getElementById('years-back').value);
-  if(!confirm(`全上場企業（約3,900社）の収集を開始します。\n遡及年数: ${years}年\n完了まで数時間かかります。よろしいですか？`)) return;
+  const ok = await confirmDialog({
+    title: '全上場企業（約3,900社）の収集を開始します',
+    lines: [`遡及年数: ${years}年`, {text: '完了まで数時間かかります。', strong: true}],
+    question: 'よろしいですか？',
+    okLabel: '収集を開始する',
+  });
+  if(!ok) return;
   try{
     await apiFetch('/api/collect/start',{
       method:'POST',

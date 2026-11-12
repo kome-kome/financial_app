@@ -184,10 +184,10 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 ### 通知トースト（`.notif` / `.notif-error`）
 - 画面の JS が `showNotif` を呼ぶなら、その画面にトーストの CSS を必ず置く。持ち上げた面・角 8px・浮いた層の影、失敗は赤の面。
 
-### 実行前の確認（`.confirm-dialog`・分析画面）
-- 重い分析と、株価が古いときの推奨の前に出す画面内の確認。ブラウザ標準の `confirm()` は使わない（既定のボタンが「OK」で Enter 一打で数分の計算が始まり、強調も持てず、テーマに従わない・#1185）。
+### 実行前の確認（`.confirm-dialog`・分析画面と収集画面）
+- 重い分析・株価が古いときの推奨（分析画面・#1185）と、全件収集・実行中のジョブの上書き・強制リセット（収集画面・#1199）の前に出す画面内の確認。ブラウザ標準の `confirm()` は使わない（既定のボタンが「OK」で Enter 一打で数分〜数時間の処理が始まり、強調も持てず、テーマに従わない）。
 - `<dialog>` を `showModal()` で開く（背後は操作できず、Esc で閉じる）。中は `<form method="dialog">` で、押したボタンの `value` が結果になる。**既定のフォーカスは「やめる」**（`autofocus`）。閉じたら押したボタンへフォーカスを戻す。
-- 持ち上げた面・1px の `--border`・角 10px・浮いた層の影、幅は `min(480px, 100vw - 32px)`。読み手が見落とすと損をする行（保存の有無など）だけ太字にする。部品は `analysis.js` の `_confirmDialog`、配線は `tests/test_screen_run_persist.py::TestInPageConfirm` が照合する。
+- 持ち上げた面・1px の `--border`・角 10px・浮いた層の影、幅は `min(480px, 100vw - 32px)`。読み手が見落とすと損をする行（保存の有無・データが不完全になる・数時間かかる）だけ太字にする。ボタンの文言は「OK」ではなく押すと起きること（「収集を開始する」等）。部品（JS）は `common.js` の `confirmDialog` の1か所で、`<dialog>` の HTML と CSS は使う画面のテンプレートが持つ（他の部品と同じく CSS は写す）。配線は `tests/test_screen_run_persist.py::TestInPageConfirm` が照合する。
 
 ## Do's and Don'ts
 

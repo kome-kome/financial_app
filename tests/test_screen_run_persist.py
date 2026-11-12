@@ -163,64 +163,97 @@ class TestScreenWiring:
 
 
 class TestInPageConfirm:
-    """実行前の確認は画面内の <dialog>（#1185）。ブラウザ標準の confirm() は既定のボタンが「OK」で、
-    Enter 一打で数分の計算が始まる。Enter・Esc・フォーカスの閉じ込めは実画面で確かめたので、ここでは
-    その前提になる配線（既定のフォーカスが「やめる」・form method="dialog"・呼び出し元）を文字列で縛る。"""
+    """実行前の確認は画面内の <dialog>（#1185・#1199）。ブラウザ標準の confirm() は既定のボタンが「OK」で、
+    Enter 一打で数分の計算（分析画面）や数時間の全件収集・実行中のジョブの上書き（収集画面）が始まる。
+    部品（confirmDialog）は common.js の1か所で、<dialog> と CSS は使う画面のテンプレートが持つ（DESIGN.md）。
+    Enter・Esc・フォーカスの閉じ込めは実画面で確かめたので、ここではその前提になる配線を文字列で縛る。"""
 
-    @pytest.fixture(scope="class")
-    def js(self):
-        with open(os.path.join(ROOT, "static", "js", "analysis.js"), encoding="utf-8") as f:
+    PAGES = ("analysis", "collection")
+
+    @staticmethod
+    def _read(*parts):
+        with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
             return f.read()
 
-    @pytest.fixture(scope="class")
-    def html(self):
-        with open(os.path.join(ROOT, "templates", "analysis.html"), encoding="utf-8") as f:
-            return f.read()
-
-    @pytest.fixture(scope="class")
-    def dialog(self, html):
-        m = re.search(r'<dialog id="confirm-dialog".*?</dialog>', html, re.S)
-        assert m, "analysis.html に確認の <dialog> が無い"
-        return m.group(0)
-
-    def test_native_confirm_is_only_the_fallback(self, js):
-        # 残してよいのは <dialog> が使えない環境の戻り先（_confirmDialog の中）の1か所だけ。
+    @staticmethod
+    def _calls(js):
         # 行コメントの中の「confirm()」は呼び出しではないので外して数える
         code = re.sub(r"//[^\n]*", "", js)
-        calls = [m.start() for m in re.finditer(r"(?<![\w.])confirm\(", code)]
-        assert len(calls) == 1, f"confirm( が {len(calls)} か所ある（画面内の確認を使う）"
-        body = js[js.index("function _confirmDialog("):js.index("async function _confirmHeavyRun(")]
+        return len(re.findall(r"(?<![\w.])confirm\(", code))
+
+    @pytest.fixture(scope="class")
+    def common(self):
+        return self._read("static", "js", "common.js")
+
+    @pytest.fixture(scope="class")
+    def body(self, common):
+        start = common.index("function confirmDialog(")
+        end = common.find("\n}\n", start)
+        assert end > 0, "confirmDialog の終わりが見つからない"
+        return common[start:end + 2]
+
+    def _dialog(self, page):
+        html = self._read("templates", f"{page}.html")
+        m = re.search(r'<dialog id="confirm-dialog".*?</dialog>', html, re.S)
+        assert m, f"{page}.html に確認の <dialog> が無い"
+        return html, m.group(0)
+
+    def test_native_confirm_is_only_the_fallback(self, common, body):
+        # 残してよいのは <dialog> が使えない環境の戻り先（confirmDialog の中）の1か所だけ
+        assert self._calls(common) == 1, "common.js に confirm( が戻り先以外にもある"
         assert "confirm(" in body and "typeof dlg.showModal !== 'function'" in body
 
-    def test_cancel_has_the_default_focus(self, dialog):
+    @pytest.mark.parametrize("page", PAGES)
+    def test_pages_do_not_call_native_confirm(self, page):
+        js = self._read("static", "js", f"{page}.js")
+        assert self._calls(js) == 0, f"{page}.js に confirm( がある（common.js の confirmDialog を使う）"
+        assert "function _confirmDialog(" not in js and "function confirmDialog(" not in js   # 部品を写さない
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_cancel_has_the_default_focus(self, page):
         # Enter 一打で走らないための要。autofocus が「実行する」側へ移ったら壊れる
+        _html, dialog = self._dialog(page)
+        assert '<form method="dialog">' in dialog
         buttons = re.findall(r"<button[^>]*>[^<]*</button>", dialog)
         cancel = [b for b in buttons if 'value="cancel"' in b]
         ok = [b for b in buttons if 'value="ok"' in b]
         assert len(cancel) == 1 and len(ok) == 1
         assert "autofocus" in cancel[0] and "autofocus" not in ok[0]
+        assert 'id="confirm-dialog-ok"' in ok[0]
 
-    def test_result_comes_from_the_button_value(self, js, dialog):
-        assert '<form method="dialog">' in dialog
-        # 結果は押した瞬間（submit の submitter・Esc の cancel）で確定する。close イベントは遅れて届き、
-        # 次の確認を開いた後に前回の分が届くと「実行する」が「やめる」にすり替わった（実画面で再現）
-        assert "e.submitter && e.submitter.value === 'ok'" in js
-        assert "dlg.addEventListener('cancel', onCancel)" in js
-        assert "if (!dlg.open) finish(dlg.returnValue === 'ok')" in js
-        assert "dlg.returnValue = '';" in js          # Esc で閉じたときに前回の 'ok' を残さない
-        assert "dlg.showModal()" in js                # show() だと背後が操作でき、Esc でも閉じない
-
-    def test_callers_use_the_dialog(self, js):
-        heavy = js[js.index("async function _confirmHeavyRun("):js.index("async function runDynamicPlugin(")]
-        assert "return _confirmDialog({" in heavy
-        assert "strong: true" in heavy                # 保存の行を強調する（ADR-0072）
-        rec = js[js.index("async function runRecommend("):]
-        assert "await _confirmDialog({" in rec[:rec.index("btn-recommend")]
-
-    def test_text_is_not_parsed_as_html(self, js):
-        body = js[js.index("function _confirmDialog("):js.index("async function _confirmHeavyRun(")]
-        assert "innerHTML" not in body and "insertAdjacentHTML" not in body
-
-    def test_dialog_has_its_css(self, html):
+    @pytest.mark.parametrize("page", PAGES)
+    def test_page_has_the_css_and_loads_common_first(self, page):
+        html, _dialog = self._dialog(page)
         assert ".confirm-dialog{margin:auto;" in html   # 全体の *{margin:0} が中央寄せを消す
         assert ".confirm-dialog::backdrop{" in html
+        assert html.index("/static/js/common.js") < html.index(f"/static/js/{page}.js")
+
+    def test_result_comes_from_the_button_value(self, body):
+        # 結果は押した瞬間（submit の submitter・Esc の cancel）で確定する。close イベントは遅れて届き、
+        # 次の確認を開いた後に前回の分が届くと「実行する」が「やめる」にすり替わった（実画面で再現・#1185）
+        assert "e.submitter && e.submitter.value === 'ok'" in body
+        assert "dlg.addEventListener('cancel', onCancel)" in body
+        assert "if (!dlg.open) finish(dlg.returnValue === 'ok')" in body
+        assert "dlg.returnValue = '';" in body          # Esc で閉じたときに前回の 'ok' を残さない
+        assert "dlg.showModal()" in body                # show() だと背後が操作でき、Esc でも閉じない
+
+    def test_text_is_not_parsed_as_html(self, body):
+        assert "innerHTML" not in body and "insertAdjacentHTML" not in body
+
+    def test_analysis_callers_use_the_dialog(self):
+        js = self._read("static", "js", "analysis.js")
+        heavy = js[js.index("async function _confirmHeavyRun("):js.index("async function runDynamicPlugin(")]
+        assert "return confirmDialog({" in heavy
+        assert "strong: true" in heavy                # 保存の行を強調する（ADR-0072）
+        rec = js[js.index("async function runRecommend("):]
+        assert "await confirmDialog({" in rec[:rec.index("btn-recommend")]
+
+    @pytest.mark.parametrize("fn", ["startSmartCollection", "resetStuckJobs", "startFullCollection"])
+    def test_collection_callers_use_the_dialog(self, fn):
+        js = self._read("static", "js", "collection.js")
+        start = js.index(f"async function {fn}(")
+        end = js.find("\nasync function ", start + 1)
+        part = js[start:end if end > 0 else len(js)]
+        assert "await confirmDialog({" in part, f"{fn} が画面内の確認を使っていない"
+        # 取り返しのつかない行（データが不完全になる・数時間かかる）を強調する
+        assert "strong: true" in part

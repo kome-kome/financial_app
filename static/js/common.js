@@ -284,3 +284,63 @@ function placeTip(term) {
   const term = e.target.closest(TIP_SELECTOR);
   if (term) placeTip(term);
 }));
+
+// 実行前の確認（画面内の <dialog>・#1185。分析画面と収集画面で共有・#1199）。ブラウザ標準の confirm() は既定の
+// ボタンが「OK」で、Enter 一打で数分〜数時間の処理が始まり、文面に強調も持てない。使う画面は
+// <dialog id="confirm-dialog"> とその CSS を持つ（DESIGN.md「実行前の確認」）。showModal() で開くと背後は操作できず（フォーカスは
+// 窓の中に閉じる）、Esc で閉じる。既定のフォーカスは「やめる」（HTML の autofocus）。
+// lines の要素は文字列か {text, strong}。文面は textContent で入れる（分析名を HTML として読まない）。
+// <dialog> が使えない環境では confirm() へ戻す（確認を飛ばして実行する側へ倒さない）。
+function confirmDialog({title, lines = [], question = '', okLabel = '実行する'}) {
+  const items = lines.map(l => (typeof l === 'string' ? {text: l, strong: false} : l));
+  const dlg = document.getElementById('confirm-dialog');
+  if (!dlg || typeof dlg.showModal !== 'function') {
+    return Promise.resolve(confirm(
+      `${title}\n\n${items.map(l => `・${l.text}`).join('\n')}${question ? `\n\n${question}` : ''}`));
+  }
+  if (dlg.open) return Promise.resolve(false);   // 開いている確認に重ねない
+  document.getElementById('confirm-dialog-title').textContent = title;
+  const ul = document.getElementById('confirm-dialog-lines');
+  ul.replaceChildren(...items.map(l => {
+    const li = document.createElement('li');
+    if (l.strong) {
+      const s = document.createElement('strong');
+      s.textContent = l.text;
+      li.appendChild(s);
+    } else {
+      li.textContent = l.text;
+    }
+    return li;
+  }));
+  const q = document.getElementById('confirm-dialog-question');
+  q.textContent = question;
+  q.classList.toggle('hidden', !question);
+  document.getElementById('confirm-dialog-ok').textContent = okLabel;
+  // Esc で閉じたときは returnValue が変わらない＝前回の 'ok' が残るので、開くたびに空へ戻す
+  dlg.returnValue = '';
+  const opener = document.activeElement;
+  const form = dlg.querySelector('form');
+  return new Promise(resolve => {
+    // 結果は submit（押したボタン）と cancel（Esc）で確定する。close イベントは閉じた後に遅れて届き、
+    // 次の確認を開いた後に前回の分が届くことがある（そのとき returnValue は空に戻っている＝「実行する」が
+    // 「やめる」にすり替わる）ので結果の主には使わない。close は Esc が cancel を出さずに閉じた場合
+    // （連打の抑止）の受け皿で、開き直した後に届いた前回の close には反応しない。
+    const finish = ok => {
+      form.removeEventListener('submit', onSubmit);
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('close', onClose);
+      // 閉じ終わってから押したボタンへフォーカスを戻す（submit・cancel は閉じる直前に届く）
+      setTimeout(() => {
+        if (!dlg.open && opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+      }, 0);
+      resolve(ok);
+    };
+    const onSubmit = e => finish(!!(e.submitter && e.submitter.value === 'ok'));
+    const onCancel = () => finish(false);
+    const onClose = () => { if (!dlg.open) finish(dlg.returnValue === 'ok'); };
+    form.addEventListener('submit', onSubmit);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
