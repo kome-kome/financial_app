@@ -41,9 +41,16 @@ M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニュ
   - **規模の中立化（#957・#995）**: 予測から断面ごとに log(時価総額) の線形の効果を除く後処理
     （`_SIZE_NEUTRAL`）。CV の OOF と現断面の μ̂ の両方に掛け、社ごとの補正量を内訳の行に出す。
     採否の根拠は `_SIZE_NEUTRAL` のコメントと ADR-0050 の 2026-10-18 の追記。
+  - **売り専用の候補 S2 の相乗り（#1202）**: 最終学習と同じ学習行・現断面・規模の中立化で、当てる答えを
+    52 週先リターンの下側 20% 点に替えた分位回帰（`model_candidates.make_quantile_enet_fit_predict`・#1158 で
+    採用）も 1 回解き、`sell_quantile_scores` へ全置換で保存する。M-6 と同じパネルであることを構造で保つため
+    に別プラグインにしない。S2 の失敗は M-6 を止めない（応答と夜間の診断値の `sell_quantile.error` に残す）。
+    既定の売りの並びは読まない（`sell_ranking.SELL_KEY_SOURCE`・切り替えは #1201）。
 """
+import logging
 import math
 import statistics
+import time
 from typing import Any
 
 import numpy as np
@@ -56,6 +63,7 @@ from .model_candidates import (
     fit_elasticnet,
     make_diag,
     make_elasticnet_fit_predict,
+    make_quantile_enet_fit_predict,
     summarize_diag,
 )
 from .macro_snapshots import (
@@ -94,6 +102,8 @@ from .model_candidates import _EN_CV_SPLITS as _CV_SPLITS
 from .model_candidates import _EN_L1_RATIOS as _L1_RATIOS
 from .model_candidates import _EN_MAX_ITER as _MAX_ITER
 from .model_candidates import _EN_N_ALPHAS as _N_ALPHAS
+
+logger = logging.getLogger(__name__)
 
 # α・l1_ratio を選ぶ内側 CV の区切り方（#971・`model_candidates.elasticnet_inner_cv`）。**CV と最終モデルの
 # 両方へこの1つを渡す**（片方だけ切り替えると、検証した区切り方と本番の μ̂ の区切り方が割れる）。
@@ -157,8 +167,10 @@ class MacroEnetPlugin(AnalysisPlugin):
     )
     depends_on: list[str] = []
     heavy: bool = True
-    writes = ("macro_enet_scores",)    # 売りランキング既定の μ̂（mu_source）
+    # 売りランキング既定の μ̂（mu_source）と、売り専用の候補 S2 の予測（#1202・既定の並びでは読まない）
+    writes = ("macro_enet_scores", "sell_quantile_scores")
     writes_impact = ("売り候補ランキングの μ̂（期待リターン）と、μ̂ を使うおすすめ銘柄。朝の推奨の μ̂ の鮮度表示も動きます。"
+                     "売り専用の候補 S2 の予測（今の売りの並びでは使っていません）も置き換わります。"
                      "次の夜間バッチまでこの設定の値に置き換わります")
     category = "③ 将来リターンを予測"
     ui_order = 390                       # M-5=380 の後（M-1→M-2→M-3→M-4→M-5→M-6 順）
@@ -449,10 +461,11 @@ class MacroEnetPlugin(AnalysisPlugin):
         # 社ごとの補正量は内訳の行（`contrib_size`）に出し、「基準＋寄与＝μ̂」を保つ。
         size_adj = [0.0] * len(codes_ordered)
         size_info = None
+        cur_logcaps = None
         if _SIZE_NEUTRAL:
             cur_logcap = log_market_caps_current(current_snaps, fin_by_co, market_caps)
-            neutral, slope, n_without = neutralize_size(
-                mu_preds, [cur_logcap.get(c) for c in codes_ordered])
+            cur_logcaps = [cur_logcap.get(c) for c in codes_ordered]
+            neutral, slope, n_without = neutralize_size(mu_preds, cur_logcaps)
             size_adj = [a - m for a, m in zip(neutral, mu_preds)]
             mu_preds = neutral
             size_info = {
@@ -461,6 +474,10 @@ class MacroEnetPlugin(AnalysisPlugin):
                 "n_without_cap":         n_without,
                 "oof_rows_without_cap":  oof_without_cap,
             }
+        # ── 売り専用の候補 S2 の現断面予測（#1202）: 同じ学習行・現断面・規模の中立化で、違いは当てる答えだけ ──
+        # 保存の段階の前に解く（画面の取消が効く範囲・#849）。失敗しても M-6 は続ける。
+        progress.emit("売り専用の候補 S2 を学習")
+        s2 = self._fit_sell_quantile(all_samples, current_rows, train_groups, l1_ratios, cur_logcaps)
         feature_coefs = {name: round(float(c), 6)
                          for name, c in zip(model_feat_names, coefs)}
         # 内訳の列（#807）: マクロ列は同じ日付なら全社同一＝順位を動かさないので1行に合算する。
@@ -517,6 +534,7 @@ class MacroEnetPlugin(AnalysisPlugin):
             db, ((c, current_snaps[c][1].get("snap_date")) for c in codes_ordered))
         with progress.persisting():     # 画面の取消はここまで（#849）
             self._persist_producer(db, raw_items, _asof)
+            self._persist_sell_quantile(db, codes_ordered, s2, _asof)
 
         # ── 表示は今買える社だけ（#806）。永続化の後に掛ける＝保存する μ̂ は全社のまま ──
         shown, untradable = tradable_results(db, raw_items)
@@ -556,7 +574,84 @@ class MacroEnetPlugin(AnalysisPlugin):
             "model_type":        "elasticnet",
             "oof_backtest":      oof_bt,
             "r_macro_available": r_macro_available,
+            # 売り専用の候補 S2 の学習と保存の結果（#1202・夜間の診断値にも載る）。予測そのものは返さない
+            "sell_quantile":     s2["info"],
         }
+
+    @staticmethod
+    def _fit_sell_quantile(all_samples: list, current_rows: list, train_groups: list[int] | None,
+                           l1_ratios: tuple, logcaps: list | None) -> dict:
+        """売り専用の候補 S2 を全学習行で解き、現断面の予測を返す（#1202）。
+
+        計測（`scripts.sell_mu_source_bakeoff.sell_candidate_fit_predict`・#1158）と同じく、l1_ratio・内側 CV の
+        区切り方・分割数は M-6 の値を渡す（書き写さない）。現断面のラベルは 0.0 を入れて渡す（`_prep_matrices` は
+        テスト側のラベルを使わない）。`logcaps` があれば M-6 の μ̂ と同じ規模の中立化を掛ける。
+
+        戻り値 `{"preds": list|None, "info": dict}`。preds が None になるのは2通りで、info で分かる:
+          - `flat=True`: 予測が全社同じ値（#1158 の計測で 19 期のうち 2 期）。順位が付かないので保存しない
+            （表を空にする＝sell_ranking は M-6 へ倒れる）。判定は**中立化の前**の予測で行う——係数が全て 0 なら
+            全社が切片だけの同じ値になる。中立化は時価総額の無い社を補正しないので、後で見ると丸めの差で取り逃しうる
+          - `error`: 例外。M-6 を止めない代わりに握りつぶさず、警告のログと info に残す（表は前回のまま。
+            M-6 と日付が食い違えば sell_ranking が M-6 へ倒れる）
+        画面の取消（`AnalysisCancelled`）はそのまま送出する。
+        """
+        t0 = time.perf_counter()
+        diag = make_diag()
+        try:
+            fit_predict = make_quantile_enet_fit_predict(
+                l1_ratios=l1_ratios, cv_splits=_CV_SPLITS, inner_cv=_INNER_CV, diag=diag)
+            raw, _ = fit_predict(all_samples, [(row, 0.0) for row in current_rows], train_groups)
+        except progress.AnalysisCancelled:
+            raise
+        except Exception as e:   # noqa: BLE001 — S2 の失敗で M-6 の保存を止めない（警告と info に残す）
+            err = f"{type(e).__name__}: {e}"[:300]
+            logger.warning("売り専用の候補 S2 の学習に失敗（M-6 は続ける・#1202）: %s", err)
+            return {"preds": None, "info": {"error": err, "seconds": round(time.perf_counter() - t0, 1)}}
+        flat = (not raw) or min(raw) == max(raw)
+        preds = None
+        if not flat:
+            preds = neutralize_size(raw, logcaps)[0] if logcaps is not None else list(raw)
+
+        def _first(key: str, cast):
+            # 学習 1 回ぶんの診断値。積まれていなくても M-6 を落とさない（None にする）
+            vals = diag.get(key) or []
+            return cast(vals[0]) if vals else None
+
+        info = {
+            "flat":              flat,
+            "n_rows":            0 if flat else len(preds),
+            "alpha":             _first("alpha", lambda v: round(float(v), 6)),
+            "l1_ratio":          _first("l1_ratio", lambda v: round(float(v), 4)),
+            "n_nonzero":         _first("n_nonzero", int),
+            "alpha_at_path_min": _first("alpha_at_path_min", bool),
+            "alpha_at_path_max": _first("alpha_at_path_max", bool),
+            "n_iter_capped":     _first("n_iter_capped", int),
+            "seconds":           round(time.perf_counter() - t0, 1),
+        }
+        return {"preds": preds, "info": info}
+
+    @staticmethod
+    def _persist_sell_quantile(db: Any, codes: list, s2: dict, asof: dict) -> None:
+        """S2 の予測を sell_quantile_scores へ全置換する（#1202）。
+
+        学習が失敗した回（info に `error`）は書かない＝前回の表を残す。全社同値の回（`flat`）は空で全置換する。
+        保存の失敗は M-6 の `_persist_producer` と違って握りつぶさず、info の `persist_error` に残す
+        （夜間の診断値で読める）。探索中は replace 側が `tuning_dry_run()` で no-op。
+        """
+        from database import replace_sell_quantile_scores
+        info = s2["info"]
+        if "error" in info:
+            return
+        rows = ([] if s2["preds"] is None else
+                [{"edinet_code": c, "q20": round(float(p), 6)} for c, p in zip(codes, s2["preds"])])
+        try:
+            info["n_saved"] = replace_sell_quantile_scores(
+                db, rows, asof.get("snapshot_date"),
+                snapshot_date_min=asof.get("snapshot_date_min"), n_stale=asof.get("n_stale"))
+        except Exception as e:   # noqa: BLE001 — M-6 の表示を妨げない（info に残す）
+            db.rollback()
+            info["persist_error"] = f"{type(e).__name__}: {e}"[:300]
+            logger.warning("売り専用の候補 S2 を保存できなかった（#1202）: %s", info["persist_error"])
 
     @staticmethod
     def _persist_producer(db: Any, raw_items: list, asof: dict) -> None:

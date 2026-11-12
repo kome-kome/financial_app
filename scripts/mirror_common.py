@@ -182,6 +182,8 @@ SYNC_PLAN: dict[str, TableSync] = {
     "macro_enet_scores": TableSync(MODE_FULL, note="同上"),
     "macro_ensemble_scores": TableSync(MODE_FULL, note="同上"),
     "macro_gbdt_scores": TableSync(MODE_FULL, note="同上"),
+    "sell_quantile_scores": TableSync(
+        MODE_FULL, note="同上（M-6 の実行が replace_sell_quantile_scores で全置換・全社同値の回は空にする・#1202）"),
 
     "split_adjustment_factors": TableSync(
         MODE_FULL,

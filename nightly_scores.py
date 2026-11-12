@@ -352,6 +352,10 @@ def _extract_macro_enet(result: dict) -> dict:
         # 規模の中立化（#995）の傾きと、時価総額が無くて補正しなかった社・OOF の行数。
         # 時価総額の読み込みが壊れると全社が無補正になり、例外は出ない（n_without_cap が社数に張り付く）。
         "size_neutral":      dict(result.get("size_neutral") or {}),
+        # 売り専用の候補 S2 の相乗り（#1202）: 行数・全社同値・選ばれた α/l1_ratio・端への張り付き・反復の上限・
+        # 所要・失敗。キーは `MacroEnetPlugin._fit_sell_quantile` が作る少数の固定値で、予測そのものは入らない。
+        # 本番の切り替え（#1201）の前に、毎晩そろうか・何秒かかるかをここで読む
+        "sell_quantile":     dict(result.get("sell_quantile") or {}),
     }
 
 

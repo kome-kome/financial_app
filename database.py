@@ -1266,6 +1266,66 @@ def get_macro_enet_producer(db) -> dict:
         return {}
 
 
+# ── 5f-1b. 売り専用の候補 S2 の現断面予測（#1202）──────────────────────────────
+# S2 = 52 週先リターンの下側 20% 点の L1+L2 分位回帰（#1158 の事前登録で採用）。M-6（macro_enet）の
+# execute が**同じパネル**で S2 の最終学習も行い、ここへ全置換で書く。sell_ranking は既定では読まない
+# （`plugins/sell_ranking.SELL_KEY_SOURCE`・本番の切り替えは #1201）。予測が全社同じ値の月は書かない
+# （表が空）＝読み手は「空なら M-6」の 1 規則で済む。producer プラグインの表ではないので
+# `_PRODUCER_SCORE_MODELS` へは足さない（あれは「M-2/M-3/M-4/M-6 の μ̂」の一覧）。
+
+class SellQuantileScore(Base):
+    """S2 の per-stock 予測（52 週先リターンの下側 20% 点・最新実行スナップショット・#1202）。
+
+    列は MacroEnetScore と同じ形。値は M-6 の μ̂ と同じ尺度（52 週先対数リターン）で、規模の中立化の後。
+    平均ではなく下側の分位なので列名を `mu` と分ける（混ぜて並べない）。"""
+    __tablename__ = "sell_quantile_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    q20           = Column(Float, nullable=False)   # 52 週先リターンの下側 τ=0.2 点の予測
+    snapshot_date = Column(String(10))              # M-6 と同じ代表値（中央値）
+    snapshot_date_min = Column(String(10))
+    n_stale       = Column(Integer)
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_sell_quantile_scores(db, rows: list, snapshot_date: str | None = None,
+                                 snapshot_date_min: str | None = None,
+                                 n_stale: int | None = None) -> int:
+    """S2 の予測を全置換する（rows = [{"edinet_code": str, "q20": float}, ...]・#1202）。
+
+    `replace_macro_enet_scores` と同じ規則: 1 txn で全削除→一括 insert、q20 が None の行は保存しない、
+    `tuning_dry_run()` 内では no-op（0 を返す）。rows が空なら表を空にする（全社同値の月・#1202）。
+    """
+    if _tuning_dry_run.get():
+        return 0
+    db.query(SellQuantileScore).delete()
+    objs = [
+        SellQuantileScore(
+            edinet_code=r["edinet_code"], q20=float(r["q20"]),
+            snapshot_date=snapshot_date, snapshot_date_min=snapshot_date_min, n_stale=n_stale,
+        )
+        for r in rows
+        if r.get("edinet_code") and r.get("q20") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_sell_quantile_scores(db) -> dict:
+    """S2 の予測を `{"q20": {edinet_code: q20}, "snapshot_date": str|None}` で返す（#1202）。
+
+    未蓄積・空・未 migration なら q20 は {}（graceful degrade・読み手は M-6 へ倒す）。
+    snapshot_date は M-6 の as-of と比べて「同じ夜に作られたか」を見るために返す。"""
+    try:
+        q20 = {ec: v for ec, v in db.query(SellQuantileScore.edinet_code, SellQuantileScore.q20).all()}
+        snap = (db.query(SellQuantileScore.snapshot_date).limit(1).scalar() if q20 else None)
+    except Exception:
+        return {"q20": {}, "snapshot_date": None}
+    return {"q20": q20, "snapshot_date": snap}
+
+
 # ── 5f-2. producer スコアの as-of（Issue #417）──────────────────────────────
 # μ̂ は銘柄ごとに「その銘柄の最終週次バー」時点で計算される。代表値を max で潰すと
 # 最新の 1〜2 銘柄が全体の as-of を名乗るため、*_scores は代表値（中央値）・最古・
