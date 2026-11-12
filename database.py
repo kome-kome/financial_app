@@ -2534,7 +2534,8 @@ def replace_ttm_financial_records(db, rows) -> int:
 # 夜間の producer（sector_ols / macro_enet）が**毎晩計算して捨てていた**診断値を、夜ごと・モデルごとに
 # 1行ずつ積む。選ばれた正則化の強さ（ridge α・ElasticNet α / l1_ratio）、OOF 成績、業種別の統計。
 # 「α が候補の端に張り付いた」「データが変わらないのに値が動いた（#697 型）」を後から確かめるための表で、
-# 本番のスコアはこれを読まない。
+# 本番のスコアはこれを読まない。分析画面の保存済みの結果（`/api/plugins/{name}/saved`）が最新1行の要約を
+# 表示に読む（#1178・`get_latest_nightly_diagnostic`）。
 #
 # **追記のみ**（更新も削除もしない）。何を入れるかは `nightly_scores.DIAG_EXTRACTORS` が許可したキー
 # だけで決まり、結果の dict を丸ごと入れない（社別の行・社名を入れない＝リポジトリは public）。
@@ -2576,6 +2577,28 @@ def insert_nightly_model_diagnostic(db, *, run_id: str, model: str,
     ))
     db.commit()
     return 1
+
+
+def get_latest_nightly_diagnostic(db, model: str) -> dict | None:
+    """model の最新の診断値1行を `{snapshot_date, created_at, diagnostics}` で返す（#1178・書かない）。
+
+    分析画面の保存済みの結果が「このモデルは信用できるか」の要約を出すために読む。無い（夜間が一度も
+    書いていない・Render の断面に行が無い）・表が読めないときは None（画面は「まだありません」と出す）。
+    同じ時刻の行は id の大きい方。CLI の `scripts/nightly_diag_report.fetch_rows` は全行を古い順に読むので
+    使わない（本番のコードから scripts を import しない）。
+    """
+    try:
+        row = (db.query(NightlyModelDiagnostic.snapshot_date, NightlyModelDiagnostic.created_at,
+                        NightlyModelDiagnostic.diagnostics)
+                 .filter(NightlyModelDiagnostic.model == model)
+                 .order_by(NightlyModelDiagnostic.created_at.desc(), NightlyModelDiagnostic.id.desc())
+                 .first())
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return {"snapshot_date": row.snapshot_date, "created_at": row.created_at,
+            "diagnostics": row.diagnostics if isinstance(row.diagnostics, dict) else {}}
 
 
 # ── 8.10 本番予測の月次の写し（#1005・親 #1001）───────────────────────────────

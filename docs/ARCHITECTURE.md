@@ -1424,7 +1424,7 @@ graph LR
         AN2["POST /api/plugins/{name}/run?persist=\nプラグインを実行\n（heavy かつ writes_blocked＝RENDER_LIGHT_MODE または接続先 prod は 403・#733）\nheavy はローカルバッチ実行中・同じ heavy が実行中なら 409\nheavy は実行中の進捗を JobState へ流す（#545）\nheavy は既定で保存しない（tuning_dry_run）。保存は persist=1 のときだけ（ADR-0072）"]
         AN14["GET /api/batch/activity\nいま走っているローカルバッチ（running）と\n期限切れで残った実行中マーカー（stale）\n分析画面が heavy のボタンを止める帯に使う"]
         AN15["GET /api/plugins/{name}/preflight\nheavy を押す直前の確認材料\n（blocked_reason / writes / writes_impact / last_run_min）"]
-        AN16["GET /api/plugins/{name}/saved?limit=\nheavy のタブを開いたときの保存済みの結果（読取専用・ADR-0072）\nM-2/M-3/M-6 は μ̂ 上位（今買える社）・sector_ols は計算時刻と社数・M-1/モデル比較は saved=false"]
+        AN16["GET /api/plugins/{name}/saved?limit=\nheavy のタブを開いたときの保存済みの結果（読取専用・ADR-0072）\nM-2/M-3/M-6 は μ̂ 上位（今買える社）・sector_ols は計算時刻と社数・M-1/モデル比較は saved=false\nsector_ols と M-6 は diagnostics＝夜間の診断値の最新1行の要約（OOF の rank-IC・売り側spread／業種別 R²・#1178）"]
         AN12["GET /api/plugins/{name}/progress\nheavy プラグイン実行の進捗 SSE（#545）\n{running, progress, total, new_logs}\n画面は POST の応答を待たずに開く\n（POST が完了まで返らないため）"]
         AN16["POST /api/plugins/{name}/cancel\n画面から回した heavy の取消（協調型・#849）\n{accepted, running, saving, message}\n次の進捗の区切りで止まり、実行は 409\n保存を始めた後は受け付けない（DB へは書かない）"]
         AN11["GET /api/plugins/{name}/tuned\n自動調整済みハイパーパラメータ\n（hyperparameter_search.py --persist が書込・未調整は404）\n読取専用・軽量。探索自体はローカル月次バッチ経由\nparams は現在の探索空間へ射影して返す(#604)\n生値=params_as_tuned・変えたキー=stale_params\n測ったパネルの照合=panel_changed(#711)\nFalse と言えたときだけ画面が自動プリフィル"]

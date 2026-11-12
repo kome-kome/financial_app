@@ -3,6 +3,7 @@
 /api/plugins/*, /api/gap-analysis, /api/recommend, /api/backtest を担当。
 """
 import logging
+import statistics
 import time
 from typing import Optional
 
@@ -371,6 +372,72 @@ _BATCH_LABELS = {
 
 SAVED_LIMIT_MAX = 200
 
+# 保存済みの結果に添える夜間の診断値（#1178・ADR-0061）。夜間が診断値を積むモデル
+# （`nightly_scores.DIAG_EXTRACTORS`）のうち、画面に要約を出すもの。それ以外は DB を読まずに None。
+_DIAG_SUMMARY_MODELS = ("sector_ols", "macro_enet")
+
+
+def _num(v, nd: int = 4) -> Optional[float]:
+    return round(float(v), nd) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _diag_summary(model: str, row: Optional[dict]) -> Optional[dict]:
+    """最新の診断値1行（`database.get_latest_nightly_diagnostic`）を、画面に出す要約へ縮める（#1178）。
+
+    「このモデルは信用できるか」を再計算せずに見せる。期ごとの系列・係数・業種ごとの全行は返さない
+    （タブを開くたびに読まれる応答を軽く保つ・推移は CLI `scripts/nightly_diag_report`）。
+      - macro_enet: OOF の期数・rank-IC（全体・業種内）の平均・売り側spread とその当たり率・上位K社の参考
+      - sector_ols: 業種数・社数・R² の中央値と最小・最大の業種
+    診断値に無いキーは None（`n_quantiles` は診断値に無いので出さない）。行が無ければ None。
+    """
+    if row is None or model not in _DIAG_SUMMARY_MODELS:
+        return None
+    d = row.get("diagnostics") or {}
+    created = row.get("created_at")
+    out = {"model": model, "snapshot_date": row.get("snapshot_date"),
+           "recorded_at": created.isoformat() if created else None}
+    if model == "macro_enet":
+        oof = d.get("oof") or {}
+
+        def _mean(key):
+            v = oof.get(key)
+            return _num(v.get("mean")) if isinstance(v, dict) else None
+
+        out.update({
+            "n_periods":                 oof.get("n_periods"),
+            "rank_ic":                   _mean("rank_ic"),
+            "rank_ic_industry_neutral":  _mean("rank_ic_industry_neutral"),
+            "short_side_spread":         _num(oof.get("short_side_spread")),
+            "short_side_hit_rate":       _num(oof.get("short_side_hit_rate")),
+            # 上位K社の参考（K ごとの期間平均だけ・期別系列は診断値にも無い・#1041）
+            "top_k":                     oof.get("top_k") if isinstance(oof.get("top_k"), dict) else {},
+            "top_decile_rank_ic":        oof.get("top_decile_rank_ic"),
+        })
+        return out
+    sectors = sorted((s for s in (d.get("sectors") or [])
+                      if isinstance(s, dict) and _num(s.get("r2")) is not None),
+                     key=lambda s: s["r2"])
+
+    def _edge(s):
+        return {"industry": s.get("industry"), "r2": _num(s["r2"]), "n": s.get("n")}
+
+    out.update({
+        "n_sectors":  d.get("n_sectors"),
+        "n_total":    d.get("n_total"),
+        "n_with_r2":  len(sectors),
+        "r2_median":  _num(statistics.median(s["r2"] for s in sectors)) if sectors else None,
+        "r2_min":     _edge(sectors[0]) if sectors else None,
+        "r2_max":     _edge(sectors[-1]) if sectors else None,
+    })
+    return out
+
+
+def _saved_diagnostics(db, plugin_name: str) -> Optional[dict]:
+    if plugin_name not in _DIAG_SUMMARY_MODELS:
+        return None
+    from database import get_latest_nightly_diagnostic
+    return _diag_summary(plugin_name, get_latest_nightly_diagnostic(db, plugin_name))
+
 
 def _updated_by(plugin_name: str) -> Optional[str]:
     from nightly_scores import HEAVY_AUTOMATION, LOCAL_PREFIX
@@ -391,6 +458,7 @@ async def plugin_saved(plugin_name: str, limit: int = 50, db: Session = Depends(
     - M-2/M-3/M-6: 保存済みの μ̂ を今買える社（`tradable_results`）に絞り、μ̂ の降順で上位 `limit` 社
     - sector_ols: 計算時刻・使ったモデル・社数だけ（一覧はバリュエーション分析タブが同じ表を読む）
     - 保存しない分析（M-1・モデル比較）: `saved=False`
+    - sector_ols と M-6 は `diagnostics` に夜間の診断値の要約（`_diag_summary`・無ければ None・#1178）
     """
     entry = _heavy_entry(plugin_name)
     if entry is None:
@@ -411,12 +479,13 @@ async def plugin_saved(plugin_name: str, limit: int = 50, db: Session = Depends(
         n = (db.query(func.count(func.distinct(RegressionResult.edinet_code)))
                .filter(RegressionResult.gap_ratio.isnot(None)).scalar() or 0)
         return {**base, "saved": n > 0, "kind": "gap", "n_companies": n,
-                "computed_at": meta["computed_at"], "models": meta["models"]}
+                "computed_at": meta["computed_at"], "models": meta["models"],
+                "diagnostics": _saved_diagnostics(db, plugin_name)}
 
     got = get_producer_saved(db, plugin_name)
     mu = {ec: v for ec, v in ((got or {}).get("mu") or {}).items() if v is not None}
     if not mu:
-        return {**base, "saved": False, "kind": "mu"}
+        return {**base, "saved": False, "kind": "mu", "diagnostics": _saved_diagnostics(db, plugin_name)}
     from plugins.macro_snapshots import tradable_results
     kept, excluded = tradable_results(db, [{"edinet_code": ec, "mu": v} for ec, v in mu.items()])
     kept.sort(key=lambda r: r["mu"], reverse=True)
@@ -432,7 +501,8 @@ async def plugin_saved(plugin_name: str, limit: int = 50, db: Session = Depends(
     saved_at = got.get("saved_at")
     return {**base, "saved": True, "kind": "mu", "n_total": len(kept),
             "untradable_excluded": excluded, "asof": get_producer_asof(db, plugin_name),
-            "saved_at": saved_at.isoformat() if saved_at else None, "rows": rows}
+            "saved_at": saved_at.isoformat() if saved_at else None, "rows": rows,
+            "diagnostics": _saved_diagnostics(db, plugin_name)}
 
 
 @router.get("/api/plugins/{plugin_name}/progress")
