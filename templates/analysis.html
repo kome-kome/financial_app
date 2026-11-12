@@ -185,6 +185,16 @@ details.rerun[open]>summary{margin-bottom:8px}
 /* 本文へのスキップリンク（ナビ 8・サイドバー 12 を Tab で抜けずに済む・#1176）。フォーカスで現れる */
 .skip-link{position:absolute;left:8px;top:-60px;z-index:1000;padding:8px 14px;background:var(--bg-elevated);color:var(--accent-text);border:1px solid var(--accent);border-radius:6px;font-size:13px;font-weight:600;text-decoration:none}
 .skip-link:focus{top:8px}
+/* 実行前の確認（画面内の <dialog>・#1185）。showModal() で開くので背後は操作できず、Esc で閉じる。
+   画面に重なって出るので浮いた層の影を持つ（DESIGN.md）。全体の *{margin:0} が中央寄せの margin:auto を
+   消すので戻す。幅は 375px でも左右 16px を残す */
+.confirm-dialog{margin:auto;width:min(480px,calc(100vw - 32px));padding:20px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elevated);color:var(--text);box-shadow:0 10px 30px var(--shadow-color)}
+.confirm-dialog::backdrop{background:var(--shadow-color)}
+.confirm-dialog-title{font-size:15px;font-weight:700;line-height:1.5;margin-bottom:12px;overflow-wrap:anywhere}
+.confirm-dialog-lines{padding-left:18px;margin-bottom:12px;font-size:13px;color:var(--text-secondary);line-height:1.7}
+.confirm-dialog-lines strong{color:var(--text)}
+.confirm-dialog-question{font-size:13px;margin-bottom:16px}
+.confirm-dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -839,8 +849,23 @@ details.rerun[open]>summary{margin-bottom:8px}
 </main><!-- container -->
 </div><!-- layout -->
 
+<!-- 実行前の確認（#1185）。中身は analysis.js の _confirmDialog が入れる。既定のフォーカスは「やめる」
+     （autofocus）＝Enter 一打では実行しない。form method="dialog" なので押したボタンの value が returnValue になる -->
+<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-body">
+  <form method="dialog">
+    <h2 class="confirm-dialog-title" id="confirm-dialog-title"></h2>
+    <div id="confirm-dialog-body">
+      <ul class="confirm-dialog-lines" id="confirm-dialog-lines"></ul>
+      <p class="confirm-dialog-question" id="confirm-dialog-question"></p>
+    </div>
+    <div class="confirm-dialog-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary" autofocus>やめる</button>
+      <button type="submit" value="ok" class="btn btn-primary" id="confirm-dialog-ok">実行する</button>
+    </div>
+  </form>
+</dialog>
 <script src="/static/vendor/chart.umd.js?v=4.4.1"></script>
 <script src="/static/js/common.js?v=20261105a"></script>
-<script src="/static/js/analysis.js?v=20261022a"></script>
+<script src="/static/js/analysis.js?v=20261112a"></script>
 </body>
 </html>
