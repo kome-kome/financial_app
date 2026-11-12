@@ -1276,6 +1276,36 @@ function _wrapRerun(tabId, d) {
   return det;
 }
 
+// 保存済みの結果に添える夜間の検証の要約（#1178）。そのモデルが信用できるかを、数分の再計算なしに見せる。
+// 値はサーバが夜間の診断値（nightly_model_diagnostics の最新1行）から縮めたもの（routers/analysis._diag_summary）。
+// 夜間が診断値を積むのは業種別OLS と M-6 だけで、それ以外の分析では何も出さない。
+const _SAVED_DIAG_MODELS = new Set(['sector_ols', 'macro_enet']);
+
+function _savedDiagHTML(name, g) {
+  if (!_SAVED_DIAG_MODELS.has(name)) return '';
+  const head = '<h3 class="section-title" style="font-size:13px;margin:14px 0 4px">夜間の検証</h3>';
+  if (!g) {
+    return head + '<div class="text-sm">夜間の検証の数字はまだありません（夜間バッチが記録すると、ここに出ます）。</div>';
+  }
+  const when = `<div class="saved-meta">記録 ${esc(_fmtSavedAt(g.recorded_at))} ・ データ基準日 ${esc(g.snapshot_date || '不明')}</div>`;
+  const signed = (v, digits) => v == null ? '-' : (v > 0 ? '+' : '') + v.toFixed(digits);
+  if (name === 'macro_enet') {
+    const pct = v => v == null ? '-' : (v > 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+    const hit = g.short_side_hit_rate == null ? '' : `（当たった期 ${(g.short_side_hit_rate * 100).toFixed(0)}%）`;
+    return head + when
+      + `<div class="text-sm" title="学習に使っていない期間（OOF）で、予想の順位と実際の52週先リターンの順位がどれだけ合ったか（rank-IC）と、予想の下位を売ったときに全社平均をどれだけ下回ったか（売り側spread）。">`
+      + `学習に使っていない ${g.n_periods == null ? '-' : Number(g.n_periods)} 期の成績: `
+      + `rank-IC ${signed(g.rank_ic, 3)}（業種内 ${signed(g.rank_ic_industry_neutral, 3)}）・`
+      + `売り側spread ${pct(g.short_side_spread)}${hit}</div>`
+      + _oofTopKHTML({top_k: g.top_k, top_decile_rank_ic: g.top_decile_rank_ic}, '上位K社の成績');
+  }
+  const edge = e => e ? `${esc(e.industry || '-')} ${e.r2.toFixed(2)}（${e.n == null ? '-' : Number(e.n)}社）` : '-';
+  return head + when
+    + `<div class="text-sm" title="業種ごとの回帰が、各社の時価総額をどれだけ説明できたか（R²・1 に近いほど当てはまりが良い）。乖離率は当てはまりの悪い業種ほど割り引いて読む。">`
+    + `業種別 R²（${g.n_with_r2 == null ? '-' : Number(g.n_with_r2)}業種・${g.n_total == null ? '-' : Number(g.n_total).toLocaleString()}社）: `
+    + `中央値 ${g.r2_median == null ? '-' : g.r2_median.toFixed(2)} ・ 最も低い ${edge(g.r2_min)} ・ 最も高い ${edge(g.r2_max)}</div>`;
+}
+
 function _savedHTML(d, tabId) {
   const title = `<h2 class="section-title">${esc(d.label)} — 保存済みの結果</h2>`;
   const by = d.updated_by ? `${esc(d.updated_by)}が更新します` : '';
@@ -1283,16 +1313,18 @@ function _savedHTML(d, tabId) {
     return title + `<div class="info-box">この分析は結果を保存しません（画面に表示するだけ）。`
       + '見るには下の「設定を変えて再計算」から実行してください。</div>';
   }
+  const diag = _savedDiagHTML(d.name, d.diagnostics);
   if (!d.saved) {
     return title + `<div class="info-box">まだ保存された結果がありません。${by ? by + '。' : ''}`
-      + '下の「設定を変えて再計算」で計算した結果を見ることもできます。</div>';
+      + '下の「設定を変えて再計算」で計算した結果を見ることもできます。</div>' + diag;
   }
   if (d.kind === 'gap') {
     return title + `<div class="saved-meta">保存 ${esc(_fmtSavedAt(d.computed_at))} ・ `
       + `${esc((d.models || []).join(' / ') || '-')} ・ ${Number(d.n_companies).toLocaleString()}社`
       + `${by ? ' ・ ' + by : ''}</div>`
       + '<div class="text-sm" style="margin-bottom:10px">各社の乖離率の一覧は、この結果を読むバリュエーション分析タブで見られます。</div>'
-      + '<button class="btn btn-primary btn-sm" data-click="showTab" data-arg="gap">→ バリュエーション分析で一覧を見る</button>';
+      + '<button class="btn btn-primary btn-sm" data-click="showTab" data-arg="gap">→ バリュエーション分析で一覧を見る</button>'
+      + diag;
   }
   const asof = d.asof && d.asof.snapshot_date ? d.asof.snapshot_date : '不明';
   const rows = (d.rows || []).map(r => {
@@ -1310,7 +1342,7 @@ function _savedHTML(d, tabId) {
     + `<div style="overflow-x:auto"><table>
         <thead><tr><th style="text-align:right">順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
           <th style="text-align:right" title="1年先（52週）の期待リターンの予測（対数）。夜間などのバッチが保存した値">μ̂（1年先）</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
+        <tbody>${rows}</tbody></table></div>` + diag;
 }
 
 async function _loadSaved(tabId, force = false) {
