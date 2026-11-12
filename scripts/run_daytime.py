@@ -673,6 +673,21 @@ JOBS: dict[str, Job] = {
         measured_min=420.0,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
+    # 本番予測の月次の写しを写した後の答えで採点する（#1157）。13 週の中間点検は 2027-01-25 以降、52 週は毎年 10 月下旬。
+    "measure:live-oos": Job(
+        name="live_oos",
+        argv=("{python}", "-m", "scripts.measure_live_oos",
+              "--prereg", "docs/prereg/live-oos.md",
+              "--prereg-sha", "d33c17d622be1f25ac14d3ab654853c6439012fc9e4c04521c395b3799d93247"),
+        why="prediction_snapshots の写しを、写した日以前の最後の週次足を起点にした 52 週（13 週）先の答えで採点し、"
+            "M-6 と M-2（写した時点の本番の設定）の上位10社超過を対にして比べる（#1157）。判定は共通の成熟した写しの"
+            "最初の 36 本だけ・alpha 0.05・平均ブロック長 12。DB へは書かない。凍結値が合わなければ exit 2、写しか"
+            "週次株価が空なら exit 3。結果は scripts/.cache/live_oos.json。",
+        # 見積り: 写しの読み込み（月約 1.6 万行）と週次株価（キャッシュ経由）＋採点 4 版。学習は無い。
+        # **次の実走で差し替える。**
+        measured_min=5.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
+    ),
     # OOF 運用再現（#1045・親 #1040・ADR-0069 の参考）。判定には使わない。
     "measure:oof-replay": Job(
         name="oof_portfolio_replay",
