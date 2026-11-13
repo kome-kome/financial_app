@@ -651,9 +651,8 @@ JOBS: dict[str, Job] = {
             "各 fold の学習済みモデルで予測して足し、最後の終値で手仕舞った答えで採点し直して、M-6 − M-2 の判定が"
             "入れ替わるかを見る（#1197）。学習は変えない。凍結値が合わなければ exit 2、照合が合わなければ exit 3。"
             "結果は scripts/.cache/delisting_redesign.json。",
-        # 見積り: `measure:label-audit` の 2026-11-11 の実測 18.6 分（M-4 1 回 899.6 秒を含む）＋消えた行の分類と
-        # 予測（学習は増えない）＋余裕。**次の実走で差し替える。**
-        measured_min=22.0,
+        # 実測: 2026-11-13 の日中枠 11.6 分（M-4 1 回 668.8 秒を含む・exit=0）。見積りの 22.0 分から差し替えた（#1195）。
+        measured_min=11.6,
         parallel_sensitive=True,   # 他の計測と同じ理由（読み込みの途中に夜間の書き込みが入ると入力が変わる）
     ),
     # M-6 と本番の設定の M-2 を上位10社で公平に比べる（#1155）。12 月の探索の周回の反映後に単独で積む。
@@ -678,7 +677,7 @@ JOBS: dict[str, Job] = {
         name="live_oos",
         argv=("{python}", "-m", "scripts.measure_live_oos",
               "--prereg", "docs/prereg/live-oos.md",
-              "--prereg-sha", "d33c17d622be1f25ac14d3ab654853c6439012fc9e4c04521c395b3799d93247"),
+              "--prereg-sha", "d7b9c5cfef752eb7429da30d690c794e24b64ddcd2dfd04beaccb3fb8a34daec"),
         why="prediction_snapshots の写しを、写した日以前の最後の週次足を起点にした 52 週（13 週）先の答えで採点し、"
             "M-6 と M-2（写した時点の本番の設定）の上位10社超過を対にして比べる（#1157）。判定は共通の成熟した写しの"
             "最初の 36 本だけ・alpha 0.05・平均ブロック長 12。DB へは書かない。凍結値が合わなければ exit 2、写しか"

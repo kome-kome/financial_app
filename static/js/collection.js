@@ -20,14 +20,33 @@ async function checkApi(){
     document.getElementById('s-records').textContent=d.records.toLocaleString();
     document.getElementById('s-year').textContent=d.latest_year||'-';
     renderPriceStaleGuide(d);
+    renderSchedule(d.batch);       // 「自動収集」の表（common.js・ホームと共有・#1212）
+    applyCollectState(d.records);
     log('API接続成功: '+d.companies+'社 / '+d.records+'レコード','success');
     loadIndustries();
     initWizardState();
   }catch(e){
     document.getElementById('s-api').textContent='接続失敗';
     document.getElementById('s-api').style.color=cssVar('--status-bad');
+    renderSchedule(null);          // 「読み込み中…」のまま残さない（足跡を読めなかったと出す）
     log('API接続失敗: '+e.message,'error');
   }
+}
+
+// 1 画面目の主ボタンを 1 つにし、スマート収集を畳む（#1212）。
+// 財務データがある普段は「今すぐ実行」（差分）が主で、スマート収集（初回の全社収集向け）は
+// 畳んで副ボタン。DB が空のときは逆（最初に押すのはスマート収集）。
+// 開くのは「空のとき」だけで、閉じる方向へは動かさない（人が開いた囲みや、実行中の進捗を隠さない）。
+function applyCollectState(records){
+  const empty = !records;
+  const setPrimary = (id, on) => {
+    const b = document.getElementById(id);
+    b.classList.toggle('btn-primary', on);
+    b.classList.toggle('btn-secondary', !on);
+  };
+  setPrimary('btn-run-now', !empty);
+  setPrimary('btn-smart', empty);
+  if(empty) document.getElementById('smart-details').open = true;
 }
 
 async function runNow(){
@@ -222,6 +241,7 @@ async function startSmartCollection(force=false){
       method:'POST', body: JSON.stringify({years_back: years, force: force})
     });
     log(force ? 'スマート収集ジョブを強制再開しました' : 'スマート収集ジョブを開始しました','success');
+    document.getElementById('smart-details').open = true;   // 進捗と停止は囲みの中（畳んだままだと見えない）
     document.getElementById('smart-progress').classList.remove('hidden');
     const badge = document.getElementById('smart-mode-badge');
     badge.style.display   = 'block';
@@ -452,7 +472,7 @@ async function loadDB(){
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td><span class="tag tag-blue">${esc(c.sec_code)||'-'}</span></td>
-        <td>${c.edinet_code ? `<a href="/company/${esc(c.edinet_code)}" class="co-link" style="font-weight:500">${esc(c.name)}</a>` : esc(c.name)}</td>
+        <td>${c.edinet_code ? `<a href="/company/${esc(c.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(c.name)}</a>` : esc(c.name)}</td>
         <td><span class="tag tag-amber" style="font-size:11px">${esc(c.industry)||'-'}</span></td>
         <td>${latest?.year!=null?Number(latest.year):'-'}</td>
         <td>${fmt0(toOku(latest?.pl.revenue))}</td>
@@ -515,8 +535,12 @@ async function loadIndustries(){
     if(!d) return;
     ['db-industry','sc-industry'].forEach(id=>{
       const sel = document.getElementById(id);
+      // 選んである値は作り直しの後へ持ち越す（この関数は起動時に 2 か所から呼ばれうる。
+      // 後から届いた方が、URL から戻した業種を「全業種」へ戻さないように・#1213）
+      const cur = sel.value;
       sel.innerHTML='<option value="">全業種</option>';
       d.items.forEach(i=>{ const o=document.createElement('option'); o.value=i; o.textContent=i; sel.appendChild(o); });
+      if(cur && d.items.includes(cur)) sel.value = cur;
     });
   }catch(e){ log('業種一覧の取得失敗: '+e.message,'error') }
 }
@@ -537,7 +561,11 @@ async function searchNormCompanies(){
       const o=document.createElement('option'); o.value=c.edinet_code;
       o.textContent=`${c.sec_code||''} ${c.name}`; sel.appendChild(o);
     });
-  }catch(e){ log('企業検索失敗: '+e.message,'error') }
+  }catch(e){
+    // 「該当なし」と区別できるよう、候補の欄そのものにも失敗を出す。
+    sel.innerHTML='<option value="">検索に失敗しました（もう一度入力してください）</option>';
+    log('企業検索失敗: '+e.message,'error');
+  }
 }
 
 // ── 株価履歴収集 ────────────────────────────────────────────────────
@@ -786,6 +814,40 @@ function _reparseLog(msg, type='info'){
 }
 
 // ── スクリーニング ──────────────────────────────────────────────────
+// 条件を URL に載せる（#1213）。「実行」を押した時点の条件だけを書く（打ちかけの値で URL を動かさない）。
+// URL から開いたときは条件を欄へ戻して 1 回だけ実行する——結果そのものは URL に載せず、開くたびに引き直す。
+// [欄の id, URL のキー]。数値の欄は数として読める値だけ戻す（URL は人が書き換えられる）。
+const SCREEN_NUM_FIELDS = [
+  ['sc-rev-growth','rev_growth'], ['sc-op-margin','op_margin'], ['sc-net-margin','net_margin'],
+  ['sc-roe','roe'], ['sc-equity-ratio','equity_ratio'], ['sc-de','de'],
+  ['sc-per','per'], ['sc-pbr','pbr'], ['sc-div','div'], ['sc-cf','cf'],
+];
+function writeScreenUrl(){
+  const pairs = {};
+  SCREEN_NUM_FIELDS.forEach(([id,key])=>{ pairs[key] = document.getElementById(id).value.trim(); });
+  pairs.industry = document.getElementById('sc-industry').value;
+  pairs.market   = document.getElementById('sc-market').value;
+  pairs.delisted = document.getElementById('sc-include-delisted').checked ? '1' : '';
+  urlStateSet(pairs);
+}
+async function restoreScreenFromUrl(){
+  let any = false;
+  SCREEN_NUM_FIELDS.forEach(([id,key])=>{
+    const v = urlStateGet(key);
+    if(v === null || v.trim() === '' || !Number.isFinite(Number(v))) return;
+    document.getElementById(id).value = v; any = true;
+  });
+  if(urlStateApplySelect('sc-market','market')) any = true;
+  if(urlStateGet('delisted') === '1'){ document.getElementById('sc-include-delisted').checked = true; any = true; }
+  // 業種の選択肢は API から届く。届いてから戻す（届く前に入れても選択肢に無く、空へ落ちる）
+  if(urlStateGet('industry') !== null){
+    await loadIndustries();
+    if(urlStateApplySelect('sc-industry','industry')) any = true;
+  }
+  // 引き直すのはスクリーニングのタブで開いたときだけ（ほかのタブでは結果が見えず、問い合わせが無駄になる）
+  if(any && urlStateGet('tab') === 'screen') runScreen();
+}
+
 async function runScreen(){
   const body = {
     min_rev_growth:  numOrNull('sc-rev-growth'),
@@ -803,13 +865,20 @@ async function runScreen(){
     include_delisted: document.getElementById('sc-include-delisted').checked,
     limit: 500
   };
+  writeScreenUrl();
+  clearTabError();
   try{
     const d = await apiFetch('/api/screen',{method:'POST',body:JSON.stringify(body)});
+    if(!d) return;
     screenResults = d.results;
     document.getElementById('screen-count').textContent = d.count+'社';
     renderScreenResults();
     log(`スクリーニング完了: ${d.count}社ヒット`,'success');
-  }catch(e){ log('スクリーニング失敗: '+e.message,'error') }
+  }catch(e){
+    // 件数を前回のまま（初回は「0社」）残すと「条件に合う社が無い」と読める。取れなかったことを件数の札にも出す。
+    document.getElementById('screen-count').textContent = '取得失敗';
+    log('スクリーニング失敗: '+e.message+'。条件を確かめて、もう一度実行してください','error');
+  }
 }
 
 function renderScreenResults(){
@@ -817,7 +886,7 @@ function renderScreenResults(){
     const score = calcScore(r);
     return `<tr>
       <td><span class="tag tag-blue">${esc(r.sec_code||r.edinet_code)}</span></td>
-      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}${r.is_active === false ? ' <span class="tag tag-red" style="font-size:11px">廃止</span>' : ''}</td>
+      <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:500">${esc(r.company_name)}</a>` : esc(r.company_name)}${r.is_active === false ? ' <span class="tag tag-red" style="font-size:11px">廃止</span>' : ''}</td>
       <td><span class="tag tag-amber" style="font-size:11px">${esc(r.industry)||'-'}</span></td>
       <td>${r.val?.per!=null?Number(r.val.per):'-'}</td>
       <td>${r.val?.pbr!=null?Number(r.val.pbr):'-'}</td>
@@ -961,9 +1030,13 @@ function fmtOku(v){ return (v==null || isNaN(v)) ? '—' : (v<0?'▲':'') + Math
 function fmtYen(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toLocaleString('ja-JP',{maximumFractionDigits:2}) + '円'; }
 function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }
 const _TABS = ['collect','stockmarket','dataview','screen'];
-function showTab(t){
+// initial=true は起動時の表示（URL に書かない。既定のタブで開いただけの URL に ?tab=collect を足さない）
+function showTab(t, initial){
+  clearTabError();
   _TABS.forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
   document.querySelectorAll('.nav-btn[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
+  // 開いているタブを URL に残す（再読込・戻る・共有で同じタブへ戻る・#1213）。履歴は積まない
+  if(initial !== true) urlStateSet({tab: t});
   if(t==='dataview') loadDB();
   if(t==='stockmarket') loadMacroCoverage();
 }
@@ -1077,6 +1150,18 @@ function log(msg,type='info'){
   const ts=new Date().toTimeString().slice(0,8);
   const el=document.createElement('div'); el.className='log-entry '+type;
   el.textContent=`[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
+  // ログの箱は「財務データ収集」タブの中にある。他のタブを開いている間の失敗は見えず、
+  // スクリーニングの失敗が「0社」に見えていた。失敗だけは、どのタブからも見える欄へも出す。
+  if(type==='error' && document.getElementById('tab-collect').classList.contains('hidden')) showTabError(msg);
+}
+function showTabError(msg){
+  const el=document.getElementById('tab-error');
+  el.textContent=msg+'（詳しい経過は「財務データ収集」タブのジョブ実行ログにあります）';
+  el.classList.remove('hidden');
+}
+function clearTabError(){
+  const el=document.getElementById('tab-error');
+  el.textContent=''; el.classList.add('hidden');
 }
 function clearLog(){ document.getElementById('log-box').innerHTML=''; }
 
@@ -1101,8 +1186,13 @@ async function initLightMode(){
 // 初期化
 initAuth();
 initLightMode();
-showTab('collect');
+// URL の ?tab= で開く。一覧に無い値は無視して既定（財務データ収集）で開く（#1213）
+{
+  const urlTab = urlStateGet('tab');
+  showTab(_TABS.includes(urlTab) ? urlTab : 'collect', true);
+}
 checkApi();
+restoreScreenFromUrl();
 
 // 画面離脱時にタイマー・SSE・debounce タイマーをまとめてクリーンアップ
 // （SPA 的なタブ切替はしていないので beforeunload のみで十分）

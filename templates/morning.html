@@ -60,6 +60,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .verdict-fresh{background:var(--status-good-bg);border-color:var(--status-good)}
 .verdict-warn{background:var(--status-warn-bg);border-color:var(--status-warn)}
 .verdict-alert{background:var(--status-bad-bg);border-color:var(--status-bad)}
+/* 読み込み中は中立の面。注意色（琥珀）で始めると、毎朝 5〜8 秒「注意？」に見える（#1214） */
+.verdict-loading{background:var(--bg-elevated)}
+.verdict-loading .verdict-head{color:var(--text-secondary)}
 .verdict-head{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:700}
 .verdict-fresh .verdict-head{color:var(--status-good-text)}
 .verdict-warn .verdict-head{color:var(--status-warn-text)}
@@ -69,8 +72,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .verdict-reasons li::before{content:'•';color:var(--text-muted);flex-shrink:0}
 .verdict a{color:var(--accent-text);font-size:12px;text-decoration:none;width:fit-content}
 .verdict a:hover{text-decoration:underline}
-/* 鮮度は <details> で畳める。狭い幅では閉じて始め、1行の要約だけ見せる——開いたままだと
-   カード5枚でランキングが4画面下へ押し出される（スマホで朝に見るのはランキングが主） */
+/* 鮮度は <details> で畳める。開閉は幅ではなく判定で決める（morning.js の syncFreshFold・#1214）:
+   問題なしの朝は閉じて1行の要約だけ見せ、注意・警告のときだけ開く——開いたままだと
+   カード5枚で主役のランキングが1画面目から押し出される。既定は閉じておく（読み込み中に空の枠を見せない） */
 .fresh-details{margin-bottom:28px}
 .fresh-details>summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
 .fresh-details>summary::-webkit-details-marker{display:none}
@@ -177,13 +181,13 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 <div class="container">
 
   <!-- 発注してよいかの総合判定（Issue #423 子3・鮮度は必須表示） -->
-  <div class="verdict verdict-warn" id="verdict">
+  <div class="verdict verdict-loading" id="verdict">
     <div class="verdict-head" id="verdict-head"><span class="spinner"></span> 鮮度を確認しています…</div>
     <ul class="verdict-reasons" id="verdict-reasons"></ul>
     <a id="verdict-link" href="#" target="_blank" rel="noopener" hidden>復旧手順（DEPLOYMENT.md）を見る →</a>
   </div>
 
-  <details class="fresh-details" id="fresh-details" open>
+  <details class="fresh-details" id="fresh-details">
     <summary class="section-title" id="fresh-summary">データ鮮度</summary>
     <div class="fresh-grid" id="fresh-grid"></div>
   </details>

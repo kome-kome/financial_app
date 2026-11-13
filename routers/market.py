@@ -205,16 +205,21 @@ def _batch_status(db: Session, get=None) -> dict:
 
     ここで「何時間前なら緑」を書くと、窓（`run_*.WINDOW_MIN`）を広げたときに
     ダッシュボードだけが黙って古くなる。**表示は足跡から導出し、静的な予定表は持たない。**
+
+    `url` は復旧手順（#1212・収集画面とホームの「自動収集」が、遅れた行の隣へ出す）。
+    `/api/morning` の `batch` と同じキー・同じ定数で、**判定不能のときも返す**
+    （読めないときこそ手順書が要る）。
     """
     from datetime import datetime as _dt, timezone as _timezone
 
     from batch_freshness import collect, summarize
+    from routers.morning import RUNBOOK_URL
     try:
         snap = collect(db, _dt.now(_timezone.utc), get=get)
     except Exception as e:                     # 判定不能でも統計表示は止めない
         log.info("バッチ鮮度の判定に失敗（統計表示は継続）: %s", e)
-        return {"level": "unknown", "rows": []}
-    return summarize(snap, fmt_time=api._utc_to_jst_str)
+        return {"level": "unknown", "rows": [], "url": RUNBOOK_URL}
+    return {**summarize(snap, fmt_time=api._utc_to_jst_str), "url": RUNBOOK_URL}
 
 
 @router.get("/api/stats")

@@ -48,7 +48,13 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .theme-toggle-btn{background:transparent;border:1px solid var(--border-muted);color:var(--text);border-radius:6px;width:30px;height:30px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .theme-toggle-btn:hover{background:var(--bg-hover)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}.dot-yellow{background:var(--status-warn)}
+.dot-green{background:var(--status-good)}.dot-red{background:var(--status-bad)}.dot-yellow{background:var(--status-warn)}.dot-amber{background:var(--status-warn)}
+/* 「自動収集」の表（#1212）。ホーム（dashboard.html）から写した。描くのは common.js の renderSchedule */
+.scheduler-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
+.sched-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.sched-item{background:var(--bg-sunken);border-radius:8px;padding:10px 12px}
+.sched-item-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;overflow-wrap:anywhere}
+.sched-item-value{font-size:14px;font-weight:600;margin-bottom:4px}
 .nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg-elevated);padding:0 24px}
 .nav-btn{padding:11px 18px;font-size:13px;color:var(--text-secondary);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .2s}
 .nav-btn.active{color:var(--accent-text);border-bottom-color:var(--accent-text)}
@@ -61,6 +67,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}
+  .sched-grid{grid-template-columns:1fr 1fr}
   /* タブ4つは 375px に収まらないので、ページごと広げず帯の中だけ横に流す */
   .nav{overflow-x:auto;padding:0 12px}
   .nav-btn{white-space:nowrap;flex-shrink:0}
@@ -68,7 +75,9 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 @media (max-width: 480px){
   .grid4{grid-template-columns:1fr}
   .grid2{grid-template-columns:1fr}
+  .sched-grid{grid-template-columns:1fr 1fr;gap:8px}
   .card{padding:12px}
+  .scheduler-card{padding:12px}
 }
 .card-title{font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
 .card-value{font-size:22px;font-weight:700}
@@ -167,8 +176,25 @@ tr:hover td{background:var(--border-subtle)}
   ⚠️ <strong>閲覧専用</strong>: この環境は Supabase の断面を見ているため、収集・更新は止めています。ローカル PC（正本）から実行してください。スクリーニング・分析・閲覧は通常どおり利用できます。
 </div>
 
+<!-- 失敗の知らせ。ジョブ実行ログ（#log-box）は「財務データ収集」タブの中にあり、他のタブを開いている間は見えない。
+     log() が error をここへも出す（どのタブにも属さないので常に見える・タブを切り替えると消える）。 -->
+<div id="tab-error" class="hidden" role="alert"
+     style="background:var(--status-bad-bg);border:1px solid var(--status-bad);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:var(--status-bad-text);overflow-wrap:anywhere"></div>
+
 <!-- 収集管理 -->
 <div id="tab-collect">
+  <!-- 自動収集（#1212）。この画面の主な用途は「手で収集する」から「収集を監視し、失敗したときだけ
+       手を入れる」へ移った。ホームと同じ足跡（/api/stats の batch）を 1 画面目に出す。
+       **静的な予定表は持たない**（経緯は common.js の renderSchedule）。 -->
+  <div class="scheduler-card">
+    <h2 class="section-title" style="margin-bottom:8px">自動収集</h2>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="dot" id="sched-dot" style="flex-shrink:0"></span>
+      <span style="font-size:13px;color:var(--text-secondary)" id="sched-headline">読み込み中…</span>
+    </div>
+    <div class="sched-grid" id="sched-grid"></div>
+  </div>
+
   <!-- サマリーカード -->
   <div class="grid4">
     <div class="card"><div class="card-title">DB企業数</div><div class="card-value" id="s-companies" style="color:var(--accent-text)">-</div></div>
@@ -183,7 +209,7 @@ tr:hover td{background:var(--border-subtle)}
   <div id="price-stale-guide" class="hidden" role="status" style="background:var(--status-warn-bg);border:1px solid var(--status-warn);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:var(--status-warn-text);line-height:1.7">
     <strong id="price-stale-head">株価が古くなっています</strong><br>
     株価とスコア（乖離率・μ̂）は<strong>夜間バッチ</strong>が毎日 17:20 に更新します。この画面の「財務データの差分収集」では直りません。<br>
-    PC で <code>./run_nightly.ps1</code> を実行するか、次の夜間バッチを待ってください。夜間バッチの最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。
+    PC で <code>./run_nightly.ps1</code> を実行するか、次の夜間バッチを待ってください。夜間バッチの最終実行は、この画面の上の「自動収集」で確認できます。
   </div>
 
   <!-- 財務データの差分収集（手動実行）。実体は run_full_collection（years_back=1・skip_existing）で、
@@ -195,7 +221,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="font-size:12px;color:var(--text-muted);line-height:1.6">
       EDINET の新しい書類（過去1年・取得済みは飛ばす）から財務データを取り込みます。<strong>株価・マクロ・スコアは更新しません</strong>。<br>
-      <span style="color:var(--status-info)">🔄 財務・株価・スコアの自動更新はローカルの夜間バッチ（タスクスケジューラ）が毎日実行します。最終実行は<a href="/" style="color:inherit">ダッシュボード</a>の「自動収集」で確認できます。</span>
+      <span style="color:var(--status-info)">🔄 財務・株価・スコアの自動更新はローカルの夜間バッチ（タスクスケジューラ）が毎日実行します。最終実行は、この画面の上の「自動収集」で確認できます。</span>
     </div>
     <!-- 進捗と停止はここに置く（下の「詳細設定」は既定で閉じているので、中に置くと押した後に何も見えない）。
          詳細設定の差分収集・全件収集も同じ進捗を使う -->
@@ -214,12 +240,17 @@ tr:hover td{background:var(--border-subtle)}
     </div>
   </div>
 
-  <!-- スマート収集（推奨） -->
-  <div class="card" style="border-color:var(--accent);margin-bottom:16px">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <div class="section-title" style="margin-bottom:0;color:var(--accent-text)">スマート収集</div>
-      <span style="font-size:11px;background:var(--accent-deep-bg);color:var(--accent-soft-text);padding:2px 8px;border-radius:10px;font-weight:500">推奨</span>
-    </div>
+  <!-- スマート収集。初回の全社収集向けなので、財務データが入っているときは畳む（#1212）。
+       既定は閉じておき、collection.js の applyCollectState が「空のとき」と「実行中」だけ開く
+       （開いておいて後から畳むと、普段の表示で毎回ちらつく）。主ボタンの切り替えも同じ関数。 -->
+  <details id="smart-details" style="margin-bottom:16px">
+    <summary style="cursor:pointer;padding:10px 16px;background:var(--bg-sunken);border:1px solid var(--bg-hover);border-radius:8px;font-size:13px;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:8px">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      スマート収集
+      <span style="font-size:11px;background:var(--bg-hover);color:var(--text-secondary);padding:2px 8px;border-radius:10px;margin-left:4px">初回の全社収集向け</span>
+    </summary>
+    <div style="padding-top:12px">
+  <div class="card" style="border-color:var(--accent);margin-bottom:0">
     <div style="background:var(--accent-deep-bg);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--accent-soft-text);border-left:3px solid var(--accent);margin-bottom:14px">
       DB状態を自動判定し、初回は200社ずつ分割収集（チャンク収集）、全社収集完了後は差分収集に切り替えます。<br>
       <span style="color:var(--text-muted)">ボタンを繰り返しクリックするだけで全社収集が完了します。</span><br>
@@ -235,7 +266,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div id="smart-mode-badge" style="display:none;font-size:12px;margin-bottom:10px;padding:4px 10px;border-radius:6px;background:var(--bg-hover)"></div>
     <div class="flex" style="margin-bottom:12px">
-      <button class="btn btn-primary" id="btn-smart" data-writes data-click="startSmartCollection" style="background:var(--accent-hover);border:1px solid var(--accent)">
+      <button class="btn btn-secondary" id="btn-smart" data-writes data-click="startSmartCollection">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
         スマート収集を実行
       </button>
@@ -252,6 +283,8 @@ tr:hover td{background:var(--border-subtle)}
       <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="smart-progress-fill" style="width:0%;background:linear-gradient(90deg,var(--accent-hover),var(--accent-text))"></div></div>
     </div>
   </div>
+    </div>
+  </details><!-- /スマート収集 -->
 
   <!-- 差分収集 / 全件収集（詳細設定） -->
   <details style="margin-bottom:16px">
@@ -505,7 +538,6 @@ tr:hover td{background:var(--border-subtle)}
           <div class="log-box" id="market-log-box" role="log" aria-live="polite" aria-label="市場データ更新ログ"></div>
         </div>
     </div>
-  </div>
 
   <!-- マクロデータ（為替・金利・指数・コモディティ） -->
 
@@ -516,7 +548,7 @@ tr:hover td{background:var(--border-subtle)}
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
       為替・米国債利回り・株価指数・コモディティの日次データ（Yahoo）に加え、FRED・日銀・OECD・財務省などの系列をまとめて取得します（FRED・e-Stat は API キー設定時のみ）。<br>
-      <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得はローカルの夜間バッチが毎日実行します（最終実行はダッシュボードの「自動収集」）。</span>
+      <span style="color:var(--text-muted)">※ 既存日付は上書き更新。自動取得はローカルの夜間バッチが毎日実行します（最終実行は「財務データ収集」タブの「自動収集」）。</span>
     </div>
 
     <div class="form-group" style="max-width:280px">
@@ -730,6 +762,6 @@ tr:hover td{background:var(--border-subtle)}
   </form>
 </dialog>
 <script src="/static/js/common.js?v=20261112a"></script>
-<script src="/static/js/collection.js?v=20261112a"></script>
+<script src="/static/js/collection.js?v=20261113a"></script>
 </body>
 </html>

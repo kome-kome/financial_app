@@ -136,6 +136,16 @@ function renderFreshness(f) {
   ].join('');
 }
 
+// 鮮度の詳細の開閉は、幅ではなく判定で決める（#1214）。問題なしの朝は畳んで1行の要約だけにし
+// （主役のランキングを1画面目に入れる）、注意・警告のときだけ開く。
+// **判定が前回と同じなら触らない**——プリセットや件数を選び直すたびに、人が開いた詳細を勝手に閉じない。
+let lastVerdict = null;
+function syncFreshFold(verdict) {
+  if (verdict === lastVerdict) return;
+  lastVerdict = verdict;
+  document.getElementById('fresh-details').open = verdict !== 'fresh';
+}
+
 function renderRanking(rec, priceLevel) {
   const rows = (rec && rec.results) || [];
   const body = document.getElementById('rank-body');
@@ -149,7 +159,7 @@ function renderRanking(rec, priceLevel) {
   body.innerHTML = rows.map(r => `<tr>
     <td class="rank-num">${r.rank}</td>
     <td class="rank-code">${esc(r.sec_code || '—')}</td>
-    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}">${esc(r.company_name || '—')}</a></td>
+    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}" target="_blank" rel="noopener">${esc(r.company_name || '—')}</a></td>
     <td class="col-opt">${esc(r.industry || '—')}</td>
     <td class="num rank-score rank-metric" data-label="スコア">${fmt(r.score, 3)}</td>
     <td class="num col-opt">${fmt(r.per, 1)}</td>
@@ -185,6 +195,7 @@ async function loadMorning() {
     if (!d) return;
     renderVerdict(d.freshness);
     renderFreshness(d.freshness);
+    syncFreshFold(d.freshness.overall_verdict);
     renderRanking(d.recommend, (d.freshness.price || {}).level);
     document.getElementById('mor-generated').textContent = `集計時刻: ${d.generated_at}`;
     const lv = d.freshness.overall_verdict;
@@ -200,7 +211,7 @@ async function loadMorning() {
       + 'ランキングを取得できませんでした（上の判定の理由を確認してください）</td></tr>';
     dot.className = 'dot dot-red';
     label.textContent = '取得失敗';
-    // 判定を出せなかった＝発注の根拠が無いので赤にする（読み込み中の黄のまま残さない）
+    // 判定を出せなかった＝発注の根拠が無いので赤にする（読み込み中の中立色のまま残さない）
     document.getElementById('verdict').className = 'verdict verdict-alert';
     document.getElementById('verdict-head').textContent = '× 朝の集計を取得できませんでした';
     document.getElementById('verdict-reasons').innerHTML = `<li>${esc(e.message)}</li>`;
@@ -209,12 +220,17 @@ async function loadMorning() {
 
 // data-change 属性を持つコントロールの変更で再読込（インラインハンドラを使わない）
 document.addEventListener('change', (ev) => {
-  if (ev.target instanceof HTMLElement && ev.target.dataset.change === 'reload') loadMorning();
+  if (!(ev.target instanceof HTMLElement) || ev.target.dataset.change !== 'reload') return;
+  // 選び直したプリセットと件数を URL に残す（再読込・共有・ブックマークで同じ並びを開く・#1213）
+  urlStateSet({
+    preset: document.getElementById('mor-preset').value,
+    n: document.getElementById('mor-topn').value,
+  });
+  loadMorning();
 });
 
-// 狭い幅では鮮度を畳んで始める（1行の要約が見えるので、開かなくても状態は分かる）。
-if (window.matchMedia('(max-width: 768px)').matches) {
-  document.getElementById('fresh-details').open = false;
-}
+// URL の ?preset=&n= を選択へ戻す。選択肢に無い値は無視して既定で開く（common.js）。
+urlStateApplySelect('mor-preset', 'preset');
+urlStateApplySelect('mor-topn', 'n');
 
 loadMorning();
