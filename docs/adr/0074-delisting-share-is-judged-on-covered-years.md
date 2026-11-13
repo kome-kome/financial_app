@@ -60,6 +60,7 @@
 
 ## 関連
 
+- [ADR-0075](0075-delisted-rows-are-scored-only-in-the-live-check.md)（#1195 の決定: 本番予測の答え合わせの主審にだけ足す）
 - [ADR-0073](0073-labels-stay-price-only.md)（配当は切り替えない）・[ADR-0069](0069-evaluation-metrics-have-roles.md)（指標の役割）
 - #1154（計測・事前登録）・#1188（この判断）・#1195（答えの作り直し）・#315（as-of の模擬売買の生存者バイアス）
 - Shumway, T. (1997). "The Delisting Bias in CRSP Data." *Journal of Finance*, 52(1), 327–340. https://doi.org/10.1111/j.1540-6261.1997.tb03818.x
