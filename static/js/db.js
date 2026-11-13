@@ -319,7 +319,7 @@ async function runDrilldown(){
     const co = d.company;
     res.innerHTML = `
       <div style="margin-bottom:14px">
-        <a href="/company/${esc(code)}" class="co-link" style="font-weight:600">→ この企業の詳細ページ（グラフ表示）を開く</a>
+        <a href="/company/${esc(code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">→ この企業の詳細ページ（グラフ表示）を開く</a>
       </div>
       <div class="drilldown-section">
         <h3>📋 companies</h3>

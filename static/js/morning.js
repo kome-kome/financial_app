@@ -159,7 +159,7 @@ function renderRanking(rec, priceLevel) {
   body.innerHTML = rows.map(r => `<tr>
     <td class="rank-num">${r.rank}</td>
     <td class="rank-code">${esc(r.sec_code || '—')}</td>
-    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}">${esc(r.company_name || '—')}</a></td>
+    <td class="rank-name"><a href="/company/${esc(r.edinet_code)}" target="_blank" rel="noopener">${esc(r.company_name || '—')}</a></td>
     <td class="col-opt">${esc(r.industry || '—')}</td>
     <td class="num rank-score rank-metric" data-label="スコア">${fmt(r.score, 3)}</td>
     <td class="num col-opt">${fmt(r.per, 1)}</td>
@@ -220,7 +220,17 @@ async function loadMorning() {
 
 // data-change 属性を持つコントロールの変更で再読込（インラインハンドラを使わない）
 document.addEventListener('change', (ev) => {
-  if (ev.target instanceof HTMLElement && ev.target.dataset.change === 'reload') loadMorning();
+  if (!(ev.target instanceof HTMLElement) || ev.target.dataset.change !== 'reload') return;
+  // 選び直したプリセットと件数を URL に残す（再読込・共有・ブックマークで同じ並びを開く・#1213）
+  urlStateSet({
+    preset: document.getElementById('mor-preset').value,
+    n: document.getElementById('mor-topn').value,
+  });
+  loadMorning();
 });
+
+// URL の ?preset=&n= を選択へ戻す。選択肢に無い値は無視して既定で開く（common.js）。
+urlStateApplySelect('mor-preset', 'preset');
+urlStateApplySelect('mor-topn', 'n');
 
 loadMorning();

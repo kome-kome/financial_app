@@ -260,6 +260,40 @@ function _errDetail(e) {
   }
 })();
 
+// ── 画面の状態を URL に残す（#1213）──────────────────────────────────────────
+// タブ・プリセット・スクリーニングの条件を URL に載せ、再読込・ブラウザの戻る・URL の共有で
+// 同じ状態へ戻れるようにする。**読み書きはここ 1 か所**（朝の推奨・収集・企業詳細が呼ぶ）。
+//
+// 書くのは replaceState だけ。pushState にしない＝タブを切り替えた回数だけ履歴が積まれ、
+// 「戻る」で画面を出られなくなる（分析画面の ?tab= と同じ理由）。
+// **読んだ値はそのまま信じない。** URL は人が手で書き換えられるので、呼ぶ側が
+// 「タブの一覧にあるか」「選択肢にあるか」「数として読めるか」を確かめ、外れたら既定で開く。
+function urlStateGet(key) {
+  return new URLSearchParams(window.location.search).get(key);
+}
+
+// pairs = {キー: 値}。null / undefined / '' はそのキーを消す。ほかのキーとハッシュは保つ。
+function urlStateSet(pairs) {
+  const q = new URLSearchParams(window.location.search);
+  Object.entries(pairs).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === '') q.delete(k);
+    else q.set(k, String(v));
+  });
+  const s = q.toString();
+  const next = window.location.pathname + (s ? '?' + s : '') + window.location.hash;
+  const now  = window.location.pathname + window.location.search + window.location.hash;
+  if (next !== now) history.replaceState(null, '', next);
+}
+
+// <select> へ URL の値を戻す。選択肢に無い値は無視して既定のまま（戻せたら true）。
+function urlStateApplySelect(id, key) {
+  const v  = urlStateGet(key);
+  const el = document.getElementById(id);
+  if (v === null || !el || ![...el.options].some(o => o.value === v)) return false;
+  el.value = v;
+  return true;
+}
+
 // ── 「自動収集」の表（ホーム #563・収集画面 #1212）─────────────────────────────
 // **静的な予定表を持たない。** 以前ホームは「GitHub Actions で毎日 03:00 JST」と緑ドット付きで
 // 固定表示していたが、#503 で駆動がローカルのタスクスケジューラへ移った後もそのまま残り、

@@ -145,7 +145,11 @@ function selectTab(t, focus){
   document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
   document.getElementById('panel-' + t.dataset.tab).classList.add('active');
   if (focus) t.focus();
-  if (t.dataset.tab === 'peer' && !peersLoaded) loadPeers();
+  // 開いているタブを URL に残す（再読込・共有で同じタブへ戻る・#1213）。履歴は積まない
+  urlStateSet({ tab: t.dataset.tab });
+  // 同業比較は企業（業種）が分かってから引く。URL から戻した直後はまだ読み込み前なので、
+  // そのときは loadCompany の終わりが引く（ここで引くと「業種データが無い」と誤って出る）
+  if (t.dataset.tab === 'peer' && !peersLoaded && curCompany.code) loadPeers();
 }
 tabs.forEach((t, i) => {
   t.addEventListener('click', () => selectTab(t, false));
@@ -161,6 +165,12 @@ tabs.forEach((t, i) => {
     selectTab(tabs[j], true);
   });
 });
+// URL の ?tab= を戻す。一覧に無い値は無視して既定（業績）で開く
+{
+  const urlTab = urlStateGet('tab');
+  const t = tabs.find(x => x.dataset.tab === urlTab);
+  if (t) selectTab(t, false);
+}
 
 // ── 粒度セレクタ（粗 / 中 / 細）共通配線。BS・PL・CF で再利用 ──────────
 function wireGran(sel, onPick){
@@ -223,6 +233,8 @@ async function loadCompany(code){
   const latest = recs[recs.length - 1];
   const labels = recs.map(r => r.year);
   curCompany = { code: code, industry: latest.industry, sec_code: latest.sec_code, name: latest.company_name, latest: latest };
+  // URL から「同業比較」で開いたときは、企業が分かったここで初めて引く（selectTab の注記）
+  if (document.querySelector('.tab.active')?.dataset.tab === 'peer' && !peersLoaded) loadPeers();
 
   // ヘッダ
   document.getElementById('co-name').textContent = latest.company_name || code;
@@ -874,7 +886,7 @@ async function loadPeers(){
     return `<tr class="${isMe ? 'me' : ''}">
       <td class="num" style="color:var(--text-muted)">${rank}</td>
       <td>${esc(p.sec_code || '-')}</td>
-      <td><a href="/company/${esc(p.edinet_code)}">${esc(p.name)}</a></td>
+      <td><a href="/company/${esc(p.edinet_code)}" target="_blank" rel="noopener">${esc(p.name)}</a></td>
       <td class="num">${fmtNum(toOku(L.pl.revenue))}</td>
       <td class="num">${fmtPct(L.pl.op_margin)}</td>
       <td class="num">${fmtPct(L.val.roe)}</td>
@@ -911,7 +923,7 @@ async function init(){
     const r = await fetch(apiBase() + '/api/auth/status');
     const d = await r.json();
     if (d.auth_required && !_getCookie('csrf_token')){
-      location.href = '/login?next=' + encodeURIComponent(location.pathname); return;
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search); return;
     }
   }catch(e){ /* API 未起動時はスキップ */ }
 
