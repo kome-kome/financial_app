@@ -677,7 +677,7 @@ JOBS: dict[str, Job] = {
         name="live_oos",
         argv=("{python}", "-m", "scripts.measure_live_oos",
               "--prereg", "docs/prereg/live-oos.md",
-              "--prereg-sha", "d33c17d622be1f25ac14d3ab654853c6439012fc9e4c04521c395b3799d93247"),
+              "--prereg-sha", "d7b9c5cfef752eb7429da30d690c794e24b64ddcd2dfd04beaccb3fb8a34daec"),
         why="prediction_snapshots の写しを、写した日以前の最後の週次足を起点にした 52 週（13 週）先の答えで採点し、"
             "M-6 と M-2（写した時点の本番の設定）の上位10社超過を対にして比べる（#1157）。判定は共通の成熟した写しの"
             "最初の 36 本だけ・alpha 0.05・平均ブロック長 12。DB へは書かない。凍結値が合わなければ exit 2、写しか"

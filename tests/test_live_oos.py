@@ -175,13 +175,39 @@ class TestAnswersAndDomain:
         assert pair["metrics"][X.M6]["top_k_excess_return"] > 0
         assert pair["metrics"][X.M2]["top_k_excess_return"] < 0
 
-    def test_delisted_company_is_counted_only_in_the_included_variant(self):
+    def test_only_the_excluded_variant_leaves_out_delisted_companies(self):
+        """主審・data_asof・13 週の版は上場廃止した社を足し、外すのは参考 `delisted_excluded` だけ（#1195・ADR-0075）。"""
+        assert {name: ended for name, _w, _s, ended in X.VARIANTS} == {
+            X.MAIN: True, X.EXCLUDED: False, "data_asof": True, "check_13w": True}
+
+    def test_delisted_company_is_in_the_main_and_left_out_of_the_excluded_variant(self):
         rep = X.run(_rows(), _prices(), "2028-01-01")
         assert rep["variants"][X.MAIN]["answers"][X.M6][X.ENDED] == 2
         main = rep["variants"][X.MAIN]["pair"]["n_rows_by_snapshot"]
-        incl = rep["variants"]["delisted_included"]["pair"]["n_rows_by_snapshot"]
-        assert main == {SD1: N_CO - 1, SD2: N_CO - 1}
-        assert incl == {SD1: N_CO, SD2: N_CO}
+        excl = rep["variants"][X.EXCLUDED]["pair"]["n_rows_by_snapshot"]
+        assert main == {SD1: N_CO, SD2: N_CO}
+        assert excl == {SD1: N_CO - 1, SD2: N_CO - 1}
+        # 13 週の中間点検も主審と同じ規則で答えを作る（起点の足 + 13 週より前に足が途切れる社を足す）
+        assert rep["variants"]["check_13w"]["pair"]["n_rows_by_snapshot"] == {SD1: N_CO, SD2: N_CO}
+
+    def test_excluded_variant_reproduces_the_scoring_without_delisted_companies(self):
+        """参考 `delisted_excluded` は #1195 の前の主審（上場廃止した社を外す）と同じ値。主審とは違う値になる。"""
+        rows, prices, today = _rows(), _prices(), "2028-01-01"
+        rep = X.run(rows, prices, today)
+        preds, _ = X.collect_predictions(rows)
+        px = X.index_prices(prices)
+        global_last = X.global_last_date(px)
+        before = X.score_variant(preds, px, rep["snapshot_dates"], min(today, global_last), global_last,
+                                 X.MAIN_WEEKS, X.START_SNAPSHOT, False)
+        excl = rep["variants"][X.EXCLUDED]
+        assert excl["answers"] == before["answers"]
+        assert excl["pair"]["n_rows_by_snapshot"] == before["pair"]["n_rows_by_snapshot"]
+        for s in X.PAIR:
+            assert excl["pair"]["top_k_excess_by_snapshot"][s] == pytest.approx(
+                before["pair"]["top_k_excess_by_snapshot"][s])
+        # 足した主審とは違う（逆向きの M-2 は途切れた社を上位に置くので、その社の答えで超過が変わる）
+        main_m2 = rep["variants"][X.MAIN]["pair"]["top_k_excess_by_snapshot"][X.M2]
+        assert main_m2[SD1] != pytest.approx(excl["pair"]["top_k_excess_by_snapshot"][X.M2][SD1])
 
     def test_sell_reference_uses_the_previous_snapshot_layer(self):
         rep = X.run(_rows(), _prices(), "2028-01-01")
