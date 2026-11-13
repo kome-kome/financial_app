@@ -20,14 +20,33 @@ async function checkApi(){
     document.getElementById('s-records').textContent=d.records.toLocaleString();
     document.getElementById('s-year').textContent=d.latest_year||'-';
     renderPriceStaleGuide(d);
+    renderSchedule(d.batch);       // 「自動収集」の表（common.js・ホームと共有・#1212）
+    applyCollectState(d.records);
     log('API接続成功: '+d.companies+'社 / '+d.records+'レコード','success');
     loadIndustries();
     initWizardState();
   }catch(e){
     document.getElementById('s-api').textContent='接続失敗';
     document.getElementById('s-api').style.color=cssVar('--status-bad');
+    renderSchedule(null);          // 「読み込み中…」のまま残さない（足跡を読めなかったと出す）
     log('API接続失敗: '+e.message,'error');
   }
+}
+
+// 1 画面目の主ボタンを 1 つにし、スマート収集を畳む（#1212）。
+// 財務データがある普段は「今すぐ実行」（差分）が主で、スマート収集（初回の全社収集向け）は
+// 畳んで副ボタン。DB が空のときは逆（最初に押すのはスマート収集）。
+// 開くのは「空のとき」だけで、閉じる方向へは動かさない（人が開いた囲みや、実行中の進捗を隠さない）。
+function applyCollectState(records){
+  const empty = !records;
+  const setPrimary = (id, on) => {
+    const b = document.getElementById(id);
+    b.classList.toggle('btn-primary', on);
+    b.classList.toggle('btn-secondary', !on);
+  };
+  setPrimary('btn-run-now', !empty);
+  setPrimary('btn-smart', empty);
+  if(empty) document.getElementById('smart-details').open = true;
 }
 
 async function runNow(){
@@ -222,6 +241,7 @@ async function startSmartCollection(force=false){
       method:'POST', body: JSON.stringify({years_back: years, force: force})
     });
     log(force ? 'スマート収集ジョブを強制再開しました' : 'スマート収集ジョブを開始しました','success');
+    document.getElementById('smart-details').open = true;   // 進捗と停止は囲みの中（畳んだままだと見えない）
     document.getElementById('smart-progress').classList.remove('hidden');
     const badge = document.getElementById('smart-mode-badge');
     badge.style.display   = 'block';

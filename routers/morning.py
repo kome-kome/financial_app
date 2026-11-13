@@ -36,7 +36,8 @@ log = logging.getLogger(__name__)
 # （`.github/workflows/` で生きている cron は `egress-health.yml` の1本だけ）、
 # **押すともう動いていないページに着く**。復旧手順の正本は DEPLOYMENT.md なのでそちらへ送る
 # （#561）。アンカーは付けない——見出しを直した瞬間に静かに壊れるため。
-_RUNBOOK_URL = "https://github.com/kome-kome/financial_app/blob/main/docs/DEPLOYMENT.md"
+# `/api/stats` の `batch`（ホームと収集画面の「自動収集」・#1212）もここを読む。**書き写さない**。
+RUNBOOK_URL = "https://github.com/kome-kome/financial_app/blob/main/docs/DEPLOYMENT.md"
 
 # 各ブロックを前進させる駆動主体。表記は `nightly_scores.HEAVY_AUTOMATION` の
 # `local:<スクリプト>` 語彙と揃える（画面と登録簿で別の名前を使わない）。
@@ -117,7 +118,7 @@ def _gap_ratio_block(db: Session) -> dict:
     computed_at, n_rows = (row or (None, 0))
     if not computed_at:
         return {"computed_at": None, "n_rows": 0, "age_days": None, "level": "empty",
-                "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
+                "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": RUNBOOK_URL}
     ref = computed_at if computed_at.tzinfo else computed_at.replace(tzinfo=timezone.utc)
     age_days = (datetime.now(timezone.utc) - ref).days
     level = ("alert" if age_days > GAP_ALERT_DAYS
@@ -129,7 +130,7 @@ def _gap_ratio_block(db: Session) -> dict:
         "level": level,
         "driver": _DRIVER_NIGHTLY,
         "command": _CMD_NIGHTLY,
-        "url": _RUNBOOK_URL,
+        "url": RUNBOOK_URL,
     }
 
 
@@ -163,7 +164,7 @@ def _mu_block(db: Session, mu_source: str) -> dict:
     # 月次から切り出した別タスク）。
     driver, command = _mu_driver(mu_source)
     base = {"source": mu_source, "driver": driver, "command": command,
-            "url": _RUNBOOK_URL}
+            "url": RUNBOOK_URL}
     if not asof:
         return {**base, "snapshot_date": None, "snapshot_date_min": None,
                 "n_stale": 0, "age_bdays": None, "level": "empty"}
@@ -185,7 +186,7 @@ def _macro_block(db: Session) -> dict:
     except Exception as e:                     # 判定不能でも朝の表示は止めない
         log.info("マクロ鮮度の判定に失敗（表示は継続）: %s", e)
         return {"level": "unknown", "n_critical_bad": None, "worst": [],
-                "driver": _DRIVER_NIGHTLY, "command": _CMD_MACRO, "url": _RUNBOOK_URL}
+                "driver": _DRIVER_NIGHTLY, "command": _CMD_MACRO, "url": RUNBOOK_URL}
     bad = [e for e in r["stale"] + r["missing"] if e["critical"]]
     return {
         "level": "alert" if bad else "fresh",
@@ -195,7 +196,7 @@ def _macro_block(db: Session) -> dict:
                   for e in bad[:5]],
         "driver": _DRIVER_NIGHTLY,
         "command": _CMD_MACRO,
-        "url": _RUNBOOK_URL,
+        "url": RUNBOOK_URL,
     }
 
 
@@ -225,12 +226,12 @@ def _batch_block(db: Session, get=None, now: Optional[datetime] = None) -> dict:
     except Exception as e:                     # 判定不能でも朝の表示は止めない
         log.info("バッチ鮮度の判定に失敗（表示は継続）: %s", e)
         return {"level": "unknown", "rows": [], "driver": _DRIVER_NIGHTLY,
-                "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
+                "command": _CMD_NIGHTLY, "url": RUNBOOK_URL}
 
     # 整形は `/api/stats`（ダッシュボードの「自動収集」・#563）と共有する。
     # 表示の語彙をルータごとに書くと、片方だけ黙って古くなる。
     return {**summarize(snap, fmt_time=api._utc_to_jst_str),
-            "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": _RUNBOOK_URL}
+            "driver": _DRIVER_NIGHTLY, "command": _CMD_NIGHTLY, "url": RUNBOOK_URL}
 
 
 def _reasons(price: dict, gap: dict, mu: dict, macro: dict, batch: dict) -> list[str]:
@@ -328,7 +329,7 @@ async def morning(
             "tradable": verdict == "fresh",
             "reasons": _reasons(price, gap, mu, macro, batch),
             # #503 以降、次に見るべきはワークフローの実行履歴ではなくローカル運用の手順書。
-            "runbook_url": _RUNBOOK_URL,
+            "runbook_url": RUNBOOK_URL,
         },
         "recommend": rec,
     }

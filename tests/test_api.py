@@ -215,7 +215,20 @@ class TestStatsBatchFootprint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.get("/api/stats")
         assert r.status_code == 200
-        assert r.json()["batch"] == {"level": "unknown", "rows": []}
+        b = r.json()["batch"]
+        assert (b["level"], b["rows"]) == ("unknown", [])
+        # 読めないときこそ復旧手順が要る（#1212）
+        assert b["url"].endswith("docs/DEPLOYMENT.md")
+
+    def test_stats_batch_carries_the_runbook_url(self, db, monkeypatch):
+        """収集画面とホームの「自動収集」が、遅れた行の隣へ復旧手順を出す（#1212）。
+
+        URL は `/api/morning` と同じ定数（書き写すと片方だけ古くなる）。
+        """
+        from routers.morning import RUNBOOK_URL
+        b = self._stats(db, monkeypatch, self._healthy(nightly_last_run=31.0))["batch"]
+        assert b["url"] == RUNBOOK_URL
+        assert b["url"].endswith("docs/DEPLOYMENT.md")
 
 
 class TestStatsEndpoint:
