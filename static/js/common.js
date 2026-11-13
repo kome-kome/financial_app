@@ -260,6 +260,71 @@ function _errDetail(e) {
   }
 })();
 
+// ── 「自動収集」の表（ホーム #563・収集画面 #1212）─────────────────────────────
+// **静的な予定表を持たない。** 以前ホームは「GitHub Actions で毎日 03:00 JST」と緑ドット付きで
+// 固定表示していたが、#503 で駆動がローカルのタスクスケジューラへ移った後もそのまま残り、
+// **トップページの最初に目に入る場所が嘘をついていた**（しかも 03:00 は GHA 時代ですら誤り）。
+// 名目の起動時刻も書かない——実起動は最大 +1h41m ずれる（#551）ので、足跡そのものを出す。
+//
+// 判定と語彙は /api/morning と同じ（batch_freshness.summarize が両方へ配る）。
+// **描く関数はここ 1 か所**（ホームと収集画面が呼ぶ。写すと片方だけ古くなる）。
+// 置き場（#sched-dot・#sched-headline・#sched-grid）と CSS は使う画面のテンプレートが持つ。
+const SCHED_LEVEL = {
+  fresh:   { dot: 'dot-green', head: 'ローカルのタスクスケジューラが毎日実行しています' },
+  alert:   { dot: 'dot-red',   head: '夜間バッチが動いていません' },
+  unknown: { dot: 'dot-amber', head: 'バッチの足跡を読めませんでした' },
+};
+
+// b = /api/stats の batch（{level, rows, url}）。
+// opts.manualLink: 末尾に「収集画面から実行」のタイルを出す（ホームだけ。収集画面は自分自身なので出さない）。
+function renderSchedule(b, opts) {
+  const dot  = document.getElementById('sched-dot');
+  const head = document.getElementById('sched-headline');
+  const grid = document.getElementById('sched-grid');
+  if (!dot || !head || !grid) return;
+
+  const rows  = (b && b.rows) || [];
+  const night = rows.find(r => r.gates_verdict);
+  const level = SCHED_LEVEL[(b && b.level)] ? b.level : 'unknown';
+  const lv    = SCHED_LEVEL[level];
+  dot.className = 'dot ' + lv.dot;
+
+  if (!night) {
+    head.textContent = lv.head;
+    grid.innerHTML = '';
+  } else {
+    const age = night.age_h === null || night.age_h === undefined
+      ? '' : `・${Math.round(night.age_h)}時間前`;
+    head.textContent = night.level === 'fresh'
+      ? `${lv.head}（最終実行 ${night.last_run}${age}）`
+      : `${lv.head}（最終実行 ${night.last_run || '記録なし'}${age}・閾値 ${Math.round(night.stale_h || 0)}時間）`;
+
+    grid.innerHTML = rows.map(r => `
+      <div class="sched-item">
+        <div class="sched-item-label">${esc(r.label)}</div>
+        <div class="sched-item-value"${r.level === 'fresh' ? '' : ' style="color:var(--status-bad-text)"'}>${esc(r.last_run || '未実行')}</div>
+        <div class="sched-item-label">${esc(r.task_name)}</div>
+      </div>`).join('') + ((opts && opts.manualLink) ? `
+      <div class="sched-item">
+        <div class="sched-item-label">財務の手動差分収集（株価は夜間バッチ）</div>
+        <div class="sched-item-value"><a href="/collection" style="color:var(--status-info);text-decoration:none">収集画面から実行</a></div>
+      </div>` : '');
+  }
+
+  // 遅れ・未実行・判定不能のときだけ、復旧手順（docs/DEPLOYMENT.md）への入口を見出しの隣に出す（#1212）。
+  // 「赤いのは分かったが次に何を見ればいいのか」で止まらせない。http(s) 以外の値は出さない。
+  const needsHelp = level !== 'fresh' || rows.some(r => r.level !== 'fresh');
+  if (needsHelp && b && /^https?:\/\//.test(b.url || '')) {
+    const a = document.createElement('a');
+    a.href = b.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '復旧手順を見る';
+    a.style.cssText = 'margin-left:8px;color:var(--status-info);white-space:nowrap';
+    head.appendChild(a);
+  }
+}
+
 // ── 用語の吹き出し（/guide の .term・分析画面の .gloss）────────────────────────────
 // 吹き出し（::after）は用語の左端から右へ伸びる。本文の右端を越える用語だけ .tip-flip で右端揃えに
 // して、切れずに読めるようにする（#888）。外寸は CSS から読む——::after は * の box-sizing を受けない

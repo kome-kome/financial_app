@@ -995,7 +995,7 @@ DB マイグレーションを含む変更はロールバック時の整合性�
 CLAUDE.md からも参照される。新セッションで Claude が運用の実態を把握できるよう、
 **バッチの暦・ローカルと Render の役割分担・外部サービスの制約はここに集約する**。
 `docs/ARCHITECTURE.md` セクション 9（デプロイ構成図）は本ファイルへリンクする形で簡素化済み。
-朝の推奨画面の「復旧手順」はこのファイルを URL で指している（`routers/morning.py` の `_RUNBOOK_URL`）ので、**ファイル名は変えない**。
+朝の推奨画面の「復旧手順」はこのファイルを URL で指している（`routers/morning.py` の `RUNBOOK_URL`）ので、**ファイル名は変えない**。
 完了した経緯は [archive/DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移してある。
 
 ---
