@@ -375,12 +375,13 @@ def _edinet_codelist_at(db):
 def _prediction_snapshots_at(db):
     """源ごとの最新の写しのうち**最も古いもの**（#1005）。1 つの源でも止まれば固着として現れる。
 
-    写しの無い源が 1 つでもあれば None（missing）。源の一覧は `prediction_snapshots.SOURCES`
-    から取る（書き写さない）。
+    写しの無い源が 1 つでもあれば None（missing）。源の一覧は `prediction_snapshots.WATCHED_SOURCES`
+    から取る（書き写さない）。売り専用の候補 S2 は見ない——仕様どおり空の月があり、そこで起票しないため
+    （理由は `WATCHED_SOURCES` の注記・#1208）。
     """
     from sqlalchemy import func, select
     from database import PredictionSnapshot
-    from prediction_snapshots import SOURCES
+    from prediction_snapshots import WATCHED_SOURCES as SOURCES
 
     latest = dict(db.execute(
         select(PredictionSnapshot.source, func.max(PredictionSnapshot.created_at))

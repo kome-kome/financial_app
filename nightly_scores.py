@@ -33,7 +33,7 @@ M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、日
     書けたかを直接クエリで確かめ、書けなければ非ゼロ終了する（μ̂ は巻き戻さない）。
     入れるのは `DIAG_EXTRACTORS` が許可したキーだけ——結果を丸ごと入れない（社別の行・社名）。
   - **本番予測を月に1回写す**（#1005）。全モデルの後に `prediction_snapshots.snapshot_month` が、
-    当月分が無い源（全 mu_source と sector_ols の gap）だけを `prediction_snapshots` へ写す。
+    当月分が無い源（全 mu_source と sector_ols の gap と売り専用の候補 S2）だけを `prediction_snapshots` へ写す。
     空・読めない源は非ゼロ終了として数える（μ̂ は巻き戻さない）。接続先がローカルでなければ写さない。
 """
 from __future__ import annotations

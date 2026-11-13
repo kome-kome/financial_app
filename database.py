@@ -2619,7 +2619,7 @@ class PredictionSnapshot(Base):
     snapshot_date      = Column(String(10), nullable=False)   # 写した日（JST・"YYYY-MM-DD"）
     source             = Column(String(40), nullable=False)   # mu_source（プラグイン名）か "sector_ols"
     edinet_code        = Column(String(10), nullable=False)
-    mu                 = Column(Float)     # 52週先の予測（`*_scores.mu`＝各モデルの mu_raw）。gap の行は NULL
+    mu                 = Column(Float)     # 52週先の予測（`*_scores.mu`＝各モデルの mu_raw）。gap の行は NULL、S2（source=sell_quantile）の行は q20（下側 20% 点・#1208）
     r1_prime           = Column(Float)     # コンフォーマル区間半幅（持つモデルだけ）
     gap_ratio          = Column(Float)     # 乖離率 %（sector_ols の行だけ）
     # 予測が使ったデータの時点。μ̂ は源の代表 as-of（`get_producer_asof`）、gap はその行の決算期末。

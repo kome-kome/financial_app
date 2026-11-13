@@ -8,8 +8,9 @@
 ## 守ること
 
 - **写すだけ**。新しい推定はしない（ADR-0061 決定1）。読む入口は画面・売りランキングと同じ
-  （μ̂ は `read_producer_scores`、gap は各社の最新年度の `financial_metrics.gap_ratio`）——別の読み方を
-  書くと、写した値が画面の値とずれる。M-1 は保存表を持たず読むたびに `macro_beta` から計算するので、
+  （μ̂ は `read_producer_scores`、gap は各社の最新年度の `financial_metrics.gap_ratio`、売り専用の候補 S2 は
+  `get_sell_quantile_scores`・#1208）——別の読み方を書くと、写した値が画面の値とずれる。S2 は M-6 と断面の
+  日付がそろう夜だけ写す（売りの並びが M-6 へ倒す断面は写さない）。M-1 は保存表を持たず読むたびに `macro_beta` から計算するので、
   同じ入口で写すしかない。
 - **源ごとに、当月分が無いときだけ書く**。定常では「月初の最初の夜間」と同じで、その夜に失敗しても
   翌晩に取り直せる。同じ月の 2 回目は書かない（追記のみ・更新も削除もしない）。
@@ -17,6 +18,8 @@
   空を「予測が無い月」として黙って通すと全件失敗が隠れる。社の行があるのに予測の値（μ̂ / gap）が
   全部空のときも同じ——M-1 は当日のマクロ値（`plugins.utils.current_macro_snapshot`）を渡さないと
   r_macro しか返さない（#1005 の初回で 3,839 行が μ̂ 無しで書かれた）。
+  **例外は S2 だけ**（`EMPTY_IS_NORMAL`）: 予測が全社同値の夜は表が空で全置換される（#1204）ので、空は失敗にせず
+  見送って翌晩また試す。watchdog の監視（`WATCHED_SOURCES`）にも入れない。見送りは毎晩 WARNING で残す。
 - **行はローカル正本だけに積む**。接続先がローカルでなければ書かない（本番の断面へ写さない）。
 
 実行（今月分を手で写す。夜間バッチ `nightly_scores.py` も最後に同じ関数を呼ぶ）:
@@ -33,14 +36,28 @@ from typing import Callable, Optional, Sequence
 
 logger = logging.getLogger("prediction_snapshots")
 
-# 写す源。永続化している全ての mu_source と sector_ols の gap。macro_ensemble（M-4）は退役
+# 写す源。永続化している全ての mu_source と sector_ols の gap と売り専用の候補 S2。macro_ensemble（M-4）は退役
 # （#570・ADR-0044）で 2026-08 から更新されないので写さない。
 MU_SOURCES: tuple = ("macro_enet", "macro_gbdt", "macro_dlm", "macro_risk_return")
 GAP_SOURCE = "sector_ols"
-SOURCES: tuple = MU_SOURCES + (GAP_SOURCE,)
+# 売り専用の候補 S2（#1158 で採用・#1202 で M-6 と同じ夜に `sell_quantile_scores` へ保存・#1208 で写す）。値は 52 週先
+# リターンの下側 20% 点（q20）で平均ではないが、行の `mu` 列に入れる（列を足さない＝表の移行が要らない。源の名前で
+# 区別する）。名前は売りの並びのキー `plugins.sell_ranking.SELL_KEY_S2` と同じ——ここは起動時に plugins を読まない
+# ので写して、`tests/test_prediction_snapshots.py` が一致を照合する。
+S2_SOURCE = "sell_quantile"
+S2_BASE = "macro_enet"           # S2 を同じパネルで解く M-6。断面の日付がこれと違う S2 は写さない
+SOURCES: tuple = MU_SOURCES + (GAP_SOURCE, S2_SOURCE)
+# 前進を watchdog が見る源（`batch_freshness._prediction_snapshots_at`）。**S2 は入れない**——S2 の表は予測が全社同値の
+# 夜に空で全置換される（#1204・売りの並びは M-6 へ倒す）ので、空の月は「写しが無い」が正しい状態。入れると、
+# 仕様どおりの空の月に起票される（ユーザー判断・2026-11-14・#1208）。S2 の本当の失敗（M-6 と断面の日付が違う・
+# 読めない）は夜間の非ゼロ終了（`prediction_snapshots:sell_quantile`）で現れる。
+WATCHED_SOURCES: tuple = MU_SOURCES + (GAP_SOURCE,)
+# 空でも失敗にしない源（上と同じ理由）。当月分は無いままなので、翌晩また試す。
+EMPTY_IS_NORMAL: tuple = (S2_SOURCE,)
 
 STATUS_WROTE = "wrote"
 STATUS_EXISTS = "exists"        # 当月分が既にある（書かない・正常）
+STATUS_SKIPPED = "skipped"      # 空でよい源が空（書かない・正常・翌晩また試す）
 STATUS_EMPTY = "empty"          # 源が空（書かない・失敗）
 STATUS_ERROR = "error"          # 読めない・行数が合わない（書かない・失敗）
 STATUS_NOT_LOCAL = "not_local"  # 接続先がローカルでない（書かない・正常）
@@ -103,14 +120,41 @@ def _read_gap(db) -> list:
             for ec, (gap, period_end) in sorted(best.items())]
 
 
+def _read_s2(db) -> list:
+    """S2 の予測（売りの並びと同じ入口 `database.get_sell_quantile_scores`・#1208）。q20 を `mu` に入れて返す。
+
+    表が空なら空を返す（予測が全社同値の夜は空で全置換される・#1204。`snapshot_month` は失敗にせず
+    見送り、翌晩また試す＝`EMPTY_IS_NORMAL`）。断面の日付が M-6 の代表 as-of と
+    違う（S2 だけ古い）か、M-6 の as-of が無いときは写さずに失敗とする——売りの並びはその断面では S2 を使わず
+    M-6 へ倒す（`sell_ranking.choose_sell_keys` と同じ条件）ので、写すと本番が使わなかった並びが残る。
+    """
+    from database import get_producer_asof, get_sell_quantile_scores
+
+    s2 = get_sell_quantile_scores(db)
+    q20 = s2.get("q20") or {}
+    if not q20:
+        return []
+    asof = s2.get("snapshot_date")
+    base = (get_producer_asof(db, S2_BASE) or {}).get("snapshot_date")
+    if not base or asof != base:
+        raise ValueError(f"S2 の断面の日付（{asof}）が M-6 の as-of（{base}）と違う"
+                         "（S2 だけ古い・売りの並びは M-6 へ倒す断面なので写さない）")
+    return [{"edinet_code": ec, "mu": _num(v), "r1_prime": None, "gap_ratio": None, "data_asof": asof}
+            for ec, v in sorted(q20.items())]
+
+
 def value_column(source: str) -> str:
-    """その源の予測の値の列（μ̂ の源は `mu`・sector_ols は `gap_ratio`）。"""
+    """その源の予測の値の列（μ̂ の源と S2 は `mu`・sector_ols は `gap_ratio`）。"""
     return "gap_ratio" if source == GAP_SOURCE else "mu"
 
 
 def read_source(db, source: str) -> list:
     """源 1 つの予測を `[{edinet_code, mu, r1_prime, gap_ratio, data_asof}, ...]` で返す（書かない）。"""
-    return _read_gap(db) if source == GAP_SOURCE else _read_mu(db, source)
+    if source == GAP_SOURCE:
+        return _read_gap(db)
+    if source == S2_SOURCE:
+        return _read_s2(db)
+    return _read_mu(db, source)
 
 
 def _has_month(db, source: str, month: str) -> bool:
@@ -155,7 +199,12 @@ def snapshot_month(db, *, today: date, code_version: Optional[str], preprocess_v
                 continue
             rows = reader(db, source)
             if not rows:
-                out[source] = (STATUS_EMPTY, "源に予測が無い（読み出しの失敗かもしれない）")
+                if source in EMPTY_IS_NORMAL:
+                    # 黙って飛ばさない: 空が続くと、その月の S2 は永久に欠ける。毎晩ログに残す
+                    logger.warning("%s: 源が空なので今夜は写さない（%s 分は未取得のまま・翌晩また試す）", source, month)
+                    out[source] = (STATUS_SKIPPED, f"源が空（{month} 分は未取得のまま・翌晩また試す）")
+                else:
+                    out[source] = (STATUS_EMPTY, "源に予測が無い（読み出しの失敗かもしれない）")
                 continue
             # 社の行はあるのに予測の値が全部空＝読み方の誤り（M-1 にマクロ値を渡し忘れる等）。書かない
             col = value_column(source)
@@ -196,7 +245,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     with SessionLocal() as db:
         if args.dry_run:
             for source in SOURCES:
-                rows = read_source(db, source)
+                try:
+                    rows = read_source(db, source)
+                except Exception as e:   # noqa: BLE001 — 1 つの源が読めなくても残りの行数は出す
+                    print(f"{source}: 読めない（{type(e).__name__}: {e}）")
+                    continue
                 asof = sorted({r["data_asof"] for r in rows if r["data_asof"]})
                 print(f"{source}: {len(rows)} 行 data_asof {asof[:1]}〜{asof[-1:]}")
             return 0
