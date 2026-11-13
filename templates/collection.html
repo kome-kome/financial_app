@@ -167,6 +167,11 @@ tr:hover td{background:var(--border-subtle)}
   ⚠️ <strong>閲覧専用</strong>: この環境は Supabase の断面を見ているため、収集・更新は止めています。ローカル PC（正本）から実行してください。スクリーニング・分析・閲覧は通常どおり利用できます。
 </div>
 
+<!-- 失敗の知らせ。ジョブ実行ログ（#log-box）は「財務データ収集」タブの中にあり、他のタブを開いている間は見えない。
+     log() が error をここへも出す（どのタブにも属さないので常に見える・タブを切り替えると消える）。 -->
+<div id="tab-error" class="hidden" role="alert"
+     style="background:var(--status-bad-bg);border:1px solid var(--status-bad);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;color:var(--status-bad-text);overflow-wrap:anywhere"></div>
+
 <!-- 収集管理 -->
 <div id="tab-collect">
   <!-- サマリーカード -->
@@ -505,7 +510,6 @@ tr:hover td{background:var(--border-subtle)}
           <div class="log-box" id="market-log-box" role="log" aria-live="polite" aria-label="市場データ更新ログ"></div>
         </div>
     </div>
-  </div>
 
   <!-- マクロデータ（為替・金利・指数・コモディティ） -->
 
@@ -730,6 +734,6 @@ tr:hover td{background:var(--border-subtle)}
   </form>
 </dialog>
 <script src="/static/js/common.js?v=20261112a"></script>
-<script src="/static/js/collection.js?v=20261112a"></script>
+<script src="/static/js/collection.js?v=20261113a"></script>
 </body>
 </html>
