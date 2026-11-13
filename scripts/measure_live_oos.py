@@ -19,11 +19,12 @@ OOF の比較は、設定を選んだ期と同じ過去の期で採点してい�
   （値上がりだけ・ADR-0073）。足の本数で数えるのは学習の答え（`closes[snap_idx + HORIZON_WEEKS]`）と同じ。
   起点の足が写した日より `ENDED_MARGIN_DAYS` 以上前の社は答えを作らない
 - **成熟**: 写した日 + 週数が、計測した日と全社の最新の足の両方以前の写しだけを採点する
-- **主審**: 52 週・起点は写した日・上場廃止した社は外す。M-6 と M-2 の共通域で `oof_backtest` の上位10社超過の
+- **主審**: 52 週・起点は写した日・上場廃止した社（`ended`）は最後の正の終値で手仕舞った答えで足す（#1195・
+  ADR-0075。OOF の比較と学習は足さない）。M-6 と M-2 の共通域で `oof_backtest` の上位10社超過の
   写し別系列を取り、両方に値がある写しを日付順に並べた**最初の `N_JUDGE` 本だけ**で
   `paired_ic_significance`（平均ブロック長 `AVG_BLOCK`）。足りなければ判定しない（`accumulating`）
-- **参考**: 各源自身の母集団の指標、上位層の売り側spread（`in_layer_short_side`）、上場廃止した社を最後の終値で
-  足した版、起点を `data_asof` にした版、13 週の版
+- **参考**: 各源自身の母集団の指標、上位層の売り側spread（`in_layer_short_side`）、上場廃止した社を外した版
+  （`delisted_excluded`）、起点を `data_asof` にした版、13 週の版（`data_asof` と 13 週の版も上場廃止した社を足す）
 
 **DB へは書かない**（書く関数を呼ばない）。週次株価はローカルのキャッシュ（`.weekly_cache/`）を通して読む。
 
@@ -79,12 +80,13 @@ AVG_BLOCK = LABEL_HORIZON_MONTHS      # 月次の写しの 52 週の答えは隣
 START_SNAPSHOT = "snapshot"           # 起点＝写した日（主審）
 START_ASOF = "data_asof"              # 起点＝予測が使ったデータの時点（参考・μ̂ の源だけ）
 MAIN = "main"
-# (名前, 週数, 起点, 上場廃止した社を最後の終値で足すか)
+EXCLUDED = "delisted_excluded"
+# (名前, 週数, 起点, 上場廃止した社を最後の終値で足すか)。主審は足す（#1195・ADR-0075）。外した版は参考
 VARIANTS = (
-    (MAIN, MAIN_WEEKS, START_SNAPSHOT, False),
-    ("delisted_included", MAIN_WEEKS, START_SNAPSHOT, True),
-    ("data_asof", MAIN_WEEKS, START_ASOF, False),
-    ("check_13w", CHECK_WEEKS, START_SNAPSHOT, False),
+    (MAIN, MAIN_WEEKS, START_SNAPSHOT, True),
+    (EXCLUDED, MAIN_WEEKS, START_SNAPSHOT, False),
+    ("data_asof", MAIN_WEEKS, START_ASOF, True),
+    ("check_13w", CHECK_WEEKS, START_SNAPSHOT, True),
 )
 
 # 答えの内訳
@@ -428,6 +430,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "caveats": [
             "M-2 は写した時点の本番の設定（探索の周回が反映した設定）。写した後の答えで採点するので選択の楽観は入らない",
             "答えの起点は写した日（同じ写しの同じ社はどの源でも同じ答え）。data_asof 起点の版は参考",
+            "上場廃止した社は最後の正の終値で手仕舞った答えで主審に入れる（#1195・ADR-0075）。外した版は delisted_excluded",
             "判定は共通の成熟した写しの日付順の最初の 36 本だけで出す。それより前の実走は accumulating",
         ],
         "rule": {"pair": [_short(s) for s in PAIR], "alpha": ALPHA, "top_k": TOP_K, "n_judge": N_JUDGE,
