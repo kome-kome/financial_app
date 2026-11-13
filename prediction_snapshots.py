@@ -18,6 +18,8 @@
   空を「予測が無い月」として黙って通すと全件失敗が隠れる。社の行があるのに予測の値（μ̂ / gap）が
   全部空のときも同じ——M-1 は当日のマクロ値（`plugins.utils.current_macro_snapshot`）を渡さないと
   r_macro しか返さない（#1005 の初回で 3,839 行が μ̂ 無しで書かれた）。
+  **例外は S2 だけ**（`EMPTY_IS_NORMAL`）: 予測が全社同値の夜は表が空で全置換される（#1204）ので、空は失敗にせず
+  見送って翌晩また試す。watchdog の監視（`WATCHED_SOURCES`）にも入れない。見送りは毎晩 WARNING で残す。
 - **行はローカル正本だけに積む**。接続先がローカルでなければ書かない（本番の断面へ写さない）。
 
 実行（今月分を手で写す。夜間バッチ `nightly_scores.py` も最後に同じ関数を呼ぶ）:
@@ -45,9 +47,17 @@ GAP_SOURCE = "sector_ols"
 S2_SOURCE = "sell_quantile"
 S2_BASE = "macro_enet"           # S2 を同じパネルで解く M-6。断面の日付がこれと違う S2 は写さない
 SOURCES: tuple = MU_SOURCES + (GAP_SOURCE, S2_SOURCE)
+# 前進を watchdog が見る源（`batch_freshness._prediction_snapshots_at`）。**S2 は入れない**——S2 の表は予測が全社同値の
+# 夜に空で全置換される（#1204・売りの並びは M-6 へ倒す）ので、空の月は「写しが無い」が正しい状態。入れると、
+# 仕様どおりの空の月に起票される（ユーザー判断・2026-11-14・#1208）。S2 の本当の失敗（M-6 と断面の日付が違う・
+# 読めない）は夜間の非ゼロ終了（`prediction_snapshots:sell_quantile`）で現れる。
+WATCHED_SOURCES: tuple = MU_SOURCES + (GAP_SOURCE,)
+# 空でも失敗にしない源（上と同じ理由）。当月分は無いままなので、翌晩また試す。
+EMPTY_IS_NORMAL: tuple = (S2_SOURCE,)
 
 STATUS_WROTE = "wrote"
 STATUS_EXISTS = "exists"        # 当月分が既にある（書かない・正常）
+STATUS_SKIPPED = "skipped"      # 空でよい源が空（書かない・正常・翌晩また試す）
 STATUS_EMPTY = "empty"          # 源が空（書かない・失敗）
 STATUS_ERROR = "error"          # 読めない・行数が合わない（書かない・失敗）
 STATUS_NOT_LOCAL = "not_local"  # 接続先がローカルでない（書かない・正常）
@@ -113,7 +123,8 @@ def _read_gap(db) -> list:
 def _read_s2(db) -> list:
     """S2 の予測（売りの並びと同じ入口 `database.get_sell_quantile_scores`・#1208）。q20 を `mu` に入れて返す。
 
-    表が空なら空を返す（`snapshot_month` が失敗として数え、翌晩に取り直す）。断面の日付が M-6 の代表 as-of と
+    表が空なら空を返す（予測が全社同値の夜は空で全置換される・#1204。`snapshot_month` は失敗にせず
+    見送り、翌晩また試す＝`EMPTY_IS_NORMAL`）。断面の日付が M-6 の代表 as-of と
     違う（S2 だけ古い）か、M-6 の as-of が無いときは写さずに失敗とする——売りの並びはその断面では S2 を使わず
     M-6 へ倒す（`sell_ranking.choose_sell_keys` と同じ条件）ので、写すと本番が使わなかった並びが残る。
     """
@@ -188,7 +199,12 @@ def snapshot_month(db, *, today: date, code_version: Optional[str], preprocess_v
                 continue
             rows = reader(db, source)
             if not rows:
-                out[source] = (STATUS_EMPTY, "源に予測が無い（読み出しの失敗かもしれない）")
+                if source in EMPTY_IS_NORMAL:
+                    # 黙って飛ばさない: 空が続くと、その月の S2 は永久に欠ける。毎晩ログに残す
+                    logger.warning("%s: 源が空なので今夜は写さない（%s 分は未取得のまま・翌晩また試す）", source, month)
+                    out[source] = (STATUS_SKIPPED, f"源が空（{month} 分は未取得のまま・翌晩また試す）")
+                else:
+                    out[source] = (STATUS_EMPTY, "源に予測が無い（読み出しの失敗かもしれない）")
                 continue
             # 社の行はあるのに予測の値が全部空＝読み方の誤り（M-1 にマクロ値を渡し忘れる等）。書かない
             col = value_column(source)
@@ -229,7 +245,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     with SessionLocal() as db:
         if args.dry_run:
             for source in SOURCES:
-                rows = read_source(db, source)
+                try:
+                    rows = read_source(db, source)
+                except Exception as e:   # noqa: BLE001 — 1 つの源が読めなくても残りの行数は出す
+                    print(f"{source}: 読めない（{type(e).__name__}: {e}）")
+                    continue
                 asof = sorted({r["data_asof"] for r in rows if r["data_asof"]})
                 print(f"{source}: {len(rows)} 行 data_asof {asof[:1]}〜{asof[-1:]}")
             return 0

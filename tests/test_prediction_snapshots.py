@@ -193,13 +193,30 @@ class TestReadS2:
         assert got == [("E0001", -0.21, None, None, "2026-10-20"), ("E0002", -0.35, None, None, "2026-10-20")]
         assert database.get_sell_quantile_scores(db)["q20"] == {"E0001": -0.21, "E0002": -0.35}
 
-    def test_empty_table_is_a_failure(self, db):
+    def test_empty_table_is_skipped_not_failed(self, db):
+        """予測が全社同値の夜は S2 の表が空（#1204）。失敗にせず見送り、夜間を非ゼロ終了にしない。"""
         self._m6(db)
         self._s2(db, rows=[])
         result = run(db, sources=(PS.S2_SOURCE,), reader=None)
-        assert result[PS.S2_SOURCE][0] == PS.STATUS_EMPTY
-        assert PS.failed_sources(result) == [PS.S2_SOURCE]
+        assert result[PS.S2_SOURCE][0] == PS.STATUS_SKIPPED
+        assert PS.failed_sources(result) == []
+        assert nightly_scores.snapshot_failed_labels(result) == []
         assert stored(db, PS.S2_SOURCE) == []
+
+    def test_skipped_month_is_retried_the_next_night(self, db):
+        """見送った月は当月分が無いままなので、S2 が出た夜に写る。"""
+        self._m6(db)
+        self._s2(db, rows=[])
+        assert run(db, sources=(PS.S2_SOURCE,), reader=None)[PS.S2_SOURCE][0] == PS.STATUS_SKIPPED
+        self._s2(db)
+        assert run(db, sources=(PS.S2_SOURCE,), reader=None)[PS.S2_SOURCE][0] == PS.STATUS_WROTE
+        assert len(stored(db, PS.S2_SOURCE)) == 2
+
+    def test_other_empty_sources_still_fail(self, db):
+        """空を見送るのは S2 だけ。μ̂ の源が空なのは読み出しの失敗かもしれないので、失敗のまま。"""
+        result = run(db, sources=("macro_enet",), reader=None)
+        assert result["macro_enet"][0] == PS.STATUS_EMPTY
+        assert PS.EMPTY_IS_NORMAL == (PS.S2_SOURCE,)
 
     def test_stale_s2_is_not_written_and_other_sources_are(self, db):
         """S2 だけ古い断面は売りの並びが M-6 へ倒すので写さない。M-6 は写す。"""
@@ -294,6 +311,16 @@ class TestFreshness:
         for i, s in enumerate(PS.SOURCES):
             self._add(db, s, datetime(2026, 10, 1 + i))
         assert bf._prediction_snapshots_at(db) == datetime(2026, 10, 1)
+
+    def test_s2_is_not_watched(self, db):
+        """S2 は仕様どおり空の月がある（#1204）。写しが無くても古くても、監視は鳴らさない（#1208）。"""
+        assert PS.S2_SOURCE not in PS.WATCHED_SOURCES
+        assert set(PS.WATCHED_SOURCES) == set(PS.SOURCES) - {PS.S2_SOURCE}
+        for s in PS.WATCHED_SOURCES:
+            self._add(db, s, datetime(2026, 10, 21))
+        assert bf._prediction_snapshots_at(db) == datetime(2026, 10, 21)      # S2 の写しが無い
+        self._add(db, PS.S2_SOURCE, datetime(2026, 7, 1))
+        assert bf._prediction_snapshots_at(db) == datetime(2026, 10, 21)      # S2 だけ古い
 
     def test_registered_as_a_monthly_producer(self):
         p = next(p for p in bf.PRODUCERS if p.read is bf._prediction_snapshots_at)
