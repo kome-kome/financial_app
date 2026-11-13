@@ -537,7 +537,11 @@ async function searchNormCompanies(){
       const o=document.createElement('option'); o.value=c.edinet_code;
       o.textContent=`${c.sec_code||''} ${c.name}`; sel.appendChild(o);
     });
-  }catch(e){ log('企業検索失敗: '+e.message,'error') }
+  }catch(e){
+    // 「該当なし」と区別できるよう、候補の欄そのものにも失敗を出す。
+    sel.innerHTML='<option value="">検索に失敗しました（もう一度入力してください）</option>';
+    log('企業検索失敗: '+e.message,'error');
+  }
 }
 
 // ── 株価履歴収集 ────────────────────────────────────────────────────
@@ -803,13 +807,19 @@ async function runScreen(){
     include_delisted: document.getElementById('sc-include-delisted').checked,
     limit: 500
   };
+  clearTabError();
   try{
     const d = await apiFetch('/api/screen',{method:'POST',body:JSON.stringify(body)});
+    if(!d) return;
     screenResults = d.results;
     document.getElementById('screen-count').textContent = d.count+'社';
     renderScreenResults();
     log(`スクリーニング完了: ${d.count}社ヒット`,'success');
-  }catch(e){ log('スクリーニング失敗: '+e.message,'error') }
+  }catch(e){
+    // 件数を前回のまま（初回は「0社」）残すと「条件に合う社が無い」と読める。取れなかったことを件数の札にも出す。
+    document.getElementById('screen-count').textContent = '取得失敗';
+    log('スクリーニング失敗: '+e.message+'。条件を確かめて、もう一度実行してください','error');
+  }
 }
 
 function renderScreenResults(){
@@ -962,6 +972,7 @@ function fmtYen(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toLocaleStr
 function fmtX(v){ return (v==null || isNaN(v)) ? '—' : Number(v).toFixed(2) + '倍'; }
 const _TABS = ['collect','stockmarket','dataview','screen'];
 function showTab(t){
+  clearTabError();
   _TABS.forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
   document.querySelectorAll('.nav-btn[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   if(t==='dataview') loadDB();
@@ -1077,6 +1088,18 @@ function log(msg,type='info'){
   const ts=new Date().toTimeString().slice(0,8);
   const el=document.createElement('div'); el.className='log-entry '+type;
   el.textContent=`[${ts}] ${msg}`; box.appendChild(el); box.scrollTop=box.scrollHeight;
+  // ログの箱は「財務データ収集」タブの中にある。他のタブを開いている間の失敗は見えず、
+  // スクリーニングの失敗が「0社」に見えていた。失敗だけは、どのタブからも見える欄へも出す。
+  if(type==='error' && document.getElementById('tab-collect').classList.contains('hidden')) showTabError(msg);
+}
+function showTabError(msg){
+  const el=document.getElementById('tab-error');
+  el.textContent=msg+'（詳しい経過は「財務データ収集」タブのジョブ実行ログにあります）';
+  el.classList.remove('hidden');
+}
+function clearTabError(){
+  const el=document.getElementById('tab-error');
+  el.textContent=''; el.classList.add('hidden');
 }
 function clearLog(){ document.getElementById('log-box').innerHTML=''; }
 
