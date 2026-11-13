@@ -169,10 +169,67 @@ class TestReadSource:
             ("E0001", 12.5, "2026-03-31", None), ("E0002", -3.0, "2025-12-31", None)]
 
 
+class TestReadS2:
+    """売り専用の候補 S2（#1208）。売りの並びと同じ入口で読み、M-6 と断面の日付がそろう夜だけ写す。"""
+
+    def _m6(self, db, snapshot_date="2026-10-20"):
+        database.replace_macro_enet_scores(
+            db, [{"edinet_code": "E0001", "mu": 0.12, "r1_prime": 0.3},
+                 {"edinet_code": "E0002", "mu": -0.05, "r1_prime": None}],
+            snapshot_date=snapshot_date, snapshot_date_min="2026-10-13", n_stale=1)
+
+    def _s2(self, db, rows=None, snapshot_date="2026-10-20"):
+        rows = [{"edinet_code": "E0001", "q20": -0.21}, {"edinet_code": "E0002", "q20": -0.35}] \
+            if rows is None else rows
+        database.replace_sell_quantile_scores(db, rows, snapshot_date=snapshot_date,
+                                              snapshot_date_min="2026-10-13", n_stale=1)
+
+    def test_q20_is_written_to_mu_with_the_s2_asof(self, db):
+        self._m6(db)
+        self._s2(db)
+        result = run(db, sources=(PS.S2_SOURCE,), reader=None)
+        assert result[PS.S2_SOURCE][0] == PS.STATUS_WROTE
+        got = [(r.edinet_code, r.mu, r.r1_prime, r.gap_ratio, r.data_asof) for r in stored(db, PS.S2_SOURCE)]
+        assert got == [("E0001", -0.21, None, None, "2026-10-20"), ("E0002", -0.35, None, None, "2026-10-20")]
+        assert database.get_sell_quantile_scores(db)["q20"] == {"E0001": -0.21, "E0002": -0.35}
+
+    def test_empty_table_is_a_failure(self, db):
+        self._m6(db)
+        self._s2(db, rows=[])
+        result = run(db, sources=(PS.S2_SOURCE,), reader=None)
+        assert result[PS.S2_SOURCE][0] == PS.STATUS_EMPTY
+        assert PS.failed_sources(result) == [PS.S2_SOURCE]
+        assert stored(db, PS.S2_SOURCE) == []
+
+    def test_stale_s2_is_not_written_and_other_sources_are(self, db):
+        """S2 だけ古い断面は売りの並びが M-6 へ倒すので写さない。M-6 は写す。"""
+        self._m6(db, "2026-10-20")
+        self._s2(db, snapshot_date="2026-10-19")
+        result = run(db, sources=("macro_enet", PS.S2_SOURCE), reader=None)
+        assert result["macro_enet"][0] == PS.STATUS_WROTE
+        assert result[PS.S2_SOURCE][0] == PS.STATUS_ERROR
+        assert "2026-10-19" in result[PS.S2_SOURCE][1] and "2026-10-20" in result[PS.S2_SOURCE][1]
+        assert stored(db, PS.S2_SOURCE) == [] and len(stored(db, "macro_enet")) == 2
+
+    def test_missing_m6_asof_is_a_failure(self, db):
+        self._s2(db)
+        result = run(db, sources=(PS.S2_SOURCE,), reader=None)
+        assert result[PS.S2_SOURCE][0] == PS.STATUS_ERROR
+        assert stored(db, PS.S2_SOURCE) == []
+
+    def test_name_matches_the_sell_ranking_key(self):
+        from plugins.sell_ranking import MU_SOURCE, SELL_KEY_S2
+
+        assert PS.S2_SOURCE == SELL_KEY_S2
+        assert PS.S2_BASE == MU_SOURCE
+        assert PS.value_column(PS.S2_SOURCE) == "mu"
+
+
 def test_sources_cover_every_live_mu_source():
-    """写す源は永続化している全ての mu_source と sector_ols。退役した M-4 は入れない。"""
+    """写す源は永続化している全ての mu_source と sector_ols と S2。退役した M-4 は入れない。"""
     assert set(PS.MU_SOURCES) == set(database._PRODUCER_SCORE_MODELS) - {"macro_ensemble"} | {"macro_risk_return"}
     assert PS.GAP_SOURCE in PS.SOURCES
+    assert PS.S2_SOURCE in PS.SOURCES and PS.S2_SOURCE not in PS.MU_SOURCES
 
 
 class TestCurrentMacroSnapshot:

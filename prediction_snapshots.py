@@ -8,8 +8,9 @@
 ## 守ること
 
 - **写すだけ**。新しい推定はしない（ADR-0061 決定1）。読む入口は画面・売りランキングと同じ
-  （μ̂ は `read_producer_scores`、gap は各社の最新年度の `financial_metrics.gap_ratio`）——別の読み方を
-  書くと、写した値が画面の値とずれる。M-1 は保存表を持たず読むたびに `macro_beta` から計算するので、
+  （μ̂ は `read_producer_scores`、gap は各社の最新年度の `financial_metrics.gap_ratio`、売り専用の候補 S2 は
+  `get_sell_quantile_scores`・#1208）——別の読み方を書くと、写した値が画面の値とずれる。S2 は M-6 と断面の
+  日付がそろう夜だけ写す（売りの並びが M-6 へ倒す断面は写さない）。M-1 は保存表を持たず読むたびに `macro_beta` から計算するので、
   同じ入口で写すしかない。
 - **源ごとに、当月分が無いときだけ書く**。定常では「月初の最初の夜間」と同じで、その夜に失敗しても
   翌晩に取り直せる。同じ月の 2 回目は書かない（追記のみ・更新も削除もしない）。
@@ -33,11 +34,17 @@ from typing import Callable, Optional, Sequence
 
 logger = logging.getLogger("prediction_snapshots")
 
-# 写す源。永続化している全ての mu_source と sector_ols の gap。macro_ensemble（M-4）は退役
+# 写す源。永続化している全ての mu_source と sector_ols の gap と売り専用の候補 S2。macro_ensemble（M-4）は退役
 # （#570・ADR-0044）で 2026-08 から更新されないので写さない。
 MU_SOURCES: tuple = ("macro_enet", "macro_gbdt", "macro_dlm", "macro_risk_return")
 GAP_SOURCE = "sector_ols"
-SOURCES: tuple = MU_SOURCES + (GAP_SOURCE,)
+# 売り専用の候補 S2（#1158 で採用・#1202 で M-6 と同じ夜に `sell_quantile_scores` へ保存・#1208 で写す）。値は 52 週先
+# リターンの下側 20% 点（q20）で平均ではないが、行の `mu` 列に入れる（列を足さない＝表の移行が要らない。源の名前で
+# 区別する）。名前は売りの並びのキー `plugins.sell_ranking.SELL_KEY_S2` と同じ——ここは起動時に plugins を読まない
+# ので写して、`tests/test_prediction_snapshots.py` が一致を照合する。
+S2_SOURCE = "sell_quantile"
+S2_BASE = "macro_enet"           # S2 を同じパネルで解く M-6。断面の日付がこれと違う S2 は写さない
+SOURCES: tuple = MU_SOURCES + (GAP_SOURCE, S2_SOURCE)
 
 STATUS_WROTE = "wrote"
 STATUS_EXISTS = "exists"        # 当月分が既にある（書かない・正常）
@@ -103,14 +110,40 @@ def _read_gap(db) -> list:
             for ec, (gap, period_end) in sorted(best.items())]
 
 
+def _read_s2(db) -> list:
+    """S2 の予測（売りの並びと同じ入口 `database.get_sell_quantile_scores`・#1208）。q20 を `mu` に入れて返す。
+
+    表が空なら空を返す（`snapshot_month` が失敗として数え、翌晩に取り直す）。断面の日付が M-6 の代表 as-of と
+    違う（S2 だけ古い）か、M-6 の as-of が無いときは写さずに失敗とする——売りの並びはその断面では S2 を使わず
+    M-6 へ倒す（`sell_ranking.choose_sell_keys` と同じ条件）ので、写すと本番が使わなかった並びが残る。
+    """
+    from database import get_producer_asof, get_sell_quantile_scores
+
+    s2 = get_sell_quantile_scores(db)
+    q20 = s2.get("q20") or {}
+    if not q20:
+        return []
+    asof = s2.get("snapshot_date")
+    base = (get_producer_asof(db, S2_BASE) or {}).get("snapshot_date")
+    if not base or asof != base:
+        raise ValueError(f"S2 の断面の日付（{asof}）が M-6 の as-of（{base}）と違う"
+                         "（S2 だけ古い・売りの並びは M-6 へ倒す断面なので写さない）")
+    return [{"edinet_code": ec, "mu": _num(v), "r1_prime": None, "gap_ratio": None, "data_asof": asof}
+            for ec, v in sorted(q20.items())]
+
+
 def value_column(source: str) -> str:
-    """その源の予測の値の列（μ̂ の源は `mu`・sector_ols は `gap_ratio`）。"""
+    """その源の予測の値の列（μ̂ の源と S2 は `mu`・sector_ols は `gap_ratio`）。"""
     return "gap_ratio" if source == GAP_SOURCE else "mu"
 
 
 def read_source(db, source: str) -> list:
     """源 1 つの予測を `[{edinet_code, mu, r1_prime, gap_ratio, data_asof}, ...]` で返す（書かない）。"""
-    return _read_gap(db) if source == GAP_SOURCE else _read_mu(db, source)
+    if source == GAP_SOURCE:
+        return _read_gap(db)
+    if source == S2_SOURCE:
+        return _read_s2(db)
+    return _read_mu(db, source)
 
 
 def _has_month(db, source: str, month: str) -> bool:

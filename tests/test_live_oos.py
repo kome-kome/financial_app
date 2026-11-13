@@ -193,6 +193,18 @@ class TestAnswersAndDomain:
         assert "sector_ols" not in sell["by_source"]
         assert rep["variants"]["data_asof"]["sell"] is None
 
+    def test_s2_snapshots_join_the_sell_reference(self):
+        """写しに売り専用の候補 S2 の源が足されると（#1208）、売りの参考に並ぶ。値は `mu` 列の q20。"""
+        import prediction_snapshots as PS
+
+        s2 = [(sd, PS.S2_SOURCE, _code(k), _growth(k) - 0.3, None, "2026-10-16")
+              for sd in (SD1, SD2) for k in range(N_CO)]
+        rep = X.run(_rows() + s2, _prices(), "2028-01-01")
+        by_source = rep["variants"][X.MAIN]["sell"]["by_source"]
+        assert by_source[PS.S2_SOURCE]["n_periods"] == 1
+        assert by_source[PS.S2_SOURCE]["mean"] > 0
+        assert rep["snapshots"][PS.S2_SOURCE][SD1]["n"] == N_CO
+
 
 # ── 判定 ────────────────────────────────────────────────────────────────────────
 
