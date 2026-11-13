@@ -1076,7 +1076,7 @@ stateDiagram-v2
 
     state Morning {
         [*] --> MorningMain
-        MorningMain : ☀️ 朝の推奨\nmorning.html\n・発注してよいかの総合判定（tradable / reasons）\n・鮮度カード（夜間バッチ/株価/乖離/μ/マクロ・狭い幅では1行要約へ畳む）\n・買い推奨ランキング（永続化済みスコアの読み出しのみ）
+        MorningMain : ☀️ 朝の推奨\nmorning.html\n・発注してよいかの総合判定（tradable / reasons）\n・鮮度カード（夜間バッチ/株価/乖離/μ/マクロ・判定が問題なしなら1行要約へ畳み、注意・警告なら開く）\n・買い推奨ランキング（永続化済みスコアの読み出しのみ）
     }
 
     state Collection {
