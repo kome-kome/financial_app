@@ -515,6 +515,201 @@ async function runSellRanking() {
   }
 }
 
+// ── 売買の記録と運用成績（#1222）──────────────────────────────────────────────
+// 計算はすべてサーバー（portfolio_ledger.py）。画面は入力を送り、返ってきた値を並べるだけ。
+// 記録は追記のみで、取消は行を消さずに取消の行を足す（消えたように見せず「取消済み」と出す）。
+const LEDGER_SIDE_LABEL = {buy: '買い', sell: '売り', split: '分割・併合', void: '取消'};
+let pfSummary = null;
+let _pfLoaded = false;
+
+function _pfPct(x, digits = 1) {
+  if (x == null) return '-';
+  const v = x * 100;
+  return `<span class="${v >= 0 ? 'gap-positive' : 'gap-negative'}">${v >= 0 ? '+' : ''}${v.toFixed(digits)}%</span>`;
+}
+function _pfYen(x, signed) {
+  if (x == null) return '-';
+  const s = `${signed && x > 0 ? '+' : ''}${Math.round(x).toLocaleString()}円`;
+  return signed ? `<span class="${x >= 0 ? 'gap-positive' : 'gap-negative'}">${s}</span>` : s;
+}
+const _pfNum = (x, digits = 2) =>
+  x == null ? '-' : Number(x).toLocaleString('ja-JP', {maximumFractionDigits: digits});
+
+// 売買の別で、要る欄だけを出す（分割は比率だけ・買いと売りは単価と株数と手数料）。
+function onLedgerSideChange() {
+  const split = document.getElementById('ledger-side').value === 'split';
+  document.querySelectorAll('.ledger-trade-field').forEach(el => el.classList.toggle('hidden', split));
+  document.querySelectorAll('.ledger-split-field').forEach(el => el.classList.toggle('hidden', !split));
+  document.getElementById('ledger-date-label').textContent = split ? '効力が生じた日' : '約定日';
+}
+
+// タブを開いたときに 1 回だけ読む（記録・取消のたびに読み直す）。
+function loadPortfolioOnce() {
+  if (_pfLoaded) return;
+  _pfLoaded = true;
+  const d = document.getElementById('ledger-date');
+  if (d && !d.value) {
+    const now = new Date();   // 端末の日付（toISOString は UTC で、朝のうちは前日になる）
+    d.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+  loadPortfolio();
+}
+
+async function loadPortfolio() {
+  try {
+    const [ledger, summary] = await Promise.all([
+      apiFetch('/api/portfolio/ledger'), apiFetch('/api/portfolio/summary')]);
+    renderLedger(ledger.entries || []);
+    renderPortfolio(summary);
+  } catch (e) {
+    _pfLoaded = false;   // 次にタブを開いたときに読み直す
+    showNotif('売買の記録を読めませんでした: ' + _errDetail(e));
+  }
+}
+
+function renderLedger(entries) {
+  const live = entries.filter(e => e.side !== 'void' && !e.voided).length;
+  document.getElementById('ledger-list-summary').textContent =
+    `記録の一覧（${live}件${entries.length > live ? `・取消を含めて ${entries.length}件` : ''}）`;
+  const muted = 'color:var(--text-muted)';
+  document.getElementById('ledger-tbody').innerHTML = entries.map(e => {
+    const dead = e.voided || e.side === 'void';
+    const style = dead ? ` style="${muted}"` : '';
+    const detail = e.side === 'split'
+      ? `<td colspan="3"${style}>1 株 → ${_pfNum(e.split_ratio, 4)} 株</td>`
+      : e.side === 'void'
+        ? `<td colspan="3"${style}>${Number(e.voids_id)} 番の行を取消</td>`
+        : `<td style="text-align:right${dead ? ';' + muted : ''}">${_pfNum(e.price)}</td>`
+          + `<td style="text-align:right${dead ? ';' + muted : ''}">${_pfNum(e.quantity, 4)}</td>`
+          + `<td style="text-align:right${dead ? ';' + muted : ''}">${e.fee ? _pfNum(e.fee, 0) : '-'}</td>`;
+    const action = e.side === 'void' ? ''
+      : e.voided ? '<span class="tag tag-amber">取消済み</span>'
+      : `<button type="button" class="btn btn-secondary btn-sm" data-click="voidLedgerEntry" data-arg="${Number(e.id)}"`
+        + ` aria-label="${Number(e.id)} 番の行を取消">取消</button>`;
+    return `<tr>
+      <td${style}>${esc(e.trade_date || '-')}</td>
+      <td${style}>${esc(LEDGER_SIDE_LABEL[e.side] || e.side)}</td>
+      <td${style}>${esc(e.sec_code || '-')}</td>
+      ${detail}
+      <td${style}>${esc(e.memo || '')}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="8" style="${muted}">記録はまだありません</td></tr>`;
+}
+
+function renderPortfolio(s) {
+  pfSummary = s;
+  const has = (s.n_entries || 0) > 0;
+  document.getElementById('pf-empty').classList.toggle('hidden', has);
+  document.getElementById('pf-body').classList.toggle('hidden', !has);
+  document.getElementById('btn-ledger-fill').classList.toggle('hidden', !(s.holdings || []).length);
+  if (!has) return;
+
+  const notes = [];
+  (s.warnings || []).forEach(w => notes.push(`<span class="text-amber">⚠ ${esc(w)}</span>`));
+  (s.problems || []).forEach(p => notes.push(`<span class="text-amber">⚠ ${esc(p)}</span>`));
+  const p = s.performance || {};
+  if (p.bench_missing_weeks)
+    notes.push(`<span class="text-amber">⚠ TOPIX の値が無い週が ${Number(p.bench_missing_weeks)} 週あります`
+      + '（その週の TOPIX は 0% として数えています。マクロ収集が止まっていないか確かめてください）</span>');
+  document.getElementById('pf-notes').innerHTML = notes.join('<br>');
+
+  document.getElementById('pf-total').innerHTML = _pfPct(p.total_return);
+  document.getElementById('pf-bench').innerHTML = _pfPct(p.bench_return);
+  document.getElementById('pf-excess').innerHTML = p.excess == null ? '-'
+    : `${_pfPct(p.excess)}<span style="font-size:11px;color:var(--text-muted)"> ポイント</span>`;
+  document.getElementById('pf-dd').innerHTML = p.max_drawdown == null ? '-'
+    : `${(p.max_drawdown * 100).toFixed(1)}%<span style="font-size:12px;color:var(--text-muted)">`
+      + `（${(p.bench_max_drawdown * 100).toFixed(1)}%）</span>`;
+  document.getElementById('pf-pnl').innerHTML =
+    `実現損益 ${_pfYen(s.realized_pnl, true)} ／ 評価損益 ${_pfYen(s.unrealized_pnl, true)}`
+    + (p.n_weeks ? ` ／ 測った期間 ${Number(p.n_weeks)} 週` : '');
+
+  const muted = 'color:var(--text-muted)';
+  document.getElementById('pf-tbody').innerHTML = (s.holdings || []).map(h => `<tr>
+      <td style="color:${cssVar('--status-info')};font-weight:600">${esc(h.sec_code)}</td>
+      <td>${esc(h.name || '（企業の表に無い銘柄）')}</td>
+      <td style="text-align:right">${_pfNum(h.quantity, 4)}</td>
+      <td style="text-align:right">${_pfNum(h.avg_cost)}</td>
+      <td style="text-align:right">${h.last_close == null ? '-'
+        : `${_pfNum(h.last_close)}<span style="font-size:11px;${muted}"> ${esc(h.last_close_date || '')}</span>`}</td>
+      <td style="text-align:right">${_pfYen(h.market_value)}</td>
+      <td style="text-align:right">${_pfYen(h.unrealized_pnl, true)}</td>
+      <td style="text-align:right">${h.unrealized_pct == null ? '-' : _pfPct(h.unrealized_pct / 100)}</td>
+    </tr>`).join('') || `<tr><td colspan="8" style="${muted}">今持っている銘柄はありません</td></tr>`;
+
+  document.getElementById('pf-months').innerHTML = (p.months || []).slice().reverse().map(m => `<tr>
+      <td>${esc(m.month)}</td>
+      <td style="text-align:right">${_pfPct(m.ret)}</td>
+      <td style="text-align:right">${_pfPct(m.bench_ret)}</td>
+      <td style="text-align:right">${_pfPct(m.excess)}</td>
+    </tr>`).join('') || `<tr><td colspan="4" style="${muted}">まだ 1 週も測れていません</td></tr>`;
+}
+
+async function addLedgerEntry() {
+  const val = id => document.getElementById(id).value.trim();
+  const num = id => (val(id) === '' ? null : Number(val(id)));
+  const side = val('ledger-side');
+  const body = {side, sec_code: val('ledger-code'), trade_date: val('ledger-date'), memo: val('ledger-memo') || null};
+  if (side === 'split') body.split_ratio = num('ledger-ratio');
+  else Object.assign(body, {price: num('ledger-price'), quantity: num('ledger-qty'), fee: num('ledger-fee')});
+
+  const btn = document.getElementById('btn-ledger-add');
+  btn.disabled = true;
+  try {
+    await apiFetch('/api/portfolio/ledger', {method: 'POST', body: JSON.stringify(body)});
+    showNotif(`${LEDGER_SIDE_LABEL[side]}を記録しました（${body.sec_code}）`, 'success');
+    // 続けて入れやすいよう、売買の別と日付は残して銘柄ごとの欄だけ空にする
+    ['ledger-code', 'ledger-price', 'ledger-qty', 'ledger-fee', 'ledger-ratio', 'ledger-memo']
+      .forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('ledger-list').open = true;
+    await loadPortfolio();
+    document.getElementById('ledger-code').focus();
+  } catch (e) {
+    showNotif('記録できませんでした: ' + _errDetail(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function voidLedgerEntry(id) {
+  const ok = await confirmDialog({
+    title: `${id} 番の行を取り消します`,
+    lines: ['行は消えず「取消済み」として残ります',
+            {text: '取消は元に戻せません。間違えて取り消したら、同じ内容を入れ直してください', strong: true}],
+    okLabel: '取り消す',
+  });
+  if (!ok) return;
+  try {
+    await apiFetch(`/api/portfolio/ledger/${encodeURIComponent(id)}/void`, {method: 'POST'});
+    showNotif(`${id} 番の行を取り消しました`, 'success');
+    await loadPortfolio();
+  } catch (e) {
+    showNotif('取り消せませんでした: ' + _errDetail(e));
+  }
+}
+
+// 記録の保有を、売り候補の入力欄の書式（証券コード, @取得単価, 持ち始めた日）へ写す。
+// 入力欄に別の内容があるときは、上書きする前に確かめる。
+async function fillHoldingsFromLedger() {
+  const holdings = (pfSummary && pfSummary.holdings) || [];
+  if (!holdings.length) { showNotif('記録に保有がありません'); return; }
+  const text = holdings.map(h =>
+    `${h.sec_code}, @${Number(h.avg_cost.toFixed(2))}${h.buy_date ? ', ' + h.buy_date : ''}`).join('\n');
+  const ta = document.getElementById('param-sell_ranking-holdings');
+  if (ta.value.trim() && ta.value.trim() !== text) {
+    const ok = await confirmDialog({
+      title: '入力欄の内容を、記録の保有で置き換えます',
+      lines: [`記録の保有: ${holdings.length} 銘柄`, {text: '今の入力欄の内容は消えます', strong: true}],
+      okLabel: '置き換える',
+    });
+    if (!ok) return;
+  }
+  ta.value = text;
+  try { localStorage.setItem(SELL_HOLDINGS_KEY, text); } catch (e) {}
+  showNotif(`記録の保有 ${holdings.length} 銘柄を入れました`, 'success');
+}
+
 // トークン名だけを保持し、実色は使用時に cssVar() で解決する（テーマ切替に追従させるため）。
 const SELL_ACTION_STYLE = {
   'SELL':    ['--val-down', '売却'],
@@ -1243,6 +1438,7 @@ function showTab(t) {
     }
   }
   _loadSaved(t);
+  if (t === 'sell_ranking') loadPortfolioOnce();
 }
 
 // ── 保存済みの結果（heavy のタブを開いたら最初に見せる・ADR-0072）──────────────────
