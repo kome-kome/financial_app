@@ -576,12 +576,14 @@ from routers import market  as _r_market
 from routers import analysis as _r_analysis
 from routers import auth     as _r_auth
 from routers import morning  as _r_morning
+from routers import portfolio as _r_portfolio
 
 app.include_router(_r_collect.router)
 app.include_router(_r_market.router)
 app.include_router(_r_analysis.router)
 app.include_router(_r_auth.router)
 app.include_router(_r_morning.router)
+app.include_router(_r_portfolio.router)
 
 
 # ── システム情報・HTML ページ配信 ──────────────────────────────────────────
