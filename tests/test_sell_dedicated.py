@@ -216,8 +216,13 @@ class TestDaytimeJob:
         assert "判定: keep（据え置き）" in section
 
 
-def test_sell_ranking_is_unchanged():
-    """本番の売りの並びは判定の後でしか変えない（#1152 の判定は keep＝M-6 の μ̂ のまま）。"""
+def test_sell_ranking_default_is_s2():
+    """本番の売りの並びは判定の後でしか変えない。
+
+    S1（#1152）は keep で動かさず、S2（#1158）の adopt を受けて並びのキーだけを S2 にした（ADR-0076・#1201）。
+    計測の分母（`SELL_BASE`）と、S2 が使えない回の倒れる先は M-6 の μ̂ のまま。
+    """
     from plugins import sell_ranking
 
+    assert sell_ranking.SELL_KEY_SOURCE == sell_ranking.SELL_KEY_S2 == "sell_quantile"
     assert sell_ranking.MU_SOURCE == B.SELL_BASE == "macro_enet"

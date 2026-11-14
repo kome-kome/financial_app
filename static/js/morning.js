@@ -220,7 +220,8 @@ async function loadMorning() {
 }
 
 // ── 今日の売買候補（#1228）──────────────────────────────────────────────────
-// 実際の売買は「M-6 と M-2 の上位を買い、保有の下位 1/5 を売る」（ADR-0070）。その一覧を、財務指標の
+// 実際の売買は「M-6 と M-2 の上位を買い、保有の下位 1/5 を売る」（ADR-0070）。売りの並びのキーは売り専用の
+// 予測 S2（下側 20% 点・ADR-0076）で、S2 が使えない回はサーバーが M-6 の μ̂ へ倒して理由を返す。その一覧を、財務指標の
 // 点数のランキングの上に**並べて見せるだけ**——μ̂ を点数へ混ぜない（混ぜるなら昇格ゲートが要る・ADR-0030）。
 // 読むのは保存済みの値だけで、プリセットや件数を選び直しても読み直さない（別の並びなので変わらない）。
 const CAND_TOP_K = 10;   // 運用の単位（1 モデルの上位 10 社）
@@ -234,7 +235,7 @@ const CAND_ACTION = {
   'データ不足': ['cand-tag-hold', 'データ不足'],
 };
 
-// 期待リターン（μ̂・52 週の対数リターン）を % で出す。色は乖離率と同じ（正が良い）。
+// 期待リターン（μ̂）と下振れの見込み（S2 の下側 20% 点）を % で出す。どちらも 52 週の対数リターンで、色は乖離率と同じ（正が良い）。
 function fmtMu(v) {
   if (v === null || v === undefined) return '—';
   const n = Number(v) * 100;
@@ -296,6 +297,7 @@ function renderSellCandidates(res) {
     return;
   }
   const d = res.value;
+  note.classList.remove('stale-asof');
   if (!d.n_holdings) {
     note.textContent = '売買の記録に保有がありません';
     body.innerHTML = candEmptyRow(5, '分析画面の「保有を見直す」で売買を記録すると、ここに売り判定が出ます');
@@ -307,8 +309,13 @@ function renderSellCandidates(res) {
     body.innerHTML = candEmptyRow(5, d.reason || '売り判定を作れませんでした');
     return;
   }
+  // 並びに使った値を出す（ADR-0076）。S2 が使えずサーバーが M-6 の μ̂ へ倒した回は、見出しと色でそれを知らせる。
+  const byS2 = rk.sell_key_source === 'sell_quantile';
+  document.getElementById('cand-sell-key-th').textContent = byS2 ? '下振れの見込み' : '期待リターン';
+  note.classList.toggle('stale-asof', !!rk.sell_key_fallback);
   const parts = [`保有 ${Number(d.n_holdings)} 銘柄／売却 ${Number(rk.n_sell)}・保有継続 ${Number(rk.n_hold)}`
     + (rk.n_no_data ? `・データ不足 ${Number(rk.n_no_data)}` : '')];
+  if (rk.sell_key_fallback) parts.push('売り専用の予測が使えないため、M-6 の期待リターンの低い順で判定しました');
   if ((rk.n_sell || 0) + (rk.n_hold || 0) < 5) parts.push('5 銘柄未満のため「売却」は付きません（並び順だけ参考にしてください）');
   if (rk.mu_asof && rk.mu_asof.snapshot_date) parts.push(`基準日 ${rk.mu_asof.snapshot_date}`);
   const skipped = [...(rk.not_found || []), ...(rk.invalid || []).map(s => String(s).split(',')[0])];
@@ -322,7 +329,7 @@ function renderSellCandidates(res) {
       <td><span class="cand-tag ${cls}">${esc(label)}</span></td>
       <td class="cand-code">${esc(r.sec_code || '—')}</td>
       <td class="cand-name">${candCompany(r, '')}</td>
-      <td class="num">${fmtMu(r.mu)}</td>
+      <td class="num">${fmtMu(byS2 ? r.q20 : r.mu)}</td>
       <td class="num cand-opt">${pnl}</td>
     </tr>`;
   }).join('') || candEmptyRow(5, '判定できる保有がありません');

@@ -1268,8 +1268,8 @@ def get_macro_enet_producer(db) -> dict:
 
 # ── 5f-1b. 売り専用の候補 S2 の現断面予測（#1202）──────────────────────────────
 # S2 = 52 週先リターンの下側 20% 点の L1+L2 分位回帰（#1158 の事前登録で採用）。M-6（macro_enet）の
-# execute が**同じパネル**で S2 の最終学習も行い、ここへ全置換で書く。sell_ranking は既定では読まない
-# （`plugins/sell_ranking.SELL_KEY_SOURCE`・本番の切り替えは #1201）。予測が全社同じ値の月は書かない
+# execute が**同じパネル**で S2 の最終学習も行い、ここへ全置換で書く。sell_ranking の既定の並びのキー
+# （`plugins/sell_ranking.SELL_KEY_SOURCE`・ADR-0076・#1201）。予測が全社同じ値の月は書かない
 # （表が空）＝読み手は「空なら M-6」の 1 規則で済む。producer プラグインの表ではないので
 # `_PRODUCER_SCORE_MODELS` へは足さない（あれは「M-2/M-3/M-4/M-6 の μ̂」の一覧）。
 

@@ -7,6 +7,10 @@
 [ADR-0069](0069-evaluation-metrics-have-roles.md)（上位層の売り側spread・#1073 の −R_macro の除外）の実測をそのまま使い、
 新しい計測はしていない。
 
+**2026-11-15 追記**: 決定 1 のうち「並びは M-6 の現在μ̂ の昇順」は [ADR-0076](0076-sell-ranking-orders-by-the-sell-quantile-model.md) が覆した
+（並びのキーは売り専用の予測 S2。S2 が使えない回だけ M-6 の μ̂ で並べる）。手法が 1 つであること・下位 1/5 の切り方・
+画面に選択肢を出さないことは、この ADR のまま。
+
 ## Context
 
 売り候補ランキング（`plugins/sell_ranking.py`）の画面には、売りの決め方が何通りも並んでいた。

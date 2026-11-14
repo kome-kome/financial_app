@@ -12,7 +12,8 @@
 - 予測は `sell_mu_source_bakeoff --in-layer`（#1043）と同じく M-4 を 1 回回して共通域の社ごとの OOF を取る
   （`_run_config(keep_common=True)`）。M-4 の基底は #1058 で本番の設定にそろえた（`M4_BASES_CAVEAT`）
 - 買いの並びは各モデルの画面の既定（M-1 / M-2 は U = μ̂ − λR・生の R2、λ=0 の M-6 は μ̂＝`buy_scores`）。
-  売りの並びは `--sell-source` の μ̂ の低い順（既定は sell_ranking の既定の μ の出所＝M-6）。−R_macro は
+  売りの並びは `--sell-source` の μ̂ の低い順（既定は M-6＝`sell_ranking.MU_SOURCE`）。本番の売りの並びのキーは
+  ADR-0076 で S2 になったが、S2 の OOF 予測はここに入っていないので M-6 の μ̂ のまま（#1238）。−R_macro は
   過去の時点で作り直せないので使わない
 - test 期（3 か月おき）ごとに: 予測が無くなった保有を外す → 残りの中で売りの並びの下位 k 社を売る →
   買いの並びの上位から K 社になるまで補充する（その期に売った社は買い戻さない）。最初の期は上位 K 社を買う
@@ -781,7 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--models", nargs="+", choices=BASES, default=list(BASES),
                     help="買いの並びに使うモデル（各モデルの画面の既定の並び）")
     ap.add_argument("--sell-source", choices=BASES, default=CANDIDATE,
-                    help="売りの並びに使う μ̂ の出所（既定は sell_ranking の既定＝M-6）")
+                    help="売りの並びに使う μ̂ の出所（既定は M-6。本番のキー S2 は未対応・#1238）")
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="保有する社数 K")
     ap.add_argument("--sell-k", type=int, default=DEFAULT_SELL_K, help="毎期売る保有の下位の社数 k")
     ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS, help="片道の売買コスト（bp）")

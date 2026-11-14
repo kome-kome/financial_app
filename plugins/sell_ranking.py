@@ -1,22 +1,26 @@
 """売り候補ランキング（保有銘柄の中から売る銘柄を選ぶ）。
 
-**手法は 1 つだけ**（ADR-0071）: 保有銘柄を M-6（`macro_enet`）の μ̂（52週先の期待リターン）の低い順に
-並べ、**下位 1/5 に「売却」**、残りに「保有継続」を付ける。μ̂ が無い保有は「データ不足」で末尾。
+**手法は 1 つだけ**（ADR-0071）: 保有銘柄を売り専用の予測 S2（52 週先リターンの下側 20% 点・M-6 の実行が
+同じパネルで解いて保存する）の低い順に並べ、**下位 1/5 に「売却」**、残りに「保有継続」を付ける（ADR-0076 が
+ADR-0071 の「並びは M-6 の μ̂」を覆した・#1201）。予測が無い保有は「データ不足」で末尾。
 
-この形は実測した運用そのものに合わせてある（ADR-0071）:
-  - μ̂ の出所は売り側spread（全社・ADR-0022）で最も良い M-6。M-1 は p=0.10 で劣後、M-2 は有意に劣後
-  - 「1 つ前の期に買いの並びの上位にいた社（＝保有に近い母集団）の中で、μ̂ の下位 1/5 を売る」と
-    層の平均を下回る社を選べていた（上位層の売り側spread・#1043・ADR-0069）。下位の切り方は
+S2 が使えない回（表が空＝未保存・全社同値の回、または S2 の断面の日付が M-6 と違う）は、保有**全体**を
+M-6（`macro_enet`）の μ̂（52週先の期待リターン）の低い順に並べ、理由を応答の `sell_key_fallback` に出す。
+Render（閲覧用の断面）には S2 の行が無いので、そこでは常にこの経路になる（断面へ書き戻さない・ADR-0038）。
+
+この形は実測した運用そのものに合わせてある:
+  - 並びのキー: 上位層の売り側spread で S2 が M-6 の μ̂ より有意に良く（+0.0161・p=0.007・16 期）、全社の
+    売り側spread も悪化しなかった（#1158 の事前登録・判定 adopt・ADR-0076）
+  - 倒れる先の μ̂ の出所は売り側spread（全社・ADR-0022）で最も良い M-6。M-1 は p=0.10 で劣後、M-2 は有意に劣後
+  - 「1 つ前の期に買いの並びの上位にいた社（＝保有に近い母集団）の中で、下位 1/5 を売る」と層の平均を
+    下回る社を選べていた（上位層の売り側spread・#1043・ADR-0069）。下位の切り方は
     `macro_snapshots.in_layer_short_side` と同じ（昇順の先頭 m // 5 社）
   - −R_macro を足すと全社でも層の中でも有意に悪化した（#1073）
 
 外したもの（どれも売りとして測られていない・または測って負けた）: 財務指標のプリセット（バランス型・
 割高警戒型・業績悪化重視）と観点ウェイト、μ の出所の切替（M-1・M-3）、売りスコアの絶対閾値と
 「一部売却」、価格トレンドによる札の補正、R3 足切り。価格トレンド（13週リターン・52週高値からの下落）と
-損益は**参考として表示するだけ**で、並びにも札にも使わない。
-
-売り専用の候補 S2（52 週先リターンの下側 20% 点・#1158 の事前登録で採用）で並べる経路も持つが、**既定では
-使わない**（`SELL_KEY_SOURCE`・#1202）。本番の切り替えは新しい ADR を添えて #1201 で行う。
+損益、S2 で並べた回の M-6 の μ̂ は**参考として表示するだけ**で、並びにも札にも使わない。
 """
 import re
 from collections import namedtuple
@@ -26,18 +30,18 @@ from .base import AnalysisPlugin
 
 
 # μ̂ の出所（唯一）。売り側spread で最良（ADR-0022・ADR-0071）。変えるときは ADR を添えて
-# `scripts.sell_mu_source_bakeoff` の実測で決める。
+# `scripts.sell_mu_source_bakeoff` の実測で決める。S2 で並べる回は参考表示、S2 が使えない回は並びのキー。
 MU_SOURCE = "macro_enet"
 # 下位 1/SELL_QUANTILES を売る。`in_layer_short_side(n_quantiles=5)` と同じ切り方（m // 5 社）。
 SELL_QUANTILES = 5
 
-# 並びのキーの出どころ（#1202）。既定は MU_SOURCE（M-6 の μ̂）＝ADR-0071 のまま。`SELL_KEY_S2` にすると、M-6 が
-# 同じパネルで解いて `sell_quantile_scores` へ保存した S2 の予測（#1158 で採用）で並べる。**画面のパラメータには
-# しない**（ADR-0071 決定 4 で μ の出所の選択を外した）。切り替えは新しい ADR を添えて #1201 で行う。
+# 並びのキーの出どころ。既定は `SELL_KEY_S2`＝M-6 が同じパネルで解いて `sell_quantile_scores` へ保存した S2 の
+# 予測（#1158 の事前登録で採用・ADR-0076 で既定にした・#1201）。`MU_SOURCE` へ戻すと M-6 の μ̂ で並べる
+# （ADR-0071 の形。戻すときも ADR を添える）。**画面のパラメータにはしない**（ADR-0071 決定 4 で出所の選択を外した）。
 # S2 の表が空（未保存・全社同値の回）か、断面の日付が M-6 と食い違う（S2 だけ古い）ときは、保有**全体**を M-6 の
 # μ̂ で並べ、倒した理由を応答に出す。保有ごとに混ぜない（下側の分位と平均は尺度が違い、混ぜると順位が壊れる）。
 SELL_KEY_S2 = "sell_quantile"
-SELL_KEY_SOURCE = MU_SOURCE
+SELL_KEY_SOURCE = SELL_KEY_S2
 
 # ── 転送列の契約（Issue #482）────────────────────────────────────────────────
 # financial_metrics は派生値込みの計算 VIEW。ここで読むのは表示と損益のフォールバックに使う列だけ。
@@ -152,7 +156,7 @@ def _compute_trend(weekly_rows: list) -> dict:
 
 
 def n_to_sell(n_ranked: int) -> int:
-    """μ̂ がそろった保有 n_ranked 社のうち売る社数（下位 1/5・切り捨て）。
+    """並びのキー（S2 の予測、倒れた回は μ̂）がそろった保有 n_ranked 社のうち売る社数（下位 1/5・切り捨て）。
 
     5 社未満なら 0（下位 1/5 が 1 社に満たない）。実測の切り方（`in_layer_short_side`）と同じで、
     少ない保有に合わせて 1 社へ切り上げる規則は測っていないので足さない。
@@ -186,13 +190,14 @@ def choose_sell_keys(source: str, mus: dict[str, float | None], ec_by_key: dict[
         return mus, MU_SOURCE, None
     if source != SELL_KEY_S2:
         raise ValueError(f"未知の並びのキーの出どころ: {source}（{MU_SOURCE} / {SELL_KEY_S2} のみ）")
+    # 理由は画面にそのまま出る（「…ため、M-6 の期待リターンの低い順に並べました」の理由の部分・ADR-0076）
     q20 = s2.get("q20") or {}
     if not q20:
-        return mus, MU_SOURCE, "S2 の予測が保存されていない（未実行・全社同値の回・読めない）ので M-6 の μ̂ で並べた"
+        return mus, MU_SOURCE, "売り専用の予測（S2）が保存されていない（未実行・全社同値の回・読めない）"
     s2_date = s2.get("snapshot_date")
     if not mu_snapshot_date or s2_date != mu_snapshot_date:
-        return mus, MU_SOURCE, (f"S2 の予測の日付（{s2_date}）が M-6 の μ̂（{mu_snapshot_date}）と違う"
-                                "ので M-6 の μ̂ で並べた")
+        return mus, MU_SOURCE, (f"売り専用の予測（S2）の日付（{s2_date}）が M-6 の μ̂ の日付"
+                                f"（{mu_snapshot_date}）と違う")
     return {k: (q20.get(ec) if ec else None) for k, ec in ec_by_key.items()}, SELL_KEY_S2, None
 
 
@@ -200,10 +205,11 @@ class SellRankingPlugin(AnalysisPlugin):
     name = "sell_ranking"
     label = "売り候補ランキング"
     description = (
-        "保有銘柄を M-6 の期待リターン（μ̂）の低い順に並べ、下位 1/5 に「売却」を付けます。"
+        "保有銘柄を売り専用の予測（今後 52 週のリターンの下側 20% 点）の低い順に並べ、下位 1/5 に「売却」を付けます。"
         "売りの当たり具合を過去のデータで測って最も良かった手法だけを使います。"
     )
-    depends_on = [MU_SOURCE]   # μ̂ が無いと並べられない（未実行なら runner が 400）
+    # S2 は M-6 の実行が一緒に作り、S2 が使えない回の倒れる先も M-6 の μ̂（未実行なら runner が 400）
+    depends_on = [MU_SOURCE]
     category = "⑤ 保有を見直す"
     ui_order = 510
 
@@ -306,7 +312,7 @@ class SellRankingPlugin(AnalysisPlugin):
                 "delisted_date": r.delisted_date.isoformat() if r.delisted_date else None,
             }
 
-        # 並びのキー（#1202）: 既定は μ̂。S2 のときは表と日付を確かめ、だめなら保有全体を μ̂ で並べる
+        # 並びのキー: 既定は S2（ADR-0076）。表と日付を確かめ、だめなら保有全体を μ̂ で並べる（#1202）
         s2 = {}
         if SELL_KEY_SOURCE == SELL_KEY_S2:
             from database import get_sell_quantile_scores
@@ -346,7 +352,7 @@ class SellRankingPlugin(AnalysisPlugin):
             "mu_source":     MU_SOURCE,
             "mu_available":  mu_available,
             "mu_asof":       mu_asof,
-            # 実際に並べたキーの出どころ（#1202・既定は M-6）と、S2 から M-6 へ倒した理由（倒していなければ None）
+            # 実際に並べたキーの出どころ（既定は S2・ADR-0076）と、S2 から M-6 へ倒した理由（倒していなければ None）
             "sell_key_source":   key_source,
             "sell_key_fallback": key_fallback,
             "results":       scored,

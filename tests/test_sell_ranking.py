@@ -1,8 +1,10 @@
 """plugins/sell_ranking.py のユニットテスト。
 
-手法は 1 つだけ（ADR-0071）: M-6 の μ̂ の低い順に並べ、下位 1/5 が「売却」。
+手法は 1 つだけ（ADR-0071）: 売り専用の予測 S2 の低い順に並べ、下位 1/5 が「売却」（並びのキーは ADR-0076）。
+S2 が使えない回は M-6 の μ̂ の低い順へ倒す。**S2 を入れていないテストはこの倒れた経路を通る**
+（Render と同じ状態＝M-6 の μ̂ だけで並ぶ）。S2 で並ぶ経路は TestSellKeySource。
 純粋: parse_holdings / _compute_trend / n_to_sell / assign_actions / 外した手法が戻っていないこと。
-execute(): μ̂ の並び・札・データ不足・not_found / invalid・損益・トレンド（参考）（in-memory SQLite）。
+execute(): 並び・札・データ不足・not_found / invalid・損益・トレンド（参考）（in-memory SQLite）。
 依存ゲート（M-6 の μ̂）は execute_plugin 経由で確かめる。
 """
 import asyncio
@@ -321,7 +323,7 @@ class TestDependencyGate:
         assert res["count"] == 1 and res["results"][0]["mu"] == pytest.approx(0.01)
 
 
-# ── 並びのキーの出どころ（#1202）: 既定は M-6 の μ̂・S2 は定数で切り替える経路だけ持つ ──────────
+# ── 並びのキーの出どころ: 既定は S2（ADR-0076・#1201）。使えない回は M-6 の μ̂ へ倒す（#1202）──────────
 
 def _seed_s2(db, q20s, snapshot_date="2026-07-29"):
     from database import replace_sell_quantile_scores
@@ -329,10 +331,11 @@ def _seed_s2(db, q20s, snapshot_date="2026-07-29"):
 
 
 class TestSellKeySource:
-    def test_default_is_m6_and_not_a_parameter(self):
-        """既定は M-6 の μ̂（ADR-0071 のまま）。S2 への切り替えは画面のパラメータにしない（決定 4）。"""
-        assert sr.SELL_KEY_SOURCE == MU_SOURCE == "macro_enet"
-        assert sr.SELL_KEY_S2 == "sell_quantile"
+    def test_default_is_s2_and_not_a_parameter(self):
+        """既定は S2（#1158 の判定 adopt・ADR-0076）。出どころの選択は画面のパラメータにしない（ADR-0071 決定 4）。"""
+        assert sr.SELL_KEY_SOURCE == sr.SELL_KEY_S2 == "sell_quantile"
+        assert MU_SOURCE == "macro_enet"          # 参考表示と、S2 が使えない回の倒れる先
+        assert plugin.depends_on == [MU_SOURCE]   # S2 は M-6 の実行が同じ夜に作る
         assert set(plugin.params_schema()) == {"holdings"}
 
     def test_choose_default_keeps_mu(self):
@@ -362,7 +365,9 @@ class TestSellKeySource:
         with pytest.raises(ValueError):
             sr.choose_sell_keys("macro_dlm", {}, {}, {}, None)
 
-    def test_execute_default_does_not_read_s2(self, db, make_metric):
+    def test_execute_m6_source_does_not_read_s2(self, db, make_metric, monkeypatch):
+        """定数を M-6 へ戻した形（ADR-0071）は S2 の表を読まない＝戻す道が 1 行で済む。"""
+        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", MU_SOURCE)
         db.add_all(_universe(make_metric, 5))
         db.commit()
         _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
@@ -372,8 +377,8 @@ class TestSellKeySource:
         assert (res["sell_key_source"], res["sell_key_fallback"]) == (MU_SOURCE, None)
         assert "q20" not in res["results"][0]
 
-    def test_execute_s2_ranks_by_q20_and_keeps_mu_for_display(self, db, make_metric, monkeypatch):
-        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+    def test_execute_default_ranks_by_q20_and_keeps_mu_for_display(self, db, make_metric):
+        """既定（定数を差し替えない）で S2 の q20 の低い順に並ぶ。μ̂ とは逆の並びを入れて区別する。"""
         db.add_all(_universe(make_metric, 5))
         db.commit()
         _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
@@ -385,17 +390,29 @@ class TestSellKeySource:
         assert res["results"][0]["mu"] == pytest.approx(0.05)         # 表示する μ̂ は M-6 のまま
         assert (res["sell_key_source"], res["sell_key_fallback"]) == (sr.SELL_KEY_S2, None)
 
-    def test_execute_s2_falls_back_to_m6_when_s2_is_empty(self, db, make_metric, monkeypatch):
-        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+    def test_execute_default_marks_holdings_without_q20_as_no_data(self, db, make_metric):
+        """S2 だけ欠けた保有は「データ不足」（μ̂ があっても混ぜない・下側の分位と平均は尺度が違う）。"""
+        db.add_all(_universe(make_metric, 6))
+        db.commit()
+        _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 7)})
+        _seed_s2(db, {f"E{i:04d}": -0.01 * i for i in range(1, 6)})   # E0006 は S2 に無い
+        res = _run({"holdings": "1001\n1002\n1003\n1004\n1005\n1006"}, db)
+        last = res["results"][-1]
+        assert (last["sec_code"], last["action"], last["q20"]) == ("1006", "データ不足", None)
+        assert last["mu"] == pytest.approx(0.06)
+        assert (res["n_sell"], res["n_hold"], res["n_no_data"]) == (1, 4, 1)
+
+    def test_execute_falls_back_to_m6_when_s2_is_empty(self, db, make_metric):
+        """S2 の表が空（Render の断面・全社同値の回）でも並びは空にならず、理由が応答に出る。"""
         db.add_all(_universe(make_metric, 5))
         db.commit()
         _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})
         res = _run({"holdings": "1001\n1002\n1003\n1004\n1005"}, db)
-        assert res["results"][0]["sec_code"] == "1001"
-        assert res["sell_key_source"] == MU_SOURCE and res["sell_key_fallback"]
+        assert res["results"][0]["sec_code"] == "1001" and res["n_sell"] == 1
+        assert res["sell_key_source"] == MU_SOURCE and "保存されていない" in res["sell_key_fallback"]
+        assert "q20" not in res["results"][0]
 
-    def test_execute_s2_falls_back_when_s2_is_older_than_m6(self, db, make_metric, monkeypatch):
-        monkeypatch.setattr(sr, "SELL_KEY_SOURCE", sr.SELL_KEY_S2)
+    def test_execute_falls_back_when_s2_is_older_than_m6(self, db, make_metric):
         db.add_all(_universe(make_metric, 5))
         db.commit()
         _seed_m6(db, {f"E{i:04d}": 0.01 * i for i in range(1, 6)})   # 2026-07-29
