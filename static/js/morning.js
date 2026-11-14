@@ -196,6 +196,7 @@ async function loadMorning() {
     renderVerdict(d.freshness);
     renderFreshness(d.freshness);
     syncFreshFold(d.freshness.overall_verdict);
+    markMuAsof((d.freshness.mu || {}).level);
     renderRanking(d.recommend, (d.freshness.price || {}).level);
     document.getElementById('mor-generated').textContent = `集計時刻: ${d.generated_at}`;
     const lv = d.freshness.overall_verdict;
@@ -218,6 +219,132 @@ async function loadMorning() {
   }
 }
 
+// ── 今日の売買候補（#1228）──────────────────────────────────────────────────
+// 実際の売買は「M-6 と M-2 の上位を買い、保有の下位 1/5 を売る」（ADR-0070）。その一覧を、財務指標の
+// 点数のランキングの上に**並べて見せるだけ**——μ̂ を点数へ混ぜない（混ぜるなら昇格ゲートが要る・ADR-0030）。
+// 読むのは保存済みの値だけで、プリセットや件数を選び直しても読み直さない（別の並びなので変わらない）。
+const CAND_TOP_K = 10;   // 運用の単位（1 モデルの上位 10 社）
+const CAND_MODELS = [
+  { name: 'macro_enet', key: 'enet' },
+  { name: 'macro_gbdt', key: 'gbdt' },
+];
+const CAND_ACTION = {
+  'SELL': ['cand-tag-sell', '売却'],
+  'HOLD': ['cand-tag-hold', '保有継続'],
+  'データ不足': ['cand-tag-hold', 'データ不足'],
+};
+
+// 期待リターン（μ̂・52 週の対数リターン）を % で出す。色は乖離率と同じ（正が良い）。
+function fmtMu(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v) * 100;
+  return `<span class="${n >= 0 ? 'gap-positive' : 'gap-negative'}">${n >= 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
+}
+
+function candEmptyRow(cols, text) {
+  return `<tr><td colspan="${cols}" class="cand-empty">${esc(text)}</td></tr>`;
+}
+
+function candCompany(r, tags) {
+  const name = esc(r.company_name || '—');
+  const link = r.edinet_code
+    ? `<a href="/company/${esc(r.edinet_code)}" target="_blank" rel="noopener">${name}</a>` : name;
+  return link + tags;
+}
+
+// M-6 の μ̂ が古いときは、上の鮮度の判定と同じ色で基準日を知らせる（`/api/morning` の応答が後から届く）。
+function markMuAsof(level) {
+  document.getElementById('cand-enet-asof').classList.toggle('stale-asof', !!level && level !== 'fresh');
+}
+
+function renderBuyCandidates(key, res, inBoth, held) {
+  const asof = document.getElementById(`cand-${key}-asof`);
+  const body = document.getElementById(`cand-${key}-body`);
+  if (res.status !== 'fulfilled' || !res.value) {
+    asof.textContent = '取得できませんでした';
+    body.innerHTML = candEmptyRow(4, (res.reason && res.reason.message) || '応答がありません');
+    return;
+  }
+  const d = res.value;
+  if (!d.saved || !(d.rows || []).length) {
+    asof.textContent = '保存済みの結果がありません';
+    body.innerHTML = candEmptyRow(4, 'バッチがまだ結果を保存していません（分析画面のこのモデルのタブで確かめられます）');
+    return;
+  }
+  const a = d.asof || {};
+  asof.textContent = a.snapshot_date
+    ? `基準日 ${a.snapshot_date}／今買える ${Number(d.n_total).toLocaleString()} 社のうち上位 ${d.rows.length} 社`
+    : '基準日 不明（スコアはあるが日付の記録が無い）';
+  body.innerHTML = d.rows.map(r => {
+    const tags = (inBoth.has(r.edinet_code) ? '<span class="cand-tag cand-tag-both">両方</span>' : '')
+      + (r.sec_code && held.has(r.sec_code) ? '<span class="cand-tag cand-tag-held">保有中</span>' : '');
+    return `<tr>
+      <td class="rank-num">${Number(r.rank)}</td>
+      <td>${esc(r.sec_code || '—')}</td>
+      <td>${candCompany(r, tags)}</td>
+      <td class="num">${fmtMu(r.mu)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderSellCandidates(res) {
+  const note = document.getElementById('cand-sell-note');
+  const body = document.getElementById('cand-sell-body');
+  if (res.status !== 'fulfilled' || !res.value) {
+    note.textContent = '取得できませんでした';
+    body.innerHTML = candEmptyRow(5, (res.reason && res.reason.message) || '応答がありません');
+    return;
+  }
+  const d = res.value;
+  if (!d.n_holdings) {
+    note.textContent = '売買の記録に保有がありません';
+    body.innerHTML = candEmptyRow(5, '分析画面の「保有を見直す」で売買を記録すると、ここに売り判定が出ます');
+    return;
+  }
+  const rk = d.ranking;
+  if (!rk) {
+    note.textContent = `保有 ${Number(d.n_holdings)} 銘柄／判定できません`;
+    body.innerHTML = candEmptyRow(5, d.reason || '売り判定を作れませんでした');
+    return;
+  }
+  const parts = [`保有 ${Number(d.n_holdings)} 銘柄／売却 ${Number(rk.n_sell)}・保有継続 ${Number(rk.n_hold)}`
+    + (rk.n_no_data ? `・データ不足 ${Number(rk.n_no_data)}` : '')];
+  if ((rk.n_sell || 0) + (rk.n_hold || 0) < 5) parts.push('5 銘柄未満のため「売却」は付きません（並び順だけ参考にしてください）');
+  if (rk.mu_asof && rk.mu_asof.snapshot_date) parts.push(`基準日 ${rk.mu_asof.snapshot_date}`);
+  const skipped = [...(rk.not_found || []), ...(rk.invalid || []).map(s => String(s).split(',')[0])];
+  if (skipped.length) parts.push(`判定できない保有: ${skipped.join('・')}`);
+  note.textContent = parts.join('／');
+  body.innerHTML = (rk.results || []).map(r => {
+    const [cls, label] = CAND_ACTION[r.action] || ['cand-tag-hold', r.action];
+    const pnl = r.pnl_pct === null || r.pnl_pct === undefined ? '—'
+      : `<span class="${r.pnl_pct >= 0 ? 'gap-positive' : 'gap-negative'}">${r.pnl_pct >= 0 ? '+' : ''}${Number(r.pnl_pct).toFixed(1)}%</span>`;
+    return `<tr>
+      <td><span class="cand-tag ${cls}">${esc(label)}</span></td>
+      <td>${esc(r.sec_code || '—')}</td>
+      <td>${candCompany(r, '')}</td>
+      <td class="num">${fmtMu(r.mu)}</td>
+      <td class="num">${pnl}</td>
+    </tr>`;
+  }).join('') || candEmptyRow(5, '判定できる保有がありません');
+}
+
+// 3 本は互いに独立なので、1 本が失敗しても他は出す（allSettled）。
+async function loadCandidates() {
+  const [enet, gbdt, sell] = await Promise.allSettled([
+    ...CAND_MODELS.map(m => apiFetch(`/api/plugins/${m.name}/saved?limit=${CAND_TOP_K}`)),
+    apiFetch('/api/portfolio/sell-candidates'),
+  ]);
+  const codes = res => new Set(res.status === 'fulfilled' && res.value && res.value.rows
+    ? res.value.rows.map(r => r.edinet_code) : []);
+  const a = codes(enet), b = codes(gbdt);
+  const inBoth = new Set([...a].filter(ec => b.has(ec)));
+  const rk = sell.status === 'fulfilled' && sell.value ? sell.value.ranking : null;
+  const held = new Set(rk ? [...(rk.results || []).map(r => r.sec_code), ...(rk.not_found || [])] : []);
+  renderBuyCandidates('enet', enet, inBoth, held);
+  renderBuyCandidates('gbdt', gbdt, inBoth, held);
+  renderSellCandidates(sell);
+}
+
 // data-change 属性を持つコントロールの変更で再読込（インラインハンドラを使わない）
 document.addEventListener('change', (ev) => {
   if (!(ev.target instanceof HTMLElement) || ev.target.dataset.change !== 'reload') return;
@@ -234,3 +361,4 @@ urlStateApplySelect('mor-preset', 'preset');
 urlStateApplySelect('mor-topn', 'n');
 
 loadMorning();
+loadCandidates();

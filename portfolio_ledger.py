@@ -450,6 +450,27 @@ def load_official_splits(db, edinet_by_sec: dict[str, str]) -> dict[str, list[tu
     return out
 
 
+def holdings_text(holdings: list[dict]) -> str:
+    """保有を、売り候補ランキングの入力の書式（`証券コード, @取得単価, 持ち始めた日`）にする（純関数）。
+
+    画面の「売買の記録の保有を入れる」（analysis.js の `fillHoldingsFromLedger`）と同じ書式。
+    """
+    return "\n".join(
+        f"{h['sec_code']}, @{round(h['avg_cost'], 2)}" + (f", {h['buy_date']}" if h.get("buy_date") else "")
+        for h in holdings)
+
+
+def current_holdings(db) -> list[dict]:
+    """今持っている銘柄を `[{sec_code, quantity, avg_cost, buy_date}]` で返す（証券コードの順・読むだけ）。
+
+    `summary` と違い、株価も成績も読まない（朝の画面の売り判定が保有だけを要るため）。
+    """
+    book, _ = positions(to_current_scale(effective_entries(load_rows(db))))
+    return [{"sec_code": code, "quantity": p["quantity"], "avg_cost": p["avg_cost"],
+             "buy_date": p["buy_date"]}
+            for code, p in sorted(book.items()) if p["quantity"] > QTY_EPS]
+
+
 def summary(db) -> dict:
     """保有・損益・期間リターン・注意をまとめて返す（読むだけ）。
 
