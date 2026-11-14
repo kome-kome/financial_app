@@ -280,8 +280,8 @@ function renderBuyCandidates(key, res, inBoth, held) {
       + (r.sec_code && held.has(r.sec_code) ? '<span class="cand-tag cand-tag-held">保有中</span>' : '');
     return `<tr>
       <td class="rank-num">${Number(r.rank)}</td>
-      <td>${esc(r.sec_code || '—')}</td>
-      <td>${candCompany(r, tags)}</td>
+      <td class="cand-code">${esc(r.sec_code || '—')}</td>
+      <td class="cand-name">${candCompany(r, tags)}</td>
       <td class="num">${fmtMu(r.mu)}</td>
     </tr>`;
   }).join('');
@@ -320,10 +320,10 @@ function renderSellCandidates(res) {
       : `<span class="${r.pnl_pct >= 0 ? 'gap-positive' : 'gap-negative'}">${r.pnl_pct >= 0 ? '+' : ''}${Number(r.pnl_pct).toFixed(1)}%</span>`;
     return `<tr>
       <td><span class="cand-tag ${cls}">${esc(label)}</span></td>
-      <td>${esc(r.sec_code || '—')}</td>
-      <td>${candCompany(r, '')}</td>
+      <td class="cand-code">${esc(r.sec_code || '—')}</td>
+      <td class="cand-name">${candCompany(r, '')}</td>
       <td class="num">${fmtMu(r.mu)}</td>
-      <td class="num">${pnl}</td>
+      <td class="num cand-opt">${pnl}</td>
     </tr>`;
   }).join('') || candEmptyRow(5, '判定できる保有がありません');
 }
