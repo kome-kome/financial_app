@@ -1,7 +1,7 @@
 """OOF 運用再現（#1045・親 #1040・ADR-0069 の「参考」）。
 
 実運用（画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える）を、無リークの OOF 予測だけで
-時系列に繰り返したことにして、年率・最大下落・入替率・コスト控除後・全社平均に対する超過を出す。
+時系列に繰り返したことにして、年率・最大下落・入替率・コスト控除後・全社平均と TOPIX に対する超過を出す。
 
 **過去の経路は 1 本しかなく、運とモデルの良さを区別できない。参考で、判定・ゲートには使わない**
 （`DISCLAIMER` を出力と JSON に残す）。名前は「OOF 運用再現」で、`/api/backtest`（as-of の模擬売買・
@@ -59,6 +59,19 @@
   引いた `net_banded` と `annual_net_banded` を並べる。売買代金は `measure_index_event.load_turnover` で絞って読む
   （週次ローダへ列を足さない）。**コストを判定へ組み込まない**（ADR-0069 の決定 5）
 
+## TOPIX に対する超過と、帯の内訳（#1224・どちらも参考）
+
+- **TOPIX に対する超過**（引数なしで常に出す）: 全社平均（等金額）は小型株の比重が大きく、実際には買えない基準。
+  運用の成否を比べる相手は TOPIX（docs/VISION.md）なので、`macro_data` の TOPIX の系列（連動 ETF の終値・配当なし。
+  系列名は `portfolio_ledger.BENCHMARK_SERIES` を借りる）の同じ区間のリターンを `index` に、年率と超過を
+  `annual_index`・`annual_excess_index`・`annual_excess_index_ci` に並べる。週次の足は `database.aggregate_weeks`
+  （株価の週次表を作る関数）で作り、保有側と同じ `PriceBook` で月末の週の終値を引く＝月末の決め方がそろう。
+  TOPIX の値が 1 区間でも取れなければ年率は None にして `n_index_missing` に数える（0 として計算しない）
+- **帯の内訳**（`--cost-bands-bps` を付けたときだけ・行の `bands`）: 保有の延べ数（区間 × 保有の社）が売買代金の
+  三分位（0＝小さい・none＝帯なし）に何割ずつ入っていたかと、帯ごとの「区間リターン − 全社平均」の平均
+  （`band_breakdown`）。帯は売買代金がそろう全社の三等分なので、偏りが無ければ割合は約 1/3。記述だけで検定しない
+- 既定の呼び出し（`index_ret`・`index_bars`・`bands` を渡さない）では、行と要約のキーは変わらない
+
 実行:
     python -m scripts.oof_portfolio_replay                      # 既定 K=10・k=2・10bp
     python -m scripts.oof_portfolio_replay --top-k 30 --sell-k 6 --cost-bps 20
@@ -75,6 +88,7 @@ import os
 import random
 import statistics
 import sys
+from collections import namedtuple
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -83,7 +97,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import SessionLocal, tuning_dry_run, tuning_objective_only  # noqa: E402
+from database import SessionLocal, aggregate_weeks, tuning_dry_run, tuning_objective_only  # noqa: E402
 from model_comparison import VARIANT_PRODUCTION, _production_config, _safe_rollback  # noqa: E402
 from model_stats import (  # noqa: E402
     DEFAULT_AVG_BLOCK, DEFAULT_N_BOOT, DEFAULT_SEED, _percentile, _stationary_bootstrap_sample, bootstrap_mean_ci,
@@ -91,6 +105,7 @@ from model_stats import (  # noqa: E402
 from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import _month_end_bound, month_end_indices, oof_backtest  # noqa: E402
 from plugins.utils import coerce_params, walk_forward_cv_monthly  # noqa: E402
+from portfolio_ledger import BENCHMARK_SERIES  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts.sell_mu_source_bakeoff import (  # noqa: E402
@@ -120,6 +135,21 @@ PATH_NOTE = ("開始月をずらした経路は、同じ歴史を別の 3 か月
              "ばらつきは開始月の運の大きさの目安（参考・#1167）")
 BAND_NOTE = ("帯ごとのコストは、各期の月末以前の直近 52 週の売買代金の三分位（0＝小さい）ごとに片道コストを変えた参考の"
              "想定（実測ではない）。判定には使わない（ADR-0069 の決定 5・#1167）")
+
+# 比べる相手の指数（#1224）。系列名は売買の記録の成績（`portfolio_ledger`・docs/VISION.md）と同じ定数を借りる＝書き写さない
+INDEX_SERIES = BENCHMARK_SERIES
+# 指数を読み始める日を、最初の test 月の月初からどれだけ手前にするか（日）。その月に足が無くても手前の終値へ倒せるように取る
+INDEX_LOOKBACK_DAYS = 31
+INDEX_NOTE = ("TOPIX は macro_data の系列（連動 ETF の終値・配当なし）。保有側の株価も配当を含まないので条件はそろう。"
+              "全社平均（等金額）は実際には買えない基準なので、TOPIX に対する超過を並べる。参考で、運用の成功指標"
+              "（docs/VISION.md）の判定には使わない（#1224）")
+BREAKDOWN_NOTE = ("帯の内訳は、保有の延べ数（区間 × 保有の社）を各期の売買代金の三分位（0＝小さい・none＝13 週未満で帯なし）に"
+                  "分けた割合と、帯ごとの「区間リターン − 全社平均」の平均。帯は売買代金がそろう全社の三等分なので、偏りが"
+                  "無ければ割合は約 1/3。記述だけで検定しない・判定には使わない（ADR-0069 の決定 5・#1224）")
+NO_BAND = "none"
+
+# 指数の週次足。`PriceBook` が読む 2 つの属性だけを持つ（株価の週次の行 `_WEEKLY_PX` と同じ名前）
+_IndexBar = namedtuple("_IndexBar", "trade_date close_last")
 
 # 本番の設定の行（#1123）。鍵は比較画面・λ の参考と同じ `<name>:production`（model_comparison.VARIANT_PRODUCTION）
 PRODUCTION_MODEL = "macro_gbdt"
@@ -184,7 +214,8 @@ def months_between(ym0: str, ym1: str) -> int:
 def replay(periods: list[str], buy: dict, sell: dict,
            ret: Callable[[str, str, str], tuple[float | None, bool]],
            top_k: int, sell_k: int, cost_bps: float,
-           band_cost: Callable[[str, str], float] | None = None) -> list[dict]:
+           band_cost: Callable[[str, str], float] | None = None,
+           index_ret: Callable[[str, str], tuple[float | None, bool]] | None = None) -> list[dict]:
     """入れ替えを periods の順に繰り返し、区間ごとの明細を返す。
 
     buy = {(ym, 社): 買いのスコア}（高いほど買う）、sell = {(ym, 社): 売りのキー}（低いほど先に売る）。
@@ -196,6 +227,9 @@ def replay(periods: list[str], buy: dict, sell: dict,
     （どちらかの社のリターンが 1 つも取れない区間と初回は None）。予測が切れて外した社（`forced`）は売った社に
     入れない。`band_cost(ym, 社)` を渡すと、売った・外した・買った社ごとの片道コスト（bp）で引いた
     `cost_banded`・`net_banded` を足す（既定の `cost`・`net` は変えない）。
+
+    参考（#1224）: `index_ret(ym0, ym1)`（`(指数のリターン, 月末の週の値が無く手前の値で代用したか)`）を渡すと、
+    同じ区間の指数のリターン `index`（取れなければ None）と `index_stale` を足す。渡さなければキーは増えない。
     """
     by_ym: dict[str, set] = {}
     for ym, ec in buy.keys() & sell.keys():
@@ -239,6 +273,8 @@ def replay(periods: list[str], buy: dict, sell: dict,
         if band_cost is not None:
             row["cost_banded"] = sum(band_cost(ym, ec) for ec in sold + forced + bought) / 10_000.0 / top_k
             row["net_banded"] = gross - row["cost_banded"]
+        if index_ret is not None:
+            row["index"], row["index_stale"] = index_ret(ym, nxt)
         intervals.append(row)
     return intervals
 
@@ -270,6 +306,10 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
     参考（#1167）: `excess_ci` は区間ごとの「純リターン − 全社平均」の平均の定常ブートストラップ CI
     （`bootstrap_mean_ci`）、`annual_excess_ci` は年率の超過の CI（`annual_excess_ci`）、`swap_gain_mean`・
     `swap_gain_ci` は入替の利得。全区間に `net_banded` があれば帯ごとのコストの年率（`annual_net_banded`）も出す。
+
+    参考（#1224）: 区間に `index`（指数のリターン）があれば、指数の年率 `annual_index`・年率（コスト後）との差
+    `annual_excess_index`・その CI `annual_excess_index_ci` を足す。**指数の値が 1 区間でも取れなければ 3 つとも None**
+    にして `n_index_missing` に数える（欠けた区間を 0 として繋ぐと、もっともらしい年率が黙って出る）。
     """
     if not intervals:
         return {"n_intervals": 0}
@@ -300,16 +340,26 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
         out["annual_net_banded"] = ann_banded
         out["annual_excess_banded"] = (ann_banded - ann_bench
                                        if ann_banded is not None and ann_bench is not None else None)
+    if any("index" in iv for iv in intervals):
+        missing = sum(1 for iv in intervals if iv.get("index") is None)
+        ann_index = _annualized([iv["index"] for iv in intervals], years) if not missing else None
+        out["annual_index"] = ann_index
+        out["annual_excess_index"] = (ann_net - ann_index
+                                      if ann_net is not None and ann_index is not None else None)
+        out["annual_excess_index_ci"] = annual_excess_ci(intervals, bench_key="index") if not missing else None
+        out["n_index_missing"] = missing
+        out["n_index_stale"] = sum(1 for iv in intervals if iv.get("index_stale"))
     return out
 
 
 def annual_excess_ci(intervals: list[dict], *, n_boot: int = DEFAULT_N_BOOT, avg_block: float = DEFAULT_AVG_BLOCK,
-                     seed: int = DEFAULT_SEED, alpha: float = 0.05) -> dict | None:
+                     seed: int = DEFAULT_SEED, alpha: float = 0.05, bench_key: str = "bench") -> dict | None:
     """年率の超過（年率（コスト後）− 全社平均の年率）の定常ブートストラップ CI（参考・#1167）。
 
     区間を `model_stats._stationary_bootstrap_sample` で丸ごと抜き直し（純リターン・全社平均・月数を同じ区間から取る）、
     `summarize` と同じ幾何平均の年率に畳む。抜き直しの回数・平均ブロック長・種は `model_stats` の既定。
     2 区間未満、または年率が出せない（資産が 0 以下になる）抜き直しばかりなら None。
+    `bench_key` は比べる相手の列（既定は全社平均の `bench`。指数に対する超過は `index`・#1224）。
     """
     if len(intervals) < 2:
         return None
@@ -319,7 +369,7 @@ def annual_excess_ci(intervals: list[dict], *, n_boot: int = DEFAULT_N_BOOT, avg
         pick = _stationary_bootstrap_sample(intervals, rng, avg_block)
         years = sum(iv["months"] for iv in pick) / 12.0
         net = _annualized([iv["net"] for iv in pick], years)
-        bench = _annualized([iv["bench"] for iv in pick], years)
+        bench = _annualized([iv[bench_key] for iv in pick], years)
         if net is not None and bench is not None:
             vals.append(net - bench)
     if not vals:
@@ -402,6 +452,67 @@ def make_band_cost(bands: dict, band_bps: Sequence[float], flat_bps: float) -> C
         band = bands.get((ym, ec))
         return float(band_bps[band]) if band is not None else float(flat_bps)
     return cost
+
+
+def band_breakdown(intervals: list[dict], bands: dict,
+                   ret: Callable[[str, str, str], tuple[float | None, bool]]) -> dict:
+    """保有の延べ数（区間 × 保有の社）を売買代金の帯に分けた内訳（#1224・記述だけで検定しない）。
+
+    戻り値は `{"0": {...}, "1": {...}, "2": {...}, "none": {...}}`（0＝売買代金が小さい・`none`＝帯の無い社）。
+    帯は保有を組んだ期（区間の始め）のもの＝その月末より後の売買代金を見ない（`turnover_bands`）。各帯に:
+
+    - `n_slots`・`share`: 延べ数と、全体に占める割合。帯は売買代金がそろう全社の三等分なので、偏りが無ければ約 1/3
+    - `n_returns`・`mean_excess`: リターンが取れた延べ数と、その「区間リターン − その区間の全社平均」の平均（コスト前）
+    - `contribution`: その帯の超過の合計 ÷ リターンが取れた延べ数の総数。**全ての帯で足すと、保有全体の延べ数あたりの
+      平均超過になる**（どの帯が超過を運んだかの分解）
+    """
+    keys = [str(b) for b in range(N_COST_BANDS)] + [NO_BAND]
+    slots = {k: 0 for k in keys}
+    excess: dict[str, list[float]] = {k: [] for k in keys}
+    for iv in intervals:
+        for ec in iv["holdings"]:
+            band = bands.get((iv["from"], ec))
+            key = NO_BAND if band is None else str(band)
+            slots[key] += 1
+            r, _stale = ret(ec, iv["from"], iv["to"])
+            if r is not None:
+                excess[key].append(r - iv["bench"])
+    n_slots = sum(slots.values())
+    n_returns = sum(len(v) for v in excess.values())
+    return {k: {"n_slots": slots[k],
+                "share": slots[k] / n_slots if n_slots else None,
+                "n_returns": len(excess[k]),
+                "mean_excess": statistics.mean(excess[k]) if excess[k] else None,
+                "contribution": sum(excess[k]) / n_returns if n_returns else None}
+            for k in keys}
+
+
+def index_since(first_ym: str) -> str:
+    """指数を読み始める日（最初の test 月の月初の `INDEX_LOOKBACK_DAYS` 日前・ISO 文字列）。"""
+    y, m = map(int, first_ym.split("-"))
+    return (date(y, m, 1) - timedelta(days=INDEX_LOOKBACK_DAYS)).isoformat()
+
+
+def load_index_daily(db, since: str) -> dict:
+    """比べる相手の指数（`INDEX_SERIES`）の日次の終値 `{日付: 終値}`（#1224・読むだけ）。
+
+    `since`（ISO 文字列）以降。2 列だけ引く（`preload_macro` と同じ理由＝ORM 行を引かない）。`close` は空を許さない列。
+    """
+    from database import MacroData as M
+    rows = (db.query(M.trade_date, M.close)
+            .filter(M.series_code == INDEX_SERIES, M.trade_date >= since).all())
+    return {r.trade_date: float(r.close) for r in rows}
+
+
+def index_weekly_bars(daily: dict) -> list:
+    """日次の終値 `{日付: 終値}` を、株価の週次表と同じ規則の週次足（日付の昇順）にする（#1224）。
+
+    `database.aggregate_weeks`（`stock_price_weekly` を作る関数）をそのまま使う＝足の日付は週の最後の営業日、終値は
+    その日の値。`PriceBook` は月末の週を足の日付の月で決める（`month_end_indices`）ので、**週の月曜を日付にすると
+    月をまたぐ週で保有側と 1 週ずれる**（`portfolio_ledger.load_benchmark` を使わない理由）。
+    """
+    weeks = aggregate_weeks((INDEX_SERIES, d, c, None) for d, c in daily.items())
+    return sorted((_IndexBar(w["trade_date"], w["close_last"]) for w in weeks), key=lambda b: b.trade_date)
 
 
 def path_summary(paths: dict) -> dict:
@@ -497,23 +608,36 @@ def predictions_with_params(panel: tuple, db, test_yms: Sequence[str],
 def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[str],
                 sell_source: str, top_k: int, sell_k: int, cost_bps: float,
                 production: dict | None = None, extra_m2: dict | None = None,
-                band_cost: Callable[[str, str], float] | None = None) -> dict:
+                band_cost: Callable[[str, str], float] | None = None,
+                index_bars: list | None = None, bands: dict | None = None) -> dict:
     """買いの並び（models）ごとに OOF 運用再現を回す。
 
     `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
     直後に `PRODUCTION_KEY` の行を足す。共通域（y がある鍵）の外の予測は落とし、件数を `coverage` に出す。
     `extra_m2`（`{行の名前: M-2 の予測}`・#1155 の時間順に選んだ M-2 など）は、M-2 の並び方（`buy_scores`）で
     末尾に足す（models に M-2 が無くても足す）。`band_cost`（#1167）は全ての行の `replay` へそのまま渡す。
+
+    参考（#1224）: `index_bars`（`index_weekly_bars` の戻り）を渡すと、保有側と同じ `PriceBook` で月末の週の終値を引いて
+    全ての行に指数に対する超過を足す。`bands`（`turnover_bands` の戻り）を渡すと、行に帯の内訳 `bands` を足す。
+    どちらも渡さなければ（既定）、行と要約のキーは変わらない。
     """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
     sell = preds[sell_source]
+    index_book = PriceBook({INDEX_SERIES: index_bars}) if index_bars is not None else None
+
+    def index_ret(ym0: str, ym1: str) -> tuple[float | None, bool]:
+        return index_book.period_return(INDEX_SERIES, ym0, ym1)
 
     def one(name: str, pred: dict) -> dict:
         buy, ordering = buy_scores(name, pred, y, prices_by_co, db)
         periods = sorted({ym for ym, _ec in buy.keys() & sell.keys()})
-        intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps, band_cost)
-        return {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
+        intervals = replay(periods, buy, sell, book.period_return, top_k, sell_k, cost_bps, band_cost,
+                           index_ret if index_book is not None else None)
+        row = {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
+        if bands is not None:
+            row["bands"] = band_breakdown(intervals, bands, book.period_return)
+        return row
 
     def coverage(pred: dict, inside: dict) -> dict:
         return {"n_rows": len(inside), "n_outside_common": len(pred) - len(inside),
@@ -560,7 +684,10 @@ def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: f
     elif production:
         print(f"注意: M-2*（本番の設定）は出さない: {production.get('reason')}: {production.get('error')}",
               flush=True)
-    print(f"  {'買いの並び':<10}{'年率(前)':>10}{'年率(後)':>10}{'全社平均':>10}{'超過':>10}"
+    has_index = any("annual_index" in res["summary"] for res in results.values())
+    if has_index:
+        print(f"注意: {INDEX_NOTE}", flush=True)
+    print(f"  {'買いの並び':<10}{'年率(前)':>10}{'年率(後)':>10}{'全社平均':>10}{'超過':>10}{'TOPIX':>10}{'対TOPIX':>10}"
           f"{'最大下落':>10}{'入替率':>8}{'区間':>6}{'途切れ':>7}", flush=True)
     for name, res in results.items():
         s = res["summary"]
@@ -568,18 +695,42 @@ def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: f
         dd = f"{s['max_drawdown'] * 100:.2f}%" if s.get("max_drawdown") is not None else "n/a"
         print(f"  {_label(name):<10}{_pct(s.get('annual_gross')):>10}{_pct(s.get('annual_net')):>10}"
               f"{_pct(s.get('annual_bench')):>10}{_pct(s.get('annual_excess')):>10}"
+              f"{_pct(s.get('annual_index')):>10}{_pct(s.get('annual_excess_index')):>10}"
               f"{dd:>10}{turn}{s.get('n_intervals', 0):>6}"
               f"{s.get('n_stopped', 0):>7}", flush=True)
-    # 参考（#1167）: 区間の超過・年率の超過・入替の利得の 95%CI と、帯ごとのコスト後の年率の超過
-    print(f"  {'買いの並び':<10}{'区間の超過 [95%CI]':>30}{'年率の超過の95%CI':>24}{'入替の利得 [95%CI]':>30}"
-          f"{'帯コスト後の超過':>12}", flush=True)
+    # 指数の値が取れない区間は 0 として繋がず、年率を出さない（#1224）。出していない理由をここで言う
+    lacking = {_label(name): res["summary"]["n_index_missing"] for name, res in results.items()
+               if res["summary"].get("n_index_missing")}
+    if lacking:
+        print(f"注意: TOPIX の値が取れない区間があるので、TOPIX の年率と超過を出していない（区間の数: {lacking}）",
+              flush=True)
+    # 参考（#1167）: 区間の超過・年率の超過・入替の利得の 95%CI と、帯ごとのコスト後の年率の超過。対TOPIX は #1224
+    print(f"  {'買いの並び':<10}{'区間の超過 [95%CI]':>30}{'年率の超過の95%CI':>24}{'対TOPIXの95%CI':>24}"
+          f"{'入替の利得 [95%CI]':>30}{'帯コスト後の超過':>12}", flush=True)
     for name, res in results.items():
         s = res["summary"]
-        ann = s.get("annual_excess_ci")
-        ann_txt = f"[{_pct(ann['ci_lo'])},{_pct(ann['ci_hi'])}]" if ann else "n/a"
-        print(f"  {_label(name):<10}{_fmt_ci(s.get('excess_ci')):>30}{ann_txt:>24}"
+        print(f"  {_label(name):<10}{_fmt_ci(s.get('excess_ci')):>30}{_fmt_range(s.get('annual_excess_ci')):>24}"
+              f"{_fmt_range(s.get('annual_excess_index_ci')):>24}"
               f"{_fmt_ci(s.get('swap_gain_ci'), s.get('swap_gain_mean')):>30}"
               f"{_pct(s.get('annual_excess_banded')):>12}", flush=True)
+    if any("bands" in res for res in results.values()):
+        _print_bands(results)
+
+
+def _fmt_range(ci: dict | None) -> str:
+    """`annual_excess_ci` の結果を「[下限,上限]」で。無ければ n/a。"""
+    return f"[{_pct(ci['ci_lo'])},{_pct(ci['ci_hi'])}]" if ci else "n/a"
+
+
+def _print_bands(results: dict) -> None:
+    """保有の売買代金の帯の内訳（#1224・参考）。"""
+    print(f"\n=== 保有の売買代金の帯の内訳（参考）===\n注意: {BREAKDOWN_NOTE}", flush=True)
+    print(f"  {'買いの並び':<10}{'帯':>6}{'延べ数':>8}{'割合':>9}{'平均超過':>11}{'寄与':>11}", flush=True)
+    for name, res in results.items():
+        for band, b in (res.get("bands") or {}).items():
+            share = f"{b['share'] * 100:.1f}%" if b.get("share") is not None else "n/a"
+            print(f"  {_label(name):<10}{band:>6}{b['n_slots']:>8}{share:>9}{_pct(b.get('mean_excess')):>11}"
+                  f"{_pct(b.get('contribution')):>11}", flush=True)
 
 
 def _fmt_ci(ci: dict | None, mean: float | None = None) -> str:
@@ -674,11 +825,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with shifted_min_train(shift):
                 runs[shift] = _run_config(label, BASES, panel, db, weight_method="rank_ic_grid", keep_common=True)
         check_paths_disjoint({s: set(r["common"]) for s, r in runs.items()})
+        all_yms = sorted({ym for r in runs.values() for ym in r["common"]})
+        # 比べる相手の指数（#1224・参考）。全ての経路に同じ週次足を渡す。test 月が 1 つも無ければ読まない
+        index_bars = index_weekly_bars(load_index_daily(db, index_since(all_yms[0]))) if all_yms else []
         bands = None
         if args.cost_bands_bps is not None:
             # 売買代金の帯（#1167・参考）。週次ローダへ列を足さず、対象の社と期間に絞って読む
             from scripts.measure_index_event import load_turnover
-            all_yms = sorted({ym for r in runs.values() for ym in r["common"]})
             codes = {row[0] for r in runs.values() for rows in r["common"].values() for row in rows}
             turnover = load_turnover(db, codes, _month_end_date(all_yms[0]) - timedelta(weeks=TURNOVER_WEEKS),
                                      _month_end_date(all_yms[-1]))
@@ -691,7 +844,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prod_preds, prod_info = production_predictions(panel, db, sorted(run["common"]))
             results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
                                   args.sell_source, args.top_k, args.sell_k, args.cost_bps,
-                                  production=prod_preds, band_cost=band_cost)
+                                  production=prod_preds, band_cost=band_cost,
+                                  index_bars=index_bars, bands=bands)
             paths[shift] = {"results": results, "production": prod_info, "has_production": prod_preds is not None,
                             "test_months": sorted(run["common"])}
     finally:
@@ -710,13 +864,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     head = paths[args.start_shifts[0]]
     payload = {
         "disclaimer": DISCLAIMER,
-        "caveats":    ([M4_BASES_CAVEAT, DELIST_NOTE]
+        "caveats":    ([M4_BASES_CAVEAT, DELIST_NOTE, INDEX_NOTE]
                        + ([PRODUCTION_NOTE] if any(p["has_production"] for p in paths.values()) else [])
-                       + ([PATH_NOTE] if len(paths) > 1 else []) + ([BAND_NOTE] if bands is not None else [])),
+                       + ([PATH_NOTE] if len(paths) > 1 else [])
+                       + ([BAND_NOTE, BREAKDOWN_NOTE] if bands is not None else [])),
         "params":     {"top_k": args.top_k, "sell_k": args.sell_k, "cost_bps": args.cost_bps,
                        "sell_source": args.sell_source, "models": args.models, "smoke": args.smoke,
                        "start_shifts": list(args.start_shifts),
                        "cost_bands_bps": list(args.cost_bands_bps) if args.cost_bands_bps is not None else None},
+        # 比べる相手の指数（#1224）。使った週次足の範囲を残す＝公表されている値と突き合わせられる
+        "index":      {"series": INDEX_SERIES, "n_weeks": len(index_bars),
+                       "first": index_bars[0].trade_date if index_bars else None,
+                       "last": index_bars[-1].trade_date if index_bars else None},
         # 本番の設定の M-2 の行の付記（設定・探索日・そろった期・回せなかった理由）。M-2 を選ばない回は None
         "production": head["production"],
         # 先頭の経路（既定はずらし 0＝今までの 1 本）

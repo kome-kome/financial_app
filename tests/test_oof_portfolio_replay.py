@@ -508,6 +508,7 @@ class TestPathsCli:
         monkeypatch.setattr(op, "buy_scores", lambda name, pred, y, prices_by_co, db: (
             dict(pred), {"lambda": 0.0, "risk_axis": None, "time_reproducible": True, "n_dropped_rows": 0}))
         monkeypatch.setattr(op, "PriceBook", Book)
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})   # 指数（#1224）は DB から読む＝偽物の DB では読めない
         out = tmp_path / "paths.json"
         code = op.main(["--start-shifts", "0,1,2", "--models", "macro_risk_return", "macro_enet",
                         "--top-k", "3", "--sell-k", "1", "--out", str(out)])
@@ -521,3 +522,272 @@ class TestPathsCli:
         assert payload["path_summary"]["macro_enet"]["n_paths"] == 3
         assert op.PATH_NOTE in payload["caveats"] and op.BAND_NOTE not in payload["caveats"]
         assert payload["params"]["start_shifts"] == [0, 1, 2]
+
+
+# ── #1224: TOPIX に対する超過と、保有の売買代金の帯の内訳（どちらも参考）──────────────────────
+
+def _index_table(table):
+    """{(ym0, ym1): リターン or None} を index_ret の形へ（月末の週の値は代用していない）。"""
+    def index_ret(ym0, ym1):
+        return table.get((ym0, ym1)), False
+    return index_ret
+
+
+def _fake_book(index_return=0.01):
+    """どの社もどの区間も +1%、指数だけ `index_return` を返す偽物の `PriceBook`。"""
+    class Book:
+        def __init__(self, _prices):
+            pass
+
+        def period_return(self, ec, ym0, ym1):
+            return (index_return if ec == op.INDEX_SERIES else 0.01), False
+    return Book
+
+
+def _fake_main(monkeypatch, common, bases, book):
+    """`main` の M-4・パネル・DB・買いの並び・株価を偽物にする（配線だけを確かめる）。"""
+    monkeypatch.setattr(op, "_load_panel", lambda args: ({}, {}, {}, {}))
+    monkeypatch.setattr(op, "SessionLocal", lambda: type("DB", (), {"close": lambda self: None})())
+    monkeypatch.setattr(op, "_run_config", lambda *a, **k: {"common": common, "bases": bases})
+    monkeypatch.setattr(op, "buy_scores", lambda name, pred, y, prices_by_co, db: (
+        dict(pred), {"lambda": 0.0, "risk_axis": None, "time_reproducible": True, "n_dropped_rows": 0}))
+    monkeypatch.setattr(op, "PriceBook", book)
+
+
+def _fake_common(seed, n_companies):
+    rng = random.Random(seed)
+    return {ym: [(f"E{i:02d}", (rng.random(), rng.random(), rng.random()), rng.gauss(0, 0.1))
+                 for i in range(n_companies)] for ym in ["2021-01", "2021-04", "2021-07"]}
+
+
+class TestIndexExcess:
+    """TestReplayByHand の検体に、区間ごとの指数のリターン（P1→P2 +2%・P2→P3 −1%）を並べる。"""
+
+    INDEX = {(P1, P2): 0.02, (P2, P3): -0.01}
+
+    def _run(self, index=None):
+        hand = TestReplayByHand
+        return op.replay([P1, P2, P3], hand.BUY, hand.SELL, _table_ret(hand.RET), 3, 1, 100.0,
+                         None, _index_table(self.INDEX if index is None else index))
+
+    def test_annual_excess_matches_hand_calculation(self):
+        ivs = self._run()
+        assert [iv["index"] for iv in ivs] == [0.02, -0.01]
+        s = op.summarize(ivs, 3)
+        assert s["annual_index"] == pytest.approx((1.02 * 0.99) ** (1 / 0.5) - 1)
+        assert s["annual_excess_index"] == pytest.approx(s["annual_net"] - s["annual_index"])
+        assert (s["n_index_missing"], s["n_index_stale"]) == (0, 0)
+        # 全社平均に対する超過とは別の値＝比べる相手を取り違えていない
+        assert s["annual_excess_index"] != pytest.approx(s["annual_excess"])
+
+    def test_the_default_call_keeps_its_keys_and_values(self):
+        """足すのは新しいキーだけ。指数を渡さない呼び出し（#1155 の計測など）は、行も要約も今のまま。"""
+        plain, with_index = TestReplayByHand()._run(), self._run()
+        for a, b in zip(plain, with_index):
+            assert set(b) == set(a) | {"index", "index_stale"}
+            assert {k: b[k] for k in a} == a
+        s_plain, s_index = op.summarize(plain, 3), op.summarize(with_index, 3)
+        added = {"annual_index", "annual_excess_index", "annual_excess_index_ci", "n_index_missing", "n_index_stale"}
+        assert set(s_index) == set(s_plain) | added and not added & set(s_plain)
+        assert {k: s_index[k] for k in s_plain} == s_plain
+
+    def test_a_missing_interval_is_not_chained_as_zero(self):
+        """指数の値が 1 区間でも無ければ年率を出さない（0 として繋ぐと、もっともらしい年率が黙って出る）。"""
+        s = op.summarize(self._run({(P1, P2): 0.02}), 3)
+        assert s["annual_index"] is None and s["annual_excess_index"] is None
+        assert s["annual_excess_index_ci"] is None and s["n_index_missing"] == 1
+        assert s["annual_excess"] is not None                        # 全社平均の側は影響を受けない
+
+    def test_the_ci_reads_the_index_column(self):
+        iv = {"months": 3, "gross": 0.03, "net": 0.03, "bench": 0.01, "index": 0.02, "index_stale": False,
+              "sold": [], "forced": [], "n_stopped": 0, "n_missing": 0}
+        ivs = [dict(iv) for _ in range(6)]
+        ci = op.annual_excess_ci(ivs, bench_key="index")
+        point = (1.03 ** 4 - 1) - (1.02 ** 4 - 1)
+        assert ci["ci_lo"] == pytest.approx(point) and ci["ci_hi"] == pytest.approx(point)
+        assert op.summarize(ivs, 3)["annual_excess_index_ci"] == ci
+        # 既定は全社平均のまま
+        assert op.annual_excess_ci(ivs)["ci_lo"] == pytest.approx((1.03 ** 4 - 1) - (1.01 ** 4 - 1))
+
+    def test_perfect_foresight_beats_a_flat_index_and_loses_to_a_soaring_one(self):
+        periods, future, last, ret = TestSign._world(seed=3)
+        scores = {**future, **last}
+        flat = op.summarize(op.replay(periods, scores, scores, ret, 5, 1, 0.0, None, lambda a, b: (0.0, False)), 5)
+        soaring = op.summarize(op.replay(periods, scores, scores, ret, 5, 1, 0.0, None, lambda a, b: (1.0, False)), 5)
+        assert flat["annual_excess_index"] > 0 > soaring["annual_excess_index"]
+
+
+class TestIndexBars:
+    # 2020-03-30（月）〜04-03（金）は月をまたぐ週。株価の週次表では、足の日付は週の最後の営業日（4 月）になる
+    DAILY = {"2020-03-26": 98.0, "2020-03-27": 99.0, "2020-03-30": 100.0, "2020-03-31": 101.0,
+             "2020-04-01": 102.0, "2020-04-03": 103.0, "2020-04-10": 104.0}
+
+    def test_bars_are_the_last_trading_day_of_each_week_in_date_order(self):
+        assert op.index_weekly_bars(dict(reversed(self.DAILY.items()))) == [
+            ("2020-03-27", 99.0), ("2020-04-03", 103.0), ("2020-04-10", 104.0)]
+        assert op.index_weekly_bars({}) == []
+
+    def test_a_week_straddling_the_month_end_belongs_to_the_later_month(self):
+        """月末の週の決め方が保有側と同じ: 3 月の月末の終値は 03-27 の足で、月をまたぐ週（終値 103）ではない。"""
+        book = op.PriceBook({op.INDEX_SERIES: op.index_weekly_bars(self.DAILY)})
+        assert book.close_at(op.INDEX_SERIES, "2020-03") == (99.0, False)
+        assert book.close_at(op.INDEX_SERIES, "2020-04") == (104.0, False)
+        assert book.period_return(op.INDEX_SERIES, "2020-03", "2020-04") == (pytest.approx(104.0 / 99.0 - 1), False)
+        # 同じ日次を株価の週次の行にしたものと、月末の終値が一致する
+        weeks = database.aggregate_weeks(("E1", d, c, None) for d, c in self.DAILY.items())
+        stock = [PX(w["trade_date"], w["close_last"], None) for w in sorted(weeks, key=lambda w: w["trade_date"])]
+        assert op.PriceBook({"E1": stock}).close_at("E1", "2020-03") == (99.0, False)
+
+    def test_since_is_a_month_before_the_first_test_month(self):
+        assert op.index_since("2021-02") == "2021-01-01"
+        assert op.index_since("2021-01") == "2020-12-01"
+
+    def test_load_reads_only_the_benchmark_series_from_since(self, db):
+        from database import MacroData
+        db.add_all([
+            MacroData(series_code=op.INDEX_SERIES, trade_date="2020-12-30", close=90.0),    # since より前
+            MacroData(series_code=op.INDEX_SERIES, trade_date="2021-01-01", close=95.0),    # since 当日は入る
+            MacroData(series_code=op.INDEX_SERIES, trade_date="2021-01-04", close=100.0),
+            MacroData(series_code="USDJPY", trade_date="2021-01-04", close=103.0),           # 別の系列
+        ])
+        db.commit()
+        assert op.load_index_daily(db, "2021-01-01") == {"2021-01-01": 95.0, "2021-01-04": 100.0}
+
+    def test_the_series_name_is_borrowed_from_the_ledger(self):
+        """比べる相手は docs/VISION.md で 1 つに決めた。売買の記録の成績と別の系列を見ない。"""
+        import portfolio_ledger
+        assert op.INDEX_SERIES is portfolio_ledger.BENCHMARK_SERIES
+
+
+class TestBandBreakdown:
+    """TestReplayByHand の保有（P1: A・B・C、P2: B・D・E）を帯に分ける。全社平均は P1→P2 が 0.0、P2→P3 が 0.10。"""
+
+    BANDS = {(P1, "A"): 0, (P1, "B"): 2, (P2, "B"): 2, (P2, "D"): 0}     # C と E は帯なし
+
+    def _run(self, ret=None):
+        ivs = TestReplayByHand()._run()
+        return op.band_breakdown(ivs, self.BANDS, _table_ret(TestReplayByHand.RET if ret is None else ret))
+
+    def test_shares_and_mean_excess_match_hand_calculation(self):
+        b = self._run()
+        assert list(b) == ["0", "1", "2", op.NO_BAND]
+        assert [b[k]["n_slots"] for k in b] == [2, 0, 2, 2]
+        assert [b[k]["share"] for k in b] == pytest.approx([1 / 3, 0.0, 1 / 3, 1 / 3])
+        assert b["0"]["mean_excess"] == pytest.approx((0.10 - 0.0 + 0.30 - 0.10) / 2)      # A@P1・D@P2
+        assert b["2"]["mean_excess"] == pytest.approx((0.20 - 0.0 + 0.10 - 0.10) / 2)      # B@P1・B@P2
+        assert b[op.NO_BAND]["mean_excess"] == pytest.approx((-0.30 - 0.0 - 0.10 - 0.10) / 2)   # C@P1・E@P2
+        assert b["1"]["mean_excess"] is None and b["1"]["contribution"] == 0.0
+
+    def test_contributions_add_up_to_the_mean_excess_per_slot(self):
+        """帯ごとの寄与を足すと、保有全体の延べ数あたりの平均超過（コスト前）になる。"""
+        ivs = TestReplayByHand()._run()
+        b = self._run()
+        per_slot = sum((iv["gross"] - iv["bench"]) * len(iv["holdings"]) for iv in ivs) / 6
+        assert sum(v["contribution"] for v in b.values()) == pytest.approx(per_slot)
+        assert b["0"]["contribution"] == pytest.approx(0.30 / 6)
+
+    def test_the_band_is_the_one_at_the_start_of_the_interval(self):
+        """B は P1 でも P2 でも保有。帯は保有を組んだ期のものを引く（後の期の帯を先取りしない）。"""
+        bands = {(P1, "B"): 0, (P2, "B"): 2}
+        b = op.band_breakdown(TestReplayByHand()._run(), bands, _table_ret(TestReplayByHand.RET))
+        assert (b["0"]["n_slots"], b["2"]["n_slots"]) == (1, 1)
+        assert b["0"]["mean_excess"] == pytest.approx(0.20) and b["2"]["mean_excess"] == pytest.approx(0.0)
+
+    def test_a_holding_without_a_return_is_counted_but_not_averaged(self):
+        ret = {k: v for k, v in TestReplayByHand.RET.items() if k != ("B", P2, P3)}
+        b = self._run(ret)
+        assert (b["2"]["n_slots"], b["2"]["n_returns"]) == (2, 1)
+        assert b["2"]["mean_excess"] == pytest.approx(0.20)
+
+    def test_no_holdings_gives_no_shares(self):
+        b = op.band_breakdown([], self.BANDS, _table_ret({}))
+        assert all(v["share"] is None and v["contribution"] is None and v["n_slots"] == 0 for v in b.values())
+
+
+class TestIndexAndBandsWiring:
+    """`run_replays` と `main` の配線。M-4 は回さず、どの社もどの区間も +1% の偽物の株価で確かめる。"""
+
+    KEY = "measure:oof-replay-bands"
+    BASES = TestProductionRow.BASES
+
+    def _rows(self, monkeypatch, **kwargs):
+        row = TestProductionRow()
+        row._patch(monkeypatch)
+        return op.run_replays(row._common(), self.BASES, {}, None, list(self.BASES), "macro_enet", 3, 1, 10.0, **kwargs)
+
+    def test_every_row_gets_the_index_excess(self, monkeypatch):
+        res = self._rows(monkeypatch, index_bars=[])
+        for name in self.BASES:
+            s = res[name]["summary"]
+            assert s["annual_excess_index"] == pytest.approx(s["annual_net"] - s["annual_index"])
+            assert "bands" not in res[name]
+
+    def test_the_default_rows_do_not_change(self, monkeypatch):
+        plain, both = self._rows(monkeypatch), self._rows(monkeypatch, index_bars=[], bands={})
+        for name in self.BASES:
+            assert "annual_index" not in plain[name]["summary"] and "bands" not in plain[name]
+            assert {k: both[name]["summary"][k] for k in plain[name]["summary"]} == plain[name]["summary"]
+            assert both[name]["ordering"] == plain[name]["ordering"]
+            assert both[name]["bands"][op.NO_BAND]["share"] == 1.0   # 帯の表が空＝全ての保有が帯なし
+
+    def test_job_runs_the_bands_alone_into_its_own_file(self):
+        job = rd.JOBS[self.KEY]
+        assert job.argv[1:3] == ("-m", "scripts.oof_portfolio_replay")
+        args = op.build_parser().parse_args(list(job.argv[3:]))
+        assert args.cost_bands_bps == (30.0, 15.0, 8.0) and args.start_shifts == (0,)
+        assert args.allow_full_pull and args.refresh_cache and not args.smoke
+        others = {op.build_parser().parse_args(list(rd.JOBS[k].argv[3:])).out
+                  for k in ("measure:oof-replay", "measure:oof-replay-paths")}
+        assert args.out not in others                     # 既定と 3 経路の結果を上書きしない
+        assert job.parallel_sensitive is True
+        assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN
+
+    def test_main_writes_the_index_and_the_band_breakdown(self, monkeypatch, tmp_path):
+        import json
+        from datetime import date, timedelta
+
+        import scripts.measure_index_event as mie
+        since = []
+
+        def fake_daily(db, s):
+            since.append(s)
+            return {"2021-01-04": 100.0, "2021-01-08": 101.0, "2021-01-15": 102.0}
+
+        def fake_turnover(db, codes, lo, hi):
+            weeks = [date(2021, 7, 26) - timedelta(weeks=i) for i in range(90)]
+            # E08 は 13 週に満たない＝帯なし。ほかは社の番号の順に売買代金が大きい
+            return {ec: {w: float(int(ec[1:]) + 1) for w in (weeks[:5] if ec == "E08" else weeks)} for ec in codes}
+
+        _fake_main(monkeypatch, _fake_common(11, 9), self.BASES, _fake_book(index_return=0.02))
+        monkeypatch.setattr(op, "load_index_daily", fake_daily)
+        monkeypatch.setattr(mie, "load_turnover", fake_turnover)
+        out = tmp_path / "bands.json"
+        assert op.main(["--cost-bands-bps", "30,15,8", "--models", "macro_risk_return", "macro_enet",
+                        "--top-k", "3", "--sell-k", "1", "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert since == ["2020-12-01"]                     # 最初の test 月の 1 か月前から、1 回だけ読む
+        assert payload["index"] == {"series": op.INDEX_SERIES, "n_weeks": 2,
+                                    "first": "2021-01-08", "last": "2021-01-15"}
+        assert {op.INDEX_NOTE, op.BAND_NOTE, op.BREAKDOWN_NOTE} <= set(payload["caveats"])
+        for name in ("macro_risk_return", "macro_enet"):
+            row = payload["results"][name]
+            s = row["summary"]
+            assert s["annual_index"] == pytest.approx(1.02 ** 4 - 1)
+            assert s["annual_excess_index"] == pytest.approx(s["annual_net"] - s["annual_index"])
+            assert "annual_net_banded" in s
+            assert set(row["bands"]) == {"0", "1", "2", op.NO_BAND}
+            assert sum(b["n_slots"] for b in row["bands"].values()) == 3 * 2          # K=3 × 2 区間
+            assert sum(b["share"] for b in row["bands"].values()) == pytest.approx(1.0)
+
+    def test_the_default_run_has_no_band_breakdown(self, monkeypatch, tmp_path):
+        """帯の内訳は `--cost-bands-bps` を付けたときだけ。指数に対する超過は引数なしでも出る。"""
+        import json
+        _fake_main(monkeypatch, _fake_common(12, 8), self.BASES, _fake_book())
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        out = tmp_path / "plain.json"
+        assert op.main(["--models", "macro_enet", "--top-k", "3", "--sell-k", "1", "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        row = payload["results"]["macro_enet"]
+        assert "bands" not in row and "annual_excess_index" in row["summary"]
+        assert op.INDEX_NOTE in payload["caveats"] and op.BREAKDOWN_NOTE not in payload["caveats"]
+        assert payload["index"]["n_weeks"] == 0
