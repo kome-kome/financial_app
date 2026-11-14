@@ -405,12 +405,110 @@ details.rerun[open]>summary{margin-bottom:8px}
     </div>
   </div>
 
+  <!-- 売買の記録と運用成績（#1222）。運用の成功指標（docs/VISION.md）を測る元データ -->
+  <div class="card">
+    <h2 class="section-title">売買の記録</h2>
+    <div class="info-box" style="margin-bottom:14px">
+      実際に買った・売った内容を 1 行ずつ記録します。ここから保有と運用成績（TOPIX との比較）を出します。<br>
+      単価と株数は<strong>約定したときの値</strong>をそのまま入れます。保有中に株式分割・併合があったら「分割」を 1 行足してください（足さないと株数と損益が食い違います）。<br>
+      記録は消せません。間違えたら「取消」を押して、正しい内容を入れ直します。
+    </div>
+    <div class="grid4" style="margin-bottom:4px">
+      <div class="form-group">
+        <label for="ledger-side">売買の別</label>
+        <select id="ledger-side" data-change="onLedgerSideChange">
+          <option value="buy" selected>買い</option>
+          <option value="sell">売り</option>
+          <option value="split">分割・併合</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="ledger-code">証券コード</label>
+        <input type="text" id="ledger-code" maxlength="4" autocomplete="off" placeholder="例: 7203">
+      </div>
+      <div class="form-group">
+        <label for="ledger-date" id="ledger-date-label">約定日</label>
+        <input type="date" id="ledger-date">
+      </div>
+      <div class="form-group ledger-trade-field">
+        <label for="ledger-price">単価（円）</label>
+        <input type="number" id="ledger-price" min="0" step="any" inputmode="decimal" placeholder="例: 1500">
+      </div>
+      <div class="form-group ledger-trade-field">
+        <label for="ledger-qty">株数</label>
+        <input type="number" id="ledger-qty" min="0" step="any" inputmode="decimal" placeholder="例: 100">
+      </div>
+      <div class="form-group ledger-trade-field">
+        <label for="ledger-fee">手数料（円・任意）</label>
+        <input type="number" id="ledger-fee" min="0" step="any" inputmode="decimal" placeholder="0">
+      </div>
+      <div class="form-group ledger-split-field hidden">
+        <label for="ledger-ratio">1 株が何株になったか</label>
+        <input type="number" id="ledger-ratio" min="0" step="any" inputmode="decimal" placeholder="1 対 2 の分割なら 2">
+      </div>
+      <div class="form-group">
+        <label for="ledger-memo">メモ（任意）</label>
+        <input type="text" id="ledger-memo" maxlength="200" placeholder="例: M-6 の上位">
+      </div>
+    </div>
+    <button class="btn btn-secondary" id="btn-ledger-add" data-click="addLedgerEntry">記録する</button>
+
+    <details id="ledger-list" style="margin-top:16px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)" id="ledger-list-summary">記録の一覧</summary>
+      <div style="overflow-x:auto;margin-top:10px">
+        <table>
+          <thead>
+            <tr><th>日付</th><th>売買</th><th>証券コード</th><th>単価</th><th>株数</th><th>手数料</th><th>メモ</th><th>操作</th></tr>
+          </thead>
+          <tbody id="ledger-tbody"></tbody>
+        </table>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">保有と運用成績（記録から）</h2>
+    <div id="pf-empty" class="text-sm">売買の記録がまだありません。上の欄から記録すると、ここに保有と成績が出ます。</div>
+    <div id="pf-body" class="hidden">
+      <div id="pf-notes" class="text-sm" style="margin-bottom:12px"></div>
+      <div class="grid4">
+        <div class="stat-card"><div class="stat-label">運用開始来</div><div class="stat-value" id="pf-total">-</div></div>
+        <div class="stat-card"><div class="stat-label">同じ期間の TOPIX</div><div class="stat-value" id="pf-bench">-</div></div>
+        <div class="stat-card"><div class="stat-label">TOPIX との差</div><div class="stat-value" id="pf-excess">-</div></div>
+        <div class="stat-card"><div class="stat-label">最大下落（TOPIX）</div><div class="stat-value" id="pf-dd">-</div></div>
+      </div>
+      <div class="text-sm" style="margin-bottom:12px" id="pf-pnl"></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr><th>証券コード</th><th>企業名</th><th>株数</th><th>取得単価</th><th>終値</th><th>評価額</th><th>評価損益</th><th>損益率</th></tr>
+          </thead>
+          <tbody id="pf-tbody"></tbody>
+        </table>
+      </div>
+      <details style="margin-top:14px">
+        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">月ごとの成績</summary>
+        <div style="overflow-x:auto;margin-top:10px">
+          <table>
+            <thead><tr><th>月</th><th>保有</th><th>TOPIX</th><th>差</th></tr></thead>
+            <tbody id="pf-months"></tbody>
+          </table>
+        </div>
+      </details>
+      <div class="text-sm" style="margin-top:12px;line-height:1.7">
+        ※ 成績は週末の終値で測ります（週の途中の下落は出ません）。買い増し・売却による入出金は増減に数えません。<br>
+        ※ TOPIX は連動 ETF（1306）の値動きで、配当は含みません。比べるのは保有していた週だけです。
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <h2 class="section-title">保有銘柄を入力</h2>
     <div class="info-box" style="margin-bottom:14px">
       書式: <code>証券コード[, @取得単価][, 購入日]</code>（証券コードだけでも可）　例: <code>7203, @1500, 2024-03-10</code> / <code>6758 @12000</code> / <code>9984</code><br>
       取得単価を入れると損益も表示します。入力内容はこのブラウザに自動保存されます。
     </div>
+    <button class="btn btn-secondary btn-sm hidden" id="btn-ledger-fill" data-click="fillHoldingsFromLedger" style="margin-bottom:10px">売買の記録の保有を入れる</button>
     <textarea id="param-sell_ranking-holdings" rows="6" placeholder="7203, @1500, 2024-03-10&#10;6758 @12000&#10;9984"
       style="width:100%;font-family:monospace;font-size:13px;resize:vertical;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border-subtle);border-radius:6px;padding:8px"></textarea>
     <button class="btn btn-primary" id="btn-sell-ranking" data-click="runSellRanking" style="margin-top:16px">
