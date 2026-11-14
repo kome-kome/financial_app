@@ -1,6 +1,7 @@
 """収集ジョブ管理 API ルーター。
 
 /api/collect/* および /api/scheduler/* エンドポイントを担当。
+売買の記録の書く口（POST /api/portfolio/ledger*・#1222）もここに置く（下の書き込みガードを通すため）。
 共有状態（jobs, limiter, RATELIMIT_* 等）は import api 経由で参照し、
 テストの monkeypatch.setattr(api, ...) と互換性を保つ。
 
@@ -19,9 +20,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import api
+import portfolio_ledger
 from database import (
     SessionLocal, Company, FinancialRecord, CollectionLog,
-    StockPriceWeekly,
+    StockPriceWeekly, insert_trade_ledger_entry,
 )
 from collector import (
     refresh_company, update_market_data_from_history,
@@ -463,3 +465,41 @@ async def stop_macro_collection():
 @router.get("/api/collect/macro/status")
 async def macro_collection_status():
     return api.jobs.snapshot("macro")
+
+
+# ── 売買の記録（#1222）────────────────────────────────────────────────────
+# 読む口（GET）は routers/portfolio.py。**書く口だけここに置く**——収集ではないが、このルーターの依存が
+# 閲覧専用の環境で 403 にする（断面へ書かない）ので、足した書き込みは必ずここを通す（#733）。
+
+class TradeLedgerRequest(BaseModel):
+    side: str
+    sec_code: Optional[str] = None
+    trade_date: Optional[str] = None
+    price: Optional[float] = None
+    quantity: Optional[float] = None
+    split_ratio: Optional[float] = None
+    fee: Optional[float] = None
+    memo: Optional[str] = None
+
+
+def _append_trade_ledger(db: Session, raw: dict) -> dict:
+    """検証して 1 行追記する。入力の誤りは 400（記録との食い違いも含む）。"""
+    try:
+        entry = portfolio_ledger.prepare_entry(raw, portfolio_ledger.load_rows(db))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"id": insert_trade_ledger_entry(db, entry)}
+
+
+@router.post("/api/portfolio/ledger")
+def add_trade_ledger_entry(req: TradeLedgerRequest, db: Session = Depends(api.get_db)):
+    """売買の記録を 1 行足す（買い・売り・分割）。取消は `/void`。"""
+    if req.side == portfolio_ledger.SIDE_VOID:
+        raise HTTPException(400, "取消は /api/portfolio/ledger/{id}/void を使ってください")
+    return _append_trade_ledger(db, req.model_dump())
+
+
+@router.post("/api/portfolio/ledger/{entry_id}/void")
+def void_trade_ledger_entry(entry_id: int, db: Session = Depends(api.get_db)):
+    """記録の 1 行を取り消す（行は消さず、取消の行を足す）。"""
+    return _append_trade_ledger(db, {"side": portfolio_ledger.SIDE_VOID, "voids_id": entry_id})

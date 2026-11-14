@@ -2690,6 +2690,45 @@ def insert_prediction_snapshots(db, rows: list) -> int:
     return len(rows)
 
 
+# ── 8.11 売買の記録（#1222）──────────────────────────────────────────────────
+# 実際に買った・売った銘柄の記録。運用の成功指標（docs/VISION.md）は、この表から出す実現成績で測る。
+# 保有・損益・期間リターンは `portfolio_ledger.py` がここから導出する（保有の表を別に持たない）。
+#
+# **追記のみ**（更新も削除もしない）。誤入力は `side="void"` の行を足して取り消す。行はローカル正本だけに
+# 積む（書く口は収集ルーターの下＝閲覧専用の環境では 403）。**リポジトリは public なので、実際の売買を
+# コード・テスト・文書へ書き写さない**（テストは作り物の値で書く）。
+
+class TradeLedgerEntry(Base):
+    """売買の記録（1 行＝買い・売り・分割・取消のどれか・追記のみ）。"""
+    __tablename__ = "trade_ledger"
+    __table_args__ = (
+        Index("ix_trade_ledger_sec_code_date", "sec_code", "trade_date"),
+    )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    sec_code    = Column(String(6), nullable=False)    # 証券コード（4 桁・英字入りも可）
+    side        = Column(String(8), nullable=False)    # portfolio_ledger.SIDES（buy / sell / split / void）
+    trade_date  = Column(String(10), nullable=False)   # 約定日・分割の効力日（"YYYY-MM-DD"）
+    price       = Column(Float)      # 約定単価（当時の生の値。buy / sell だけ）
+    quantity    = Column(Float)      # 株数（当時の生の値。buy / sell だけ）
+    split_ratio = Column(Float)      # 1 株が何株になったか（split だけ。1 対 2 の分割なら 2.0、2 対 1 の併合なら 0.5）
+    fee         = Column(Float)      # 手数料（円・buy / sell だけ・無ければ 0）
+    voids_id    = Column(Integer)    # 取り消す行の id（void だけ）
+    memo        = Column(String(200))
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def insert_trade_ledger_entry(db, entry: dict) -> int:
+    """売買の記録を 1 行追記して commit する。戻り値は書いた行の id。
+
+    `entry` は `portfolio_ledger.prepare_entry` を通した dict（ここでは検証しない）。
+    """
+    row = TradeLedgerEntry(**entry)
+    db.add(row)
+    db.commit()
+    return row.id
+
+
 # ── 9. 読み取りモデル: financial_metrics VIEW ──────────────────────────────
 # financial_records（ソース列）から軽い派生（比率・Zスコア・成長率）を「都度SQL算出」し、
 # regression_results を LEFT JOIN して予測値も合成する読み取り専用 VIEW。

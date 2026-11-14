@@ -151,6 +151,10 @@ SYNC_PLAN: dict[str, TableSync] = {
     "prediction_snapshots": TableSync(
         MODE_WATERMARK, "created_at", 1,
         note="月に1回・源ごとの追記のみ（#1005）。既存行の更新も削除も無い"),
+    "trade_ledger": TableSync(
+        MODE_WATERMARK, "created_at", 1,
+        note="売買の記録（#1222）。追記のみで、訂正は取消の行を足す＝既存行の更新も削除も無い。"
+             "ローカル正本だけに積む（閲覧用の断面には行が無い）。週次のバックアップには含める"),
     "jpx_listing_snapshots": TableSync(
         MODE_WATERMARK, "last_seen_at", 1,
         note="行の追加は月に1回（#1004）。同じ時点を見直すたびに last_seen_at だけ進むので、"
