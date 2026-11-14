@@ -692,8 +692,8 @@ JOBS: dict[str, Job] = {
         name="oof_portfolio_replay",
         argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache"),
         why="画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える運用を OOF 予測だけで再現し、年率・"
-            "最大下落・入替率・コスト後・全社平均に対する超過を出す（#1045・#1040）。過去の経路は 1 本しかないので"
-            "参考。結果は scripts/.cache/oof_portfolio_replay.json。",
+            "最大下落・入替率・コスト後・全社平均と TOPIX に対する超過を出す（#1045・#1040・#1224）。過去の経路は"
+            " 1 本しかないので参考。結果は scripts/.cache/oof_portfolio_replay.json。",
         # 2026-10-28 日中枠の実測（並走なし・exit=0）。見積りは 45分だった。#1123 で M-2 の本番の設定の行を足したので
         # 単体の M-2 の採点が 1 回増える（パネルは使い回す）。**次の実走で差し替える。**
         measured_min=8.2,
@@ -710,6 +710,22 @@ JOBS: dict[str, Job] = {
             "同じ歴史の別の切り方で独立な標本ではない＝参考。結果は scripts/.cache/oof_portfolio_replay_paths.json。",
         # 2026-11-11 日中枠の実測（並走なし・exit=0）。M-4 は経路ごとに 706.7・773.2・784.5 秒。見積りは 45 分だった。
         measured_min=45.4,
+        parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
+    ),
+    # 同じ運用再現を売買代金の帯ごとのコスト付きで 1 回回す（#1224・参考）。2026-11-11 の「回さない」（ADR-0069）を
+    # ユーザー判断で覆した（2026-11-14）。目的はコスト後の年率より、保有が売買代金の小さい帯へ寄っているかの内訳。
+    "measure:oof-replay-bands": Job(
+        name="oof_portfolio_replay_bands",
+        argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache",
+              "--cost-bands-bps", "30,15,8", "--out", "scripts/.cache/oof_portfolio_replay_bands.json"),
+        why="OOF 運用再現を、各期の直近 52 週の売買代金の三分位ごとの片道コスト（小さい帯から 30・15・8bp＝想定で実測では"
+            "ない）付きで回し、保有の延べ数が各帯に何割入っていたかと、帯ごとの「区間リターン − 全社平均」の平均を出す"
+            "（#1224）。超過が売買の薄い社に寄っているかを見る参考で、判定には使わない（ADR-0069 の決定 5）。帯の引数は"
+            "既定のキーを変えないので、`measure:oof-replay` の結果と共通のキーが一致する。結果は"
+            " scripts/.cache/oof_portfolio_replay_bands.json。",
+        # 見積り: `measure:oof-replay` の 2026-11-06 の実測 14.1 分（M-2 の本番の設定の行を足した後）に、売買代金の
+        # 読み込み（対象の社と期間に絞る）を足した値。**次の実走で差し替える。**
+        measured_min=16.0,
         parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
     ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
