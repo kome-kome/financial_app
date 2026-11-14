@@ -139,6 +139,37 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   .rank-table td.rank-empty{grid-column:1/-1}
   .rank-table td[data-label]::before{content:attr(data-label);display:block;font-size:11px;font-weight:400;color:var(--text-muted)}
 }
+/* 今日の売買候補（#1228）。3 枚（M-6 の上位・M-2 の上位・保有の売り判定）を幅に応じて折り返す */
+.cand-lead{margin:0 0 12px;font-size:12px;color:var(--text-secondary);line-height:1.7}
+.cand-lead strong{color:var(--text)}
+.cand-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:28px}
+@media(max-width:640px){.cand-grid{grid-template-columns:minmax(0,1fr)}}
+.cand-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;min-width:0;display:flex;flex-direction:column}
+/* 売り候補は 5 列で、保有の数だけ行がある。買い候補 2 枚の下に横いっぱいで置く（3 列に並べると名前の列が潰れる） */
+.cand-card-wide{grid-column:1/-1}
+.cand-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px}
+.cand-asof{font-size:11px;color:var(--text-muted);line-height:1.6}
+.cand-asof.stale-asof{color:var(--status-warn-text)}
+.cand-table{width:100%;border-collapse:collapse;font-size:12px;color:var(--text-body);margin-top:10px}
+.cand-table th{font-size:11px;font-weight:400;color:var(--text-muted);text-align:left;padding:6px;white-space:nowrap}
+.cand-table td{padding:7px 6px;border-top:1px solid var(--border-subtle);vertical-align:top}
+.cand-table th.num,.cand-table td.num{text-align:right}
+.cand-table td.num,.cand-table td.cand-code{white-space:nowrap}
+.cand-table td.cand-name{min-width:8em}
+/* 狭い幅では参考の列（損益）を隠す。横に送った先に判定以外の列が隠れても、売る・売らないは読める */
+@media(max-width:480px){.cand-table .cand-opt{display:none}.cand-table td.cand-name{min-width:6em}}
+/* 3 列に並んだ幅では売り候補の表（5 列）が枠より広くなりうる。ページではなくカードの中で送る */
+.cand-scroll{overflow-x:auto}
+.cand-table a{color:var(--accent-text);text-decoration:none}
+.cand-table a:hover{text-decoration:underline}
+.cand-empty{color:var(--text-muted);line-height:1.7}
+.cand-tag{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:10px;font-size:11px;white-space:nowrap}
+.cand-tag-both{background:var(--status-info-bg);color:var(--status-info-text)}
+.cand-tag-held{background:var(--bg-sunken);color:var(--text-secondary)}
+.cand-tag-sell{margin-left:0;background:var(--status-bad-bg);color:var(--status-bad-text);font-weight:700}
+.cand-tag-hold{margin-left:0;background:var(--bg-sunken);color:var(--text-secondary)}
+.cand-more{margin-top:auto;padding-top:12px;font-size:12px;color:var(--accent-text);text-decoration:none}
+.cand-more:hover{text-decoration:underline}
 .controls{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .controls select{background:var(--bg-elevated);color:var(--text);border:1px solid var(--border-muted);border-radius:6px;padding:7px 10px;font-size:12px}
 .muted{font-size:11px;color:var(--text-muted)}
@@ -191,6 +222,42 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     <summary class="section-title" id="fresh-summary">データ鮮度</summary>
     <div class="fresh-grid" id="fresh-grid"></div>
   </details>
+
+  <!-- 今日の売買候補（#1228）。実際の売買は M-6・M-2 の上位を買い、保有の下位を売る（ADR-0070）。
+       下の買い推奨ランキング（財務指標の点数）へ μ̂ を混ぜるのではなく、並べて見せるだけ -->
+  <div class="section-title">今日の売買候補</div>
+  <p class="cand-lead">
+    実際の売買に使う一覧です。買いは M-6 と M-2 の<strong>期待リターン（今後 52 週の見込み）の上位 10 社</strong>、
+    売りは売買の記録にある保有を M-6 の期待リターンの低い順に並べた<strong>下から 1/5</strong> です。
+    下の買い推奨ランキング（財務指標の点数）とは別の並びで、点数には混ぜていません。
+  </p>
+  <div class="cand-grid" id="cand-grid">
+    <section class="cand-card" aria-labelledby="cand-enet-title">
+      <h2 class="cand-title" id="cand-enet-title">買い候補：M-6 の上位 10 社</h2>
+      <div class="cand-asof" id="cand-enet-asof">読み込み中…</div>
+      <div class="cand-scroll"><table class="cand-table">
+        <thead><tr><th>#</th><th>コード</th><th>企業名</th><th class="num">期待リターン</th></tr></thead>
+        <tbody id="cand-enet-body"></tbody>
+      </table></div>
+    </section>
+    <section class="cand-card" aria-labelledby="cand-gbdt-title">
+      <h2 class="cand-title" id="cand-gbdt-title">買い候補：M-2 の上位 10 社</h2>
+      <div class="cand-asof" id="cand-gbdt-asof">読み込み中…</div>
+      <div class="cand-scroll"><table class="cand-table">
+        <thead><tr><th>#</th><th>コード</th><th>企業名</th><th class="num">期待リターン</th></tr></thead>
+        <tbody id="cand-gbdt-body"></tbody>
+      </table></div>
+    </section>
+    <section class="cand-card cand-card-wide" aria-labelledby="cand-sell-title">
+      <h2 class="cand-title" id="cand-sell-title">売り候補：保有の見直し</h2>
+      <div class="cand-asof" id="cand-sell-note">読み込み中…</div>
+      <div class="cand-scroll"><table class="cand-table">
+        <thead><tr><th>判定</th><th>コード</th><th>企業名</th><th class="num">期待リターン</th><th class="num cand-opt">損益</th></tr></thead>
+        <tbody id="cand-sell-body"></tbody>
+      </table></div>
+      <a class="cand-more" href="/analysis?tab=sell_ranking">売買を記録する・詳しい判定を見る（分析画面）→</a>
+    </section>
+  </div>
 
   <div class="section-title">買い推奨ランキング</div>
   <div class="controls">

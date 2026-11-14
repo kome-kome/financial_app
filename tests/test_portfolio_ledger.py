@@ -368,3 +368,31 @@ class TestSummary:
         assert seeded.query(TradeLedgerEntry).count() == before + 1
         assert seeded.get(TradeLedgerEntry, target.id).price == 300
         assert "9999" not in {h["sec_code"] for h in pl.summary(seeded)["holdings"]}
+
+
+class TestCurrentHoldings:
+    def test_only_open_positions_in_code_order(self, db):
+        for raw in [
+            {"side": "buy", "sec_code": "2222", "trade_date": "2026-01-05", "price": 2000, "quantity": 50},
+            {"side": "buy", "sec_code": "1111", "trade_date": "2026-01-06", "price": 1000, "quantity": 100, "fee": 500},
+            {"side": "buy", "sec_code": "3333", "trade_date": "2026-01-05", "price": 300, "quantity": 10},
+            {"side": "sell", "sec_code": "3333", "trade_date": "2026-02-02", "price": 310, "quantity": 10},
+        ]:
+            insert_trade_ledger_entry(db, pl.prepare_entry(raw, pl.load_rows(db), today=TODAY))
+        got = pl.current_holdings(db)
+        assert [(h["sec_code"], h["quantity"], h["buy_date"]) for h in got] == [
+            ("1111", 100, "2026-01-06"), ("2222", 50, "2026-01-05")]
+        assert got[0]["avg_cost"] == pytest.approx(1005)
+
+    def test_text_is_what_sell_ranking_parses(self):
+        """売り候補ランキングの入力の書式で、取得単価と持ち始めた日が落ちずに読める。"""
+        from plugins.sell_ranking import parse_holdings
+        text = pl.holdings_text([
+            {"sec_code": "1111", "avg_cost": 12345.678, "buy_date": "2026-01-06"},
+            {"sec_code": "2222", "avg_cost": 2000.0, "buy_date": None},
+        ])
+        assert text == "1111, @12345.68, 2026-01-06\n2222, @2000.0"
+        parsed, invalid = parse_holdings(text)
+        assert invalid == []
+        assert parsed == [{"sec_code": "1111", "avg_cost": 12345.68, "buy_date": "2026-01-06"},
+                          {"sec_code": "2222", "avg_cost": 2000.0, "buy_date": None}]

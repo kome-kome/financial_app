@@ -64,3 +64,51 @@ class TestFreshnessFoldFollowsTheVerdict:
         """畳んでも状態が分かるのは、<summary> に 1 行の要約（✓ / ! / ×）を描いているから。"""
         assert re.search(r'<summary[^>]*id="fresh-summary"', HTML)
         assert "getElementById('fresh-summary')" in JS and "freshChip(" in JS
+
+
+class TestTradeCandidates:
+    """今日の売買候補（#1228）。実際の売買に使う一覧を、財務指標のランキングの上に並べる。
+
+    配線が外れても画面は壊れず「読み込み中…」のまま残るだけ＝失敗として現れない。
+    """
+
+    BLOCK = JS[JS.index("// ── 今日の売買候補"):JS.index("// data-change 属性を持つコントロール")]
+
+    def test_candidates_sit_above_the_preset_ranking(self):
+        """判定・鮮度のすぐ下に置く（2026-11-14 に決定。ランキングの下では送らないと見えない）。"""
+        order = [HTML.index(s) for s in (
+            'id="fresh-details"', ">今日の売買候補<", ">買い推奨ランキング<")]
+        assert order == sorted(order), order
+
+    def test_every_element_the_script_fills_exists(self):
+        ids = set(re.findall(r"getElementById\('(cand-[\w-]+)'\)", self.BLOCK))
+        for key in ("enet", "gbdt"):
+            ids |= {f"cand-{key}-asof", f"cand-{key}-body"}
+        missing = [i for i in sorted(ids) if f'id="{i}"' not in HTML]
+        assert len(ids) >= 6 and not missing, missing
+
+    def test_reads_the_saved_scores_of_both_models_and_the_ledger_holdings(self):
+        assert "name: 'macro_enet'" in self.BLOCK and "name: 'macro_gbdt'" in self.BLOCK
+        assert "/saved?limit=${CAND_TOP_K}" in self.BLOCK
+        assert "'/api/portfolio/sell-candidates'" in self.BLOCK
+        assert re.search(r"const CAND_TOP_K = 10;", self.BLOCK), "運用の単位は 1 モデルの上位 10 社（ADR-0070）"
+
+    def test_one_failed_request_does_not_blank_the_others(self):
+        assert "Promise.allSettled(" in self.BLOCK
+
+    def test_candidates_load_once_and_not_on_preset_change(self):
+        """別の並びなので、プリセット・件数を選び直しても読み直さない。"""
+        assert JS.count("loadCandidates()") == 2          # 定義と、最後の 1 回の呼び出し
+        assert JS.rstrip().endswith("loadCandidates();")
+
+    def test_mu_is_shown_beside_the_ranking_not_mixed_into_it(self):
+        """μ̂ を財務指標の点数へ混ぜない（混ぜるなら昇格ゲートが要る・ADR-0030）。"""
+        call = re.search(r"apiFetch\(`/api/morning\?([^`]*)`\)", JS)
+        assert call and "mu" not in call.group(1) and "weights" not in call.group(1), call.group(0)
+
+    def test_stale_m6_scores_are_flagged_where_the_list_is(self):
+        assert "markMuAsof((d.freshness.mu || {}).level)" in JS
+        assert re.search(r"\.cand-asof\.stale-asof\s*\{[^}]*--status-warn-text", CSS)
+
+    def test_sell_card_links_to_where_trades_are_recorded(self):
+        assert 'class="cand-more" href="/analysis?tab=sell_ranking"' in HTML
