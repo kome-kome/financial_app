@@ -725,7 +725,10 @@ cutoff     = start_date − FINANCIAL_LAG_DAYS   # 決算日から公表まで�
 
 ```
 超過収益 = 上位N社平均リターン − ベンチマーク平均リターン
+対 TOPIX = 上位N社平均リターン − 同じ期間の TOPIX のリターン（開始日以降の最初の終値 → 直近の終値）
 ```
+
+**TOPIX に対する超過**（#1234）: ベンチマークは同じスコアで選んだ上位 500 社の平均なので、市場に勝ったかを表さない。運用の成否を比べる相手は TOPIX（[VISION.md](VISION.md)「運用の成功指標」）なので、`macro_data` の TOPIX の系列（`portfolio_ledger.BENCHMARK_SERIES`・連動 ETF の終値・配当なし。保有側の株価も配当を含まない）の両端 2 行からリターンを出し、`summary` の `index_return_pct`・`excess_vs_index_pct`・`excess_vs_index_net_pct` に並べる（既存のキーは変えない）。コスト後の対 TOPIX は保有側だけからコストを引く（ETF 1 本で買えて売買のコストはほぼ無い）。TOPIX の値がそろわなければ None（0 にしない）
 
 ### サマリー統計
 

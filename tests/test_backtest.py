@@ -311,6 +311,72 @@ class TestScoringSourceStatisticalPreset:
         assert res["results"][0]["score"] == pytest.approx(3.0 / 4.6, abs=1e-3)
 
 
+# ── TOPIX に対する超過（#1234）──────────────────────────────────────────────────
+
+class TestIndexExcess:
+    """1 社（開始の直後 1000 → 今日 1100＝+10%）と、作り物の TOPIX の系列。"""
+
+    @staticmethod
+    def _dates():
+        from datetime import date, timedelta
+        today = date.today()
+        start = today - timedelta(days=6 * 30)
+        return start, today
+
+    def _seed(self, db, make_metric, make_weekly, index_rows):
+        from database import MacroData
+        TestCostBps()._setup_priced_company(db, make_metric, make_weekly)
+        for d, c in index_rows:
+            db.add(MacroData(series_code=backtest.BENCHMARK_SERIES, series_name="TOPIX", category="equity",
+                             trade_date=d, close=c))
+        db.add(MacroData(series_code="USDJPY", series_name="USD/JPY", category="fx",     # 別の系列は読まない
+                         trade_date=self._dates()[1].isoformat(), close=999.0))
+        db.commit()
+
+    def test_index_return_and_excess_match_hand_calculation(self, db, make_metric, make_weekly):
+        from datetime import timedelta
+        start, today = self._dates()
+        rows = [((start - timedelta(days=3)).isoformat(), 500.0),          # 開始日より前＝使わない
+                ((start + timedelta(days=2)).isoformat(), 2000.0),         # 開始日以降の最初
+                ((start + timedelta(days=60)).isoformat(), 2300.0),
+                (today.isoformat(), 2100.0)]                               # 直近
+        self._seed(db, make_metric, make_weekly, rows)
+        s = backtest.run(db, "バランス型", 6, 20, None, None, cost_bps=10.0)["summary"]
+        assert s["index_series"] == backtest.BENCHMARK_SERIES
+        assert (s["index_start_date"], s["index_end_date"]) == (rows[1][0], rows[3][0])
+        assert s["index_return_pct"] == 5.0                                # 2000 → 2100
+        assert s["excess_vs_index_pct"] == pytest.approx(10.0 - 5.0)
+        assert s["excess_vs_index_net_pct"] == pytest.approx(10.0 - 0.2 - 5.0)   # 往復 0.2% は保有側だけ
+        assert s["excess_return_pct"] == 0.0                               # 既存の「全社平均」の値は変わらない
+
+    def test_missing_index_is_none_not_zero(self, db, make_metric, make_weekly):
+        self._seed(db, make_metric, make_weekly, [])
+        s = backtest.run(db, "バランス型", 6, 20, None, None)["summary"]
+        assert s["index_return_pct"] is None and s["excess_vs_index_pct"] is None
+        assert s["excess_vs_index_net_pct"] is None and s["avg_return_pct"] == 10.0
+
+    def test_single_index_row_is_none(self, db, make_metric, make_weekly):
+        self._seed(db, make_metric, make_weekly, [(self._dates()[1].isoformat(), 2100.0)])
+        s = backtest.run(db, "バランス型", 6, 20, None, None)["summary"]
+        assert s["index_return_pct"] is None and s["index_start_date"] == s["index_end_date"]
+
+    def test_existing_keys_do_not_change(self, db, make_metric, make_weekly):
+        TestCostBps()._setup_priced_company(db, make_metric, make_weekly)
+        before = backtest.run(db, "バランス型", 6, 20, None, None, cost_bps=10.0)["summary"]
+        from database import MacroData
+        start, today = self._dates()
+        for d, c in ((start.isoformat(), 2000.0), (today.isoformat(), 2200.0)):
+            db.add(MacroData(series_code=backtest.BENCHMARK_SERIES, trade_date=d, close=c))
+        db.commit()
+        after = backtest.run(db, "バランス型", 6, 20, None, None, cost_bps=10.0)["summary"]
+        new_keys = {"index_series", "index_start_date", "index_end_date", "index_return_pct",
+                    "excess_vs_index_pct", "excess_vs_index_net_pct"}
+        assert set(after) - set(before) == set() and set(before) >= new_keys
+        assert {k: v for k, v in after.items() if k not in new_keys} == \
+            {k: v for k, v in before.items() if k not in new_keys}
+        assert after["index_return_pct"] == 10.0 and before["index_return_pct"] is None
+
+
 # ── 摩擦コスト（Issue #316）: cost_bps ────────────────────────────────────────
 
 class TestCostBps:
