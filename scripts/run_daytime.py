@@ -728,6 +728,24 @@ JOBS: dict[str, Job] = {
         measured_min=16.0,
         parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
     ),
+    # 買い方の規則の計測（#1227・事前登録 docs/prereg/portfolio-construction.md・道具は #1223・#1238）。**積むのは #1227**。
+    # 凍結値は文書の追記節と同じ（tests が照合する）。合わなければ道具が重い計算の前に exit 2。
+    "measure:oof-replay-portfolio": Job(
+        name="oof_portfolio_replay_portfolio",
+        argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache",
+              "--portfolio", "--start-shifts", "0,1,2", "--sell-source", "s2_quantile_low",
+              "--prereg", "docs/prereg/portfolio-construction.md",
+              "--prereg-sha", "b2737334fa25e4d1fcba8796a37b7d32e0619b05d0ce80cad7c63671ef4ee147",
+              "--out", "scripts/.cache/oof_portfolio_replay_portfolio.json"),
+        why="事前登録した 7 つの保有の組み方（M-6 と M-2* の上位 10 社ずつの合算・業種の上限 4／3 社・単独）を、売りの並びを"
+            "本番と同じ S2 にした OOF 運用再現で 3 経路回し、事前登録 §4 の判定（業種の上限・M-6 単独を採るか、今のままか）を"
+            "機械的に出す（#1227）。参考で、決めるのは保有の組み方だけ（ADR-0069）。結果は"
+            " scripts/.cache/oof_portfolio_replay_portfolio.json。",
+        # 見積り: `measure:oof-replay-paths` の 2026-11-11 の実測 45.4 分（3 経路の M-4 と M-2*）に、S2 の 19 fold を経路ごとに
+        # 1 回（#1158 の実測 995 秒＝約 17 分 × 3）を足した値。7 構成の入れ替えは軽い。**次の実走で差し替える。**
+        measured_min=100.0,
+        parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
+    ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
     # 2列）。残った見立ては「M-1 の目的変数は素の52週先リターンなので、BIC（二乗誤差）は相場全体の
     # 変動を説明するマクロ列を選ぶ。評価は月内の順位」＝学習と評価のずれ（ADR-0050 の 9/18 追記）。

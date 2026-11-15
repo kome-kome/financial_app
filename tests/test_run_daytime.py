@@ -907,6 +907,7 @@ class TestParallelSensitivity:
                                      "measure:index-event-b", "measure:index-event-monitor",
                                      "measure:index-event-monitor-add", "measure:in-layer-sell",
                                      "measure:oof-replay", "measure:oof-replay-bands",
+                                     "measure:oof-replay-portfolio",
                                      "measure:label-audit", "measure:selection-optimism",
                                      "measure:delisting-redesign", "measure:live-oos", "bench:rhat-scale"])
     def test_computations_are_sensitive(self, key):
