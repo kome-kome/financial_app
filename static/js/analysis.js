@@ -919,8 +919,11 @@ async function runBacktest() {
     const finNote = d.financial_cutoff
       ? `　財務: 決算日が ${d.financial_cutoff} 以前の数字（基準日の ${Number(d.financial_lag_days)} 日前まで＝公表済みとみなせるもの）`
       : '';
+    // 基準日の時点で株価が無かった（買えなかった）社は候補から外している（#1242）。黙って消さず数を出す
+    const nUntradable = Number(d.n_untradable_at_start || 0);
+    const untradNote = nUntradable ? `　除外: 基準日の時点で株価が無かった ${nUntradable}社` : '';
     document.getElementById('bt-period-label').textContent =
-      `基準日: ${d.start_date}（${d.holding_months}ヶ月前）→ ${d.end_date}　対象候補: ${d.total_candidates}社${finNote}`;
+      `基準日: ${d.start_date}（${d.holding_months}ヶ月前）→ ${d.end_date}　対象候補: ${d.total_candidates}社${finNote}${untradNote}`;
     _renderBtSummary(d.summary);
     _renderBtBenchmark(d.summary);
     _renderBtHistogram(btResults);

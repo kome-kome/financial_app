@@ -416,12 +416,19 @@ class TestBacktestEndpoint:
         assert r.status_code == 200
         assert r.json()["total_candidates"] == 0
 
-    def test_scores_via_financial_metric(self, db, make_metric):
+    @staticmethod
+    def _bar_at_start(make_weekly, ec="E00001"):
+        """開始日（既定の months_ago=6）の 3 日前の週次の終値。開始日に買えた社だけが候補になる（#1242）。"""
+        from datetime import timedelta
+        return make_weekly(edinet_code=ec, trade_date=(date.today() - timedelta(days=6 * 30 + 3)).isoformat())
+
+    def test_scores_via_financial_metric(self, db, make_metric, make_weekly):
         # 旧バグ（FinancialRecord 引きで常に空）の HTTP レイヤ回帰。backtest は本番と同じく
         # 被覆率 0.5 未満の社を採点しない（#745）ので、バランス型の重み 5.1 のうち 3.6 に値を入れる
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
                            market_cap=10000.0, z_roe=2.0, z_op_margin=1.0,
                            z_revenue=0.5, z_cf_ratio=0.5))
+        db.add(self._bar_at_start(make_weekly))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.get("/api/backtest")
@@ -432,10 +439,11 @@ class TestBacktestEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.get("/api/backtest", params={"source": "nope"}).status_code == 400
 
-    def test_valuation_source_passes_through(self, db, make_metric):
+    def test_valuation_source_passes_through(self, db, make_metric, make_weekly):
         # source=valuation: gap_ratio を持つ銘柄のみ候補化（HTTP レイヤ）
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
                            gap_ratio=15.0, div_yield=2.0))
+        db.add(self._bar_at_start(make_weekly))
         db.commit()
         api.app.dependency_overrides[api.get_db] = lambda: db
         r = client.get("/api/backtest", params={"source": "valuation"})
