@@ -84,6 +84,7 @@
 | [0073](0073-labels-stay-price-only.md) | **学習と採点の答えは値上がりだけのまま（配当込みへ切り替えない）** | #1154, #1187 | accepted（2026-11-11） |
 | [0074](0074-delisting-share-is-judged-on-covered-years.md) | **上場廃止で答えが消える割合は、廃止社の株価がそろう年で判定する（#1154 の keep を redesign に覆す）** | #1154, #1188, #1195 | accepted（2026-11-11） |
 | [0075](0075-delisted-rows-are-scored-only-in-the-live-check.md) | **上場廃止した社の行は、本番予測の答え合わせの主審にだけ足す（OOF の比較と学習は今の答えのまま）** | #1195, #1197, #1210 | accepted（2026-11-13） |
+| [0076](0076-sell-ranking-orders-by-the-sell-quantile-model.md) | **売り候補ランキングの並びのキーを、売り専用の予測 S2（下側 20% 点）へ切り替える（ADR-0071 の決定 1 を覆す）** | #1201, #1158, #1202 | accepted（2026-11-15） |
 
 ## 運用
 

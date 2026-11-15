@@ -479,8 +479,10 @@ function exportRecommendCSV() {
   dl([header, ...rows].join('\n'), 'recommend.csv');
 }
 
-// ── 売り候補ランキング（保有の中で M-6 の μ̂ が低い下位 1/5 を売る・ADR-0071）──────────
-// 手法は 1 つだけ。プリセット・ウェイト・閾値・トレンド補正・μ の出所は持たない（送るのは保有だけ）。
+// ── 売り候補ランキング（保有の中で、売り専用の予測 S2 が低い下位 1/5 を売る・ADR-0071・ADR-0076）──────────
+// 手法は 1 つだけ。プリセット・ウェイト・閾値・トレンド補正・予測の出所は持たない（送るのは保有だけ）。
+// S2 が使えない回はサーバーが M-6 の μ̂ で並べ、理由を sell_key_fallback に入れて返す（画面は理由を出すだけ）。
+const SELL_KEY_S2 = 'sell_quantile';   // 応答の sell_key_source（plugins/sell_ranking.py の SELL_KEY_S2）
 const SELL_HOLDINGS_KEY = 'sell_ranking_holdings';
 let sellResults = [];
 
@@ -727,6 +729,13 @@ function renderSellRanking(d) {
     `判定結果：${d.count}社（売却 ${d.n_sell} / 保有継続 ${d.n_hold}${noData}）`;
 
   const notes = [];
+  // 並びに使った予測（ADR-0076）。M-6 へ倒した回は理由を注意の色で出す（並びの根拠を黙って変えない）。
+  const byS2 = d.sell_key_source === SELL_KEY_S2;
+  if (d.sell_key_fallback)
+    notes.push('<span class="text-amber">⚠ 売り専用の予測が使えないため、今回は M-6 の期待リターン（μ̂）の低い順に並べました'
+      + `（理由: ${esc(d.sell_key_fallback)}）</span>`);
+  else if (byS2)
+    notes.push('<span style="color:var(--text-muted)">※ 並びのキー: 売り専用の予測（下振れの見込み＝下側 20% 点）。期待リターン μ̂ は参考表示です。</span>');
   // TOPIX 移行措置・新規採用の件数と母集団比率、台帳が無いときのバナー（#1013）
   const idxNote = indexEventsNote(d.index_events);
   if (idxNote) notes.push(idxNote);
@@ -736,18 +745,18 @@ function renderSellRanking(d) {
     notes.push(`<span class="text-amber">⚠ 解釈できなかった入力: ${esc(d.invalid.join(' / '))}</span>`);
   const nRanked = (d.n_sell || 0) + (d.n_hold || 0);
   if (nRanked > 0 && nRanked < 5)
-    notes.push('<span style="color:var(--text-muted)">※ μ̂ がそろった保有が 5 銘柄未満のため「売却」は付いていません。並び順だけを参考にしてください。</span>');
-  // producer μ̂ の as-of（代表値=中央値・#417）。1銘柄でも新しければ全体が新しく見える
-  // max 表示を避け、最古と「代表値より古い銘柄数」を併記する。
+    notes.push('<span style="color:var(--text-muted)">※ 予測がそろった保有が 5 銘柄未満のため「売却」は付いていません。並び順だけを参考にしてください。</span>');
+  // 予測の as-of（M-6 の実行の代表値=中央値・#417）。S2 は同じ実行で作り、日付が違えばサーバーが M-6 へ倒す。
+  // 1銘柄でも新しければ全体が新しく見える max 表示を避け、最古と「代表値より古い銘柄数」を併記する。
   if (d.mu_asof && d.mu_asof.snapshot_date) {
     const a = d.mu_asof;
     const nStale = a.n_stale ? `／代表より古い銘柄 ${Number(a.n_stale).toLocaleString()}社` : '';
-    notes.push(`<span style="color:var(--text-muted)">※ μ̂（M-6）の as-of: ${esc(a.snapshot_date)}（中央値）`
+    notes.push(`<span style="color:var(--text-muted)">※ 予測（M-6 の実行）の as-of: ${esc(a.snapshot_date)}（中央値）`
       + `／最古 ${esc(a.snapshot_date_min || '不明')}${nStale}</span>`);
   } else if (d.mu_asof) {
     // スコアはあるが日付の記録が無い。行ごと消すと「いつのデータか」を確かめられないまま
     // 使うことになるので、不明と明示する。
-    notes.push('<span style="color:var(--text-muted)">※ μ̂（M-6）の as-of: 不明（スコアはあるが日付の記録が無い）</span>');
+    notes.push('<span style="color:var(--text-muted)">※ 予測（M-6 の実行）の as-of: 不明（スコアはあるが日付の記録が無い）</span>');
   }
   document.getElementById('sell-notes').innerHTML = notes.join('<br>');
 
@@ -770,7 +779,8 @@ function renderSellRanking(d) {
       <td style="color:${cssVar('--status-info')};font-weight:600">${esc(r.sec_code || '-')}</td>
       <td>${r.edinet_code ? `<a href="/company/${esc(r.edinet_code)}" class="co-link" target="_blank" rel="noopener" style="font-weight:600">${esc(r.company_name)}</a>` : esc(r.company_name)}${indexEventBadge(r.index_event)}</td>
       <td style="color:var(--text-secondary);font-size:11px">${esc(r.industry || '-')}</td>
-      <td style="text-align:right;font-weight:700">${r.mu == null ? '-' : fmtPct(r.mu * 100, true)}</td>
+      <td style="text-align:right${byS2 ? ';font-weight:700' : ''}">${r.q20 == null ? '-' : fmtPct(r.q20 * 100, true)}</td>
+      <td style="text-align:right${byS2 ? '' : ';font-weight:700'}">${r.mu == null ? '-' : fmtPct(r.mu * 100, true)}</td>
       <td style="color:${tColor};font-weight:600">${esc(r.trend)}</td>
       <td style="text-align:right">${fmtPct(r.ret_13w, true)}</td>
       <td style="text-align:right">${r.drawdown_52w == null ? '-' : `<span class="gap-negative">${Number(r.drawdown_52w).toFixed(1)}%</span>`}</td>
@@ -782,10 +792,10 @@ function renderSellRanking(d) {
 
 function exportSellRankingCSV() {
   if (!sellResults.length) return;
-  const h = '順位,判定,証券コード,企業名,業種,期待リターンμ̂(M-6),トレンド,13週リターン%,52週高値からの下落%,取得単価,現値,損益%\n';
+  const h = '順位,判定,証券コード,企業名,業種,下振れの見込み(下側20%点・S2),期待リターンμ̂(M-6),トレンド,13週リターン%,52週高値からの下落%,取得単価,現値,損益%\n';
   const b = sellResults.map(r => [
     r.rank, r.action, r.sec_code, r.company_name, r.industry,
-    r.mu ?? '', r.trend, r.ret_13w ?? '', r.drawdown_52w ?? '',
+    r.q20 ?? '', r.mu ?? '', r.trend, r.ret_13w ?? '', r.drawdown_52w ?? '',
     r.avg_cost ?? '', r.last_close ?? '', r.pnl_pct ?? ''
   ].join(',')).join('\n');
   dl('﻿' + h + b, 'sell_ranking.csv');
@@ -1229,7 +1239,7 @@ function _mcModelCard(m) {
         <div style="font-size:11px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)はμ̂の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない(Issue #402)。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)は予測の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない(Issue #402)。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
         <div style="font-size:11px;color:var(--text-muted)">売り側 spread（全体平均−最低分位）</div>
         <div style="font-size:15px;font-weight:700;color:${(ss||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ss!=null?(ss*100).toFixed(2)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 勝率 ${ssHit!=null?(ssHit*100).toFixed(0)+'%':'-'}</span></div>
       </div>

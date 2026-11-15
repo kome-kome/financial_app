@@ -12,7 +12,8 @@ heavy を GitHub Actions 上で実行し、本番 Supabase へ直接永続化す
 
 登録済み:
   - `sector_ols`  → `regression_results`（`gap_ratio` の生成元・買い推奨のバランス型プリセット）
-  - `macro_enet`  → `macro_enet_scores`（M-6 の μ̂・`sell_ranking` の**既定** mu_source・#402/#443）
+  - `macro_enet`  → `macro_enet_scores`（M-6 の μ̂・#402/#443）と `sell_quantile_scores`（同じ実行が解く S2＝
+    `sell_ranking` の既定の並びのキー・ADR-0076。S2 が使えない回の並びは M-6 の μ̂）
 
 M-2（`macro_gbdt`）は載せていない。既定 mu_source ではなく、日中枠の探索の周回（`scripts/run_daytime.py`
 の `tune_cycle:macro_gbdt`・#1114・#1118 で月次の `TUNE_MATRIX` から移した）の `--persist-scores` による更新経路が現に生きているため
@@ -354,7 +355,7 @@ def _extract_macro_enet(result: dict) -> dict:
         "size_neutral":      dict(result.get("size_neutral") or {}),
         # 売り専用の候補 S2 の相乗り（#1202）: 行数・全社同値・選ばれた α/l1_ratio・端への張り付き・反復の上限・
         # 所要・失敗。キーは `MacroEnetPlugin._fit_sell_quantile` が作る少数の固定値で、予測そのものは入らない。
-        # 本番の切り替え（#1201）の前に、毎晩そろうか・何秒かかるかをここで読む
+        # 本番の売りの並びの入力（ADR-0076・#1201）。毎晩そろうか・何秒かかるかをここで読む（失敗の起票は #1237）
         "sell_quantile":     dict(result.get("sell_quantile") or {}),
     }
 

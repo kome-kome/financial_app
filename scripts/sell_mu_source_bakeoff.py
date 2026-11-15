@@ -190,7 +190,8 @@ SELL_SET_DEFAULT = "s1"
 def sell_set_of(args) -> SellSet:
     """args の `--sell-set`（無ければ既定の S1）の組。"""
     return SELL_SETS[getattr(args, "sell_set", None) or SELL_SET_DEFAULT]
-# 分母＝本番の売りの μ̂ の出どころ（`sell_ranking.MU_SOURCE`・ADR-0071）。
+# 分母＝売りの μ̂ の出どころ（`sell_ranking.MU_SOURCE`・ADR-0071）。本番の並びのキーは S2 になった（ADR-0076）が、
+# 新しい候補を比べる分母と、S2 が使えない回の並びは M-6 の μ̂ のまま。
 SELL_BASE = "macro_enet"
 # 主審 (a) の上位層を作る買いの並び（ユーザー判断・2026-11-09）。他の基底の層は参考で出す。
 SELL_BUY_LAYER = "macro_enet"
