@@ -922,7 +922,9 @@ cutoff     = start_date − FINANCIAL_LAG_DAYS  <span class="comment"># 決算�
 
 <span class="comment"># ベンチマーク</span>
 benchmark    = スコアリング対象企業（最大500社）の平均リターン
-超過収益      = 上位N社平均リターン − ベンチマーク平均</div>
+超過収益      = 上位N社平均リターン − ベンチマーク平均
+対 TOPIX     = 上位N社平均リターン − 同じ期間の TOPIX のリターン  <span class="comment"># 開始日以降の最初の終値 → 直近（#1234）</span></div>
+  <p>ベンチマーク（同じスコアで選んだ上位 500 社の平均）に対する超過は、市場に勝ったかを表さない。運用の成否を比べる相手は TOPIX なので（VISION.md）、同じ期間の TOPIX（<code>macro_data</code> の連動 ETF の終値・配当なし。保有側の株価も配当を含まない）に対する超過も並べる。コスト後の対 TOPIX は保有側だけからコストを引く（ETF 1 本で買えるため）。TOPIX の値がそろわなければ出さない（0 にしない）。</p>
 
   <div class="warn-box">
     <strong>バイアスに注意:</strong>

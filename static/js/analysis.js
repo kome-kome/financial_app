@@ -1013,7 +1013,21 @@ function _renderBtBenchmark(s) {
     &nbsp;|&nbsp; 超過収益:
     <strong style="color:${(e ?? 0) >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${(e ?? 0) >= 0 ? '+' : ''}${e ?? '-'}%</strong>
     ${costNote}
-    <span style="color:var(--text-muted);font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均。上記はいずれも売買コスト控除前）</span>`;
+    <span style="color:var(--text-muted);font-size:11px;margin-left:8px">（ベンチマーク = 同期間のスコアリング対象全社の平均。上記はいずれも売買コスト控除前）</span>
+    <br>${_btIndexLine(s)}`;
+}
+
+// TOPIX に対する超過（#1234）。運用の成否を比べる相手は TOPIX（docs/VISION.md）。値が無ければ「-」と理由を出す
+function _btIndexLine(s) {
+  const pct = v => v == null ? '-'
+    : `<strong style="color:${v >= 0 ? cssVar('--val-up') : cssVar('--val-down')}">${v >= 0 ? '+' : ''}${v}%</strong>`;
+  if (s.index_return_pct == null) {
+    return 'TOPIX: - <span style="color:var(--text-muted);font-size:11px">（同じ期間の TOPIX の値がそろっていないため出していません。マクロ収集で TOPIX を集めると出ます）</span>';
+  }
+  const net = s.cost_bps > 0 ? `&nbsp;|&nbsp; コスト後の対 TOPIX: ${pct(s.excess_vs_index_net_pct)}` : '';
+  return `TOPIX（${esc(s.index_start_date)}〜${esc(s.index_end_date)}）: ${pct(s.index_return_pct)}`
+    + `&nbsp;|&nbsp; 対 TOPIX: ${pct(s.excess_vs_index_pct)}${net}`
+    + '<span style="color:var(--text-muted);font-size:11px;margin-left:8px">（TOPIX は連動 ETF の値動きで配当を含みません。保有側の株価も配当を含みません）</span>';
 }
 
 function _renderBtTable(rows) {

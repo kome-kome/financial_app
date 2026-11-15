@@ -10,9 +10,11 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import FinancialMetric, prices_on_or_after, latest_prices
+from database import FinancialMetric, MacroData, prices_on_or_after, latest_prices
 # 決算日から公表までの遅れ。M 系のモデルと同じ値を読む（書き写さない・#1226）
 from plugins.macro_snapshots import FINANCIAL_LAG_DAYS
+# 比べる相手の指数。売買の記録の成績（docs/VISION.md「運用の成功指標」）と同じ系列を借りる（書き写さない・#1234）
+from portfolio_ledger import BENCHMARK_SERIES
 from plugins.recommend import (DEFAULT_MIN_COVERAGE, SELECT_COLS, compute_momentum_z,
                                fit_view_metric_stats, resolve_weights, weighted_score)
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
@@ -102,6 +104,25 @@ def percentile(sorted_arr: list, p: float) -> float:
         return float(sorted_arr[0])
     import numpy as np
     return float(np.percentile(sorted_arr, p, method="linear"))
+
+
+def index_return(db: Session, start_date_str: str) -> dict:
+    """同じ期間の TOPIX のリターン（開始日以降の最初の終値 → 直近の終値・#1234）。
+
+    系列は `macro_data` の `BENCHMARK_SERIES`（連動 ETF の終値・配当なし。保有側の株価も配当を含まない）。読むのは
+    両端の 2 行だけ。値が取れない（系列が無い・開始日以降に 1 行しか無い）ときは `return_pct` を None にする
+    （0 として黙って超過を出さない）。
+    """
+    base = (db.query(MacroData.trade_date, MacroData.close)
+            .filter(MacroData.series_code == BENCHMARK_SERIES, MacroData.trade_date >= start_date_str,
+                    MacroData.close > 0))
+    first = base.order_by(MacroData.trade_date.asc()).first()
+    last = base.order_by(MacroData.trade_date.desc()).first()
+    out = {"series": BENCHMARK_SERIES, "start_date": first[0] if first else None,
+           "end_date": last[0] if last else None, "return_pct": None}
+    if first and last and first[0] < last[0]:
+        out["return_pct"] = round((last[1] - first[1]) / first[1] * 100, 2)
+    return out
 
 
 def run(
@@ -297,6 +318,18 @@ def run(
             "benchmark_avg_net_pct": round(b_avg_net, 2) if b_avg_net is not None else None,
             "excess_return_net_pct": round(avg_net - b_avg_net, 2) if b_avg_net is not None else None,
         }
+        # TOPIX に対する超過（#1234）。上の「全社平均」は同じスコアで選んだ上位 500 社の平均で、市場に対する値ではない。
+        # TOPIX は連動 ETF 1 本で買えて売買のコストはほぼ無いので、コスト後の超過は保有側だけからコストを引く
+        idx = index_return(db, start_date_str)
+        i_ret = idx["return_pct"]
+        summary.update({
+            "index_series":            idx["series"],
+            "index_start_date":        idx["start_date"],
+            "index_end_date":          idx["end_date"],
+            "index_return_pct":        i_ret,
+            "excess_vs_index_pct":     round(avg - i_ret, 2) if i_ret is not None else None,
+            "excess_vs_index_net_pct": round(avg_net - i_ret, 2) if i_ret is not None else None,
+        })
     else:
         summary = None
 
