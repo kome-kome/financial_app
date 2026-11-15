@@ -10,7 +10,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import FinancialMetric, MacroData, prices_on_or_after, latest_prices
+from database import FinancialMetric, MacroData, StockPriceWeekly, prices_on_or_after, latest_prices
 # 決算日から公表までの遅れ。M 系のモデルと同じ値を読む（書き写さない・#1226）
 from plugins.macro_snapshots import FINANCIAL_LAG_DAYS
 # 比べる相手の指数。売買の記録の成績（docs/VISION.md「運用の成功指標」）と同じ系列を借りる（書き写さない・#1234）
@@ -34,6 +34,16 @@ SCORING_SOURCES = ("recommend", "valuation", "net_cash")
 
 # 配当利回りの異常値ガード（％）。gap_analysis（バリュエーション分析）と整合。
 _DIV_YIELD_CAP = 30.0
+
+# 開始日の時点で買えた社だけを候補にする（#1242）。as-of の財務は社ごとに「境目以前で最新の年度」を
+# 取るので、古さの上限が無いと、何年も前に決算が止まった社（上場廃止・非公開化）の最後の決算が
+# 開始日の候補に混ざり、上位を埋めたうえで「株価なし」になる（既定の条件で 20 社中 20 社）。
+# **今の上場状態（`is_active`）では絞らない**（開始日より後に廃止した社を落とすと生存者バイアスを
+# 逆に持ち込む・#315）。開始日の時点で分かっていた事実＝開始日の N 日前〜開始日の週次の終値で絞る
+# （M 系の断面も、その月に株価がある社だけで作る）。None なら絞らない。
+# 決算の古さ（境目の 18 か月前より古い決算）で絞る案も数えたが、株価で絞った後の上位に古い決算の社は
+# 残らなかったので足していない（#1242 の計測・2026-11-16）。
+ASOF_PRICE_WINDOW_DAYS: Optional[int] = 14
 
 # backtest が読む `financial_metrics` の列（Issue #489）。VIEW は 97 列ある。
 # `recommend.SELECT_COLS`（_DISPLAY_COLS ＋ METRICS − RUNTIME_METRICS）を土台に、
@@ -125,6 +135,23 @@ def index_return(db: Session, start_date_str: str) -> dict:
     return out
 
 
+def tradable_at_start(db: Session, records: list, start_date: date) -> tuple[list, int]:
+    """as-of の候補を、開始日の時点で買えた社だけへ絞る（#1242）。`(残した行, 外した社の数)` を返す。
+
+    使うのは開始日までの週次の終値だけ（開始日より後の終値は見ない＝先を読まない）。今の上場状態は見ない
+    （#315）。外した数は応答の `n_untradable_at_start` に出す（黙って消さない）。数えるのは社の数で、行の数ではない。
+    """
+    if ASOF_PRICE_WINDOW_DAYS is None or not records:
+        return list(records), 0
+    lo = (start_date - timedelta(days=ASOF_PRICE_WINDOW_DAYS)).isoformat()
+    priced = {ec for (ec,) in (db.query(StockPriceWeekly.edinet_code)
+                               .filter(StockPriceWeekly.trade_date >= lo,
+                                       StockPriceWeekly.trade_date <= start_date.isoformat())
+                               .distinct())}
+    unpriced = {r.edinet_code for r in records} - priced
+    return [r for r in records if r.edinet_code not in unpriced], len(unpriced)
+
+
 def run(
     db: Session,
     preset_name: str,
@@ -192,6 +219,8 @@ def run(
     if min_market_cap is not None:
         query = query.filter(FinancialMetric.market_cap >= float(min_market_cap))
     records = query.all()
+    # 開始日の時点で買えた社だけを残す（#1242）。断面標準化（view_stats）と z_momentum の母集団もこの後の行
+    records, untradable = tradable_at_start(db, records, start_date)
 
     # z_momentum は VIEW 外の実行時計算（compute_momentum_z）。as-of日=start_date_str で
     # 参照するため、start_date より後の価格変動はスコアに影響しない（リークセーフ）。
@@ -225,9 +254,12 @@ def run(
             "holding_months": months_ago, "top_n": top_n, "preset": preset_name,
             "source": source,
             "financial_cutoff": fin_cutoff_str, "financial_lag_days": FINANCIAL_LAG_DAYS,
+            "n_untradable_at_start": untradable,
             "summary": None, "results": [], "total_candidates": 0,
             "message": (f"{start_date_str} 時点で公表済みとみなせる財務データ"
-                        f"（決算日が {fin_cutoff_str} 以前）が見つかりませんでした"),
+                        f"（決算日が {fin_cutoff_str} 以前）が見つかりませんでした"
+                        + (f"（開始日の時点で株価が無かった {untradable} 社は候補から外しています）"
+                           if untradable else "")),
         }
 
     top = scored[:top_n]
@@ -351,6 +383,8 @@ def run(
         "financial_cutoff":   fin_cutoff_str,
         "financial_lag_days": FINANCIAL_LAG_DAYS,
         "total_candidates": len(scored),
+        # 開始日の時点で株価が無かった（買えなかった）ので候補から外した社の数（#1242）
+        "n_untradable_at_start": untradable,
         "n_delisted_in_top_n": n_delisted_in_top_n,
         "n_delisted_no_price": n_delisted_no_price,
         "summary":          summary,

@@ -33,6 +33,22 @@ def make_metric(make_metric):
     return _make
 
 
+# 本番の「開始日の時点で買えた社だけ」の絞り込み（#1242）の値。下の autouse で外す前に控える。
+_PROD_PRICE_WINDOW_DAYS = backtest.ASOF_PRICE_WINDOW_DAYS
+
+
+@pytest.fixture(autouse=True)
+def _without_tradability_filter(monkeypatch):
+    """既存の検体（2020 年の決算・株価なし）は採点・遅れ・コストの規則を測るためのもので、開始日の株価を
+    持たない。絞り込みは `TestTradableAtStart` が `tradability_filter` で本番の値に戻して測る。"""
+    monkeypatch.setattr(backtest, "ASOF_PRICE_WINDOW_DAYS", None)
+
+
+@pytest.fixture
+def tradability_filter(monkeypatch):
+    monkeypatch.setattr(backtest, "ASOF_PRICE_WINDOW_DAYS", _PROD_PRICE_WINDOW_DAYS)
+
+
 class TestPercentile:
     def test_empty_returns_zero(self):
         assert backtest.percentile([], 50) == 0.0
@@ -480,6 +496,81 @@ class TestSurvivorshipBiasMeasurement:
         assert res["results"][0]["is_active"] is True
         assert res["n_delisted_in_top_n"] == 0
         assert res["n_delisted_no_price"] == 0
+
+
+# ── 開始日の時点で買えた社だけを候補にする（#1242）──────────────────────────────
+
+class TestTradableAtStart:
+    """何年も前に決算が止まった社（株価なし）が上位を埋めないこと。開始日より後に廃止した社は残すこと。"""
+
+    @staticmethod
+    def _start():
+        from datetime import date, timedelta
+        return date.today() - timedelta(days=6 * 30)          # months_ago=6 と一致させる
+
+    def _bar(self, make_weekly, ec, days_from_start, close=1000.0):
+        from datetime import timedelta
+        return make_weekly(edinet_code=ec, trade_date=(self._start() + timedelta(days=days_from_start)).isoformat(),
+                           close_last=close)
+
+    def test_production_filter_is_on(self):
+        assert _PROD_PRICE_WINDOW_DAYS == 14
+
+    def test_company_without_price_at_start_is_not_a_candidate(self, db, make_metric, make_weekly,
+                                                              tradability_filter):
+        """本文の症状: 2019 年に決算が止まって廃止した社は、スコアが高くても候補に入らない。"""
+        from datetime import date
+        db.add(make_metric(edinet_code="E00001", year=2019, period_end="2019-03-31", z_roe=5.0,
+                           is_active=False, delisted_date=date(2020, 1, 1)))
+        db.add(make_metric(edinet_code="E00002", year=2025, period_end=_days_before_start(6, 100), z_roe=1.0))
+        db.add(self._bar(make_weekly, "E00002", -3))
+        db.add(self._bar(make_weekly, "E00002", 5, 1000.0))       # 買い（開始日以降の最初の終値）
+        db.add(self._bar(make_weekly, "E00002", 6 * 30, 1100.0))  # 今日（直近の終値）
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+        assert res["total_candidates"] == 1
+        assert res["n_untradable_at_start"] == 1
+        assert res["n_delisted_in_top_n"] == 0
+        assert res["summary"]["n_with_data"] == 1
+
+    def test_company_delisted_after_start_stays(self, db, make_metric, make_weekly, tradability_filter):
+        """生存者バイアスを逆に持ち込まない（#315）: 開始日に売買されていた社は、後で廃止しても候補に残る。"""
+        from datetime import timedelta
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end=_days_before_start(6, 100), z_roe=5.0,
+                           is_active=False, delisted_date=self._start() + timedelta(days=30)))
+        db.add(make_metric(edinet_code="E00002", year=2025, period_end=_days_before_start(6, 100), z_roe=1.0))
+        for ec in ("E00001", "E00002"):
+            db.add(self._bar(make_weekly, ec, -3))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00001", "E00002"]
+        assert res["results"][0]["is_active"] is False
+        assert res["n_untradable_at_start"] == 0
+
+    def test_only_prices_up_to_the_start_count(self, db, make_metric, make_weekly, tradability_filter):
+        """開始日より後の終値では「買えた」に数えない（先を読まない）。窓より古い終値も数えない。"""
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end=_days_before_start(6, 100), z_roe=5.0))
+        db.add(self._bar(make_weekly, "E00001", 5))                                     # 開始日の後だけ
+        db.add(make_metric(edinet_code="E00002", year=2025, period_end=_days_before_start(6, 100), z_roe=4.0))
+        db.add(self._bar(make_weekly, "E00002", -(_PROD_PRICE_WINDOW_DAYS + 7)))      # 窓より前だけ
+        db.add(make_metric(edinet_code="E00003", year=2025, period_end=_days_before_start(6, 100), z_roe=1.0))
+        db.add(self._bar(make_weekly, "E00003", -_PROD_PRICE_WINDOW_DAYS))            # 窓の端（含む）
+        db.add(make_metric(edinet_code="E00004", year=2025, period_end=_days_before_start(6, 100), z_roe=0.5))
+        db.add(self._bar(make_weekly, "E00004", 0))                                     # 開始日（含む）
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00003", "E00004"]
+        assert res["n_untradable_at_start"] == 2
+
+    def test_all_dropped_reports_the_count_in_the_message(self, db, make_metric, tradability_filter):
+        db.add(make_metric(edinet_code="E00001", year=2019, period_end="2019-03-31", z_roe=1.0))
+        db.add(make_metric(edinet_code="E00002", year=2019, period_end="2019-03-31", z_roe=2.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["n_untradable_at_start"] == 2
+        assert res["total_candidates"] == 0
+        assert "開始日の時点で株価が無かった 2 社" in res["message"]
 
 
 class TestColumnScoping:

@@ -194,8 +194,10 @@ graph TD
 >   delisted なら復帰させる（戻り値 `price_alive`）。東証の社はマスタ突合と #463 の `protected` だけで判定する。
 >   「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）と
 >   sell_ranking の**標準化の基準となる母集団**は `database.tradable_filters(db)` で対象を絞るが、
->   **backtest はフィルタしない**（as-of の start_date 時点の候補を「現在」の上場状態で絞ると
->   生存者バイアスを逆向きに持ち込むため）。sell_ranking のユーザー入力の保有銘柄自体は
+>   **backtest は今の上場状態ではフィルタしない**（as-of の start_date 時点の候補を「現在」の上場状態で絞ると
+>   生存者バイアスを逆向きに持ち込むため）。代わりに `backtest.tradable_at_start` が、開始日の時点で分かっていた
+>   事実だけで「開始日に買えた社」へ絞る（開始日の `ASOF_PRICE_WINDOW_DAYS` 日前〜開始日に週次の終値がある社・#1242。
+>   外した数は応答の `n_untradable_at_start`）。sell_ranking のユーザー入力の保有銘柄自体は
 >   除外せず情報表示のみ（`is_active` を行の属性として返す）。
 > - **価格が止まった社の除外（Issue #605）**: `is_active` だけでは足りない。`/equities/master` の
 >   as-of は「今日−84日」（J-Quants のエンバーゴ）で、**廃止の反映が最大12週遅れる**。
