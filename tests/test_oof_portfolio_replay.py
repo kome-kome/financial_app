@@ -995,11 +995,13 @@ class TestPortfolioCli:
         monkeypatch.setattr(op, "_load_panel", lambda args: pytest.fail("照合の前にパネルを読んだ"))
         assert op.main(argv) == 2
 
-    def test_portfolio_keeps_the_preregistered_k_and_cost(self, monkeypatch):
+    def test_portfolio_keeps_the_preregistered_k_cost_and_sell_key(self, monkeypatch):
         monkeypatch.setattr(op, "_load_panel", lambda args: pytest.fail("照合の前にパネルを読んだ"))
         base = ["--portfolio", "--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", self._sha()]
+        s2 = ["--sell-source", op.SELL_S2_SOURCE]
         for extra in (["--top-k", "5"], ["--sell-k", "1"], ["--cost-bps", "20"], ["--cost-bands-bps", "30,15,8"]):
-            assert op.main(base + extra) == 2, extra
+            assert op.main(base + s2 + extra) == 2, extra
+        assert op.main(base) == 2                                  # 売りの並びが M-6 のまま（事前登録 §2.1 は S2）
 
     def test_main_writes_the_constructions_and_the_decision(self, monkeypatch, tmp_path):
         import json
@@ -1007,18 +1009,23 @@ class TestPortfolioCli:
         common = TestRunPortfolio()._common()
         _fake_main(monkeypatch, common, self.BASES, _fake_book())
         prod = {(ym, ec): -yh[2] for ym, rows in common.items() for ec, yh, _y in rows}
+        # S2 の OOF。2021-09 は全社同じ値＝その期だけ M-6 の μ̂ へ倒れる
+        s2 = {(ym, ec): (0.0 if ym == "2021-09" else -yh[0]) for ym, rows in common.items() for ec, yh, _y in rows}
         monkeypatch.setattr(op, "production_predictions", lambda panel, db, yms: (prod, {"available": True}))
+        monkeypatch.setattr(op, "s2_predictions", lambda captured, common_, bases: (s2, {"n_folds": 3}))
         monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
         out = tmp_path / "portfolio.json"
         code = op.main(["--portfolio", "--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", self._sha(),
-                        "--models", "macro_enet", "--out", str(out)])
+                        "--sell-source", op.SELL_S2_SOURCE, "--models", "macro_enet", "--out", str(out)])
         assert code == 0
         payload = json.loads(out.read_text(encoding="utf-8"))
         pf = payload["portfolio"]
         assert pf["prereg_sha256"] == self._sha() and pf["prereg_issue"].endswith("/issues/1227")
         assert list(pf["paths"]["0"]["rows"]) == list(op.PORTFOLIO_LABELS)
         assert pf["decision"]["judged"] is False                  # 経路が 1 本だけ＝判定しない
-        assert op.PORTFOLIO_NOTE in payload["caveats"]
+        assert pf["sell_source"] == op.SELL_S2_SOURCE and pf["paths"]["0"]["sell_fallback_periods"] == ["2021-09"]
+        assert payload["sell"]["paths"]["0"] == {"fallback_periods": ["2021-09"], "s2_fit": {"n_folds": 3}}
+        assert op.PORTFOLIO_NOTE in payload["caveats"] and op.SELL_NOTE in payload["caveats"]
         assert list(payload["results"]) == ["macro_enet"]         # 既定の行は今のまま
 
     BASES = TestProductionRow.BASES
@@ -1029,7 +1036,99 @@ class TestPortfolioCli:
         _fake_main(monkeypatch, TestRunPortfolio()._common(), self.BASES, _fake_book())
         monkeypatch.setattr(op, "production_predictions", lambda *a: pytest.fail("M-2 を選ばない既定で本番の M-2 を回した"))
         monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        monkeypatch.setattr(op, "s2_predictions", lambda *a: pytest.fail("既定の売りの並び（M-6）で S2 を回した"))
         out = tmp_path / "plain.json"
         assert op.main(["--models", "macro_enet", "--out", str(out)]) == 0
         payload = json.loads(out.read_text(encoding="utf-8"))
         assert "portfolio" not in payload and op.PORTFOLIO_NOTE not in payload["caveats"]
+        assert "sell" not in payload and op.SELL_NOTE not in payload["caveats"]
+        assert payload["params"]["sell_source"] == "macro_enet"
+
+
+# ── 売りの並びの S2（#1238）──────────────────────────────────────────────────────
+
+class TestS2SellKeys:
+    M6 = {("2021-06", "A"): 0.3, ("2021-06", "B"): 0.1, ("2021-09", "A"): 0.2, ("2021-09", "B"): 0.4}
+
+    def test_flat_periods_fall_back_to_m6_and_others_keep_s2(self):
+        s2 = {("2021-06", "A"): -0.1, ("2021-06", "B"): -0.5, ("2021-09", "A"): -0.2, ("2021-09", "B"): -0.2}
+        keys, fallback = op.s2_sell_keys(s2, self.M6)
+        assert fallback == ["2021-09"]
+        assert keys == {("2021-06", "A"): -0.1, ("2021-06", "B"): -0.5,         # S2 のまま
+                        ("2021-09", "A"): 0.2, ("2021-09", "B"): 0.4}           # 期ごと M-6 の μ̂（混ぜない）
+
+    def test_no_flat_period_keeps_everything(self):
+        s2 = {k: float(i) for i, k in enumerate(self.M6)}
+        assert op.s2_sell_keys(s2, self.M6) == (s2, [])
+
+    def test_sell_source_choices_and_label(self):
+        assert op.SELL_S2_SOURCE == "s2_quantile_low" and op.SELL_S2_SOURCE in op.SELL_SOURCES
+        assert op.build_parser().parse_args([]).sell_source == "macro_enet"     # 既定は今のまま
+        assert op._sell_label(op.SELL_S2_SOURCE).startswith("S2") and op._sell_label("macro_enet") == "M-6"
+
+
+class TestS2Predictions:
+    def test_capture_records_the_m6_leg_inputs_and_passes_through(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(op.macro_ensemble.plugin, "_m6_cv",
+                            lambda b, m6p, yms, fit_predict=None: calls.append(fit_predict) or ("aligned", "ctx"))
+        store: dict = {}
+        with op.capture_m6_args(store):
+            assert op.macro_ensemble.plugin._m6_cv("b", {"l1_ratio": 0.5}, ["2021-06"]) == ("aligned", "ctx")
+        assert store["args"] == ("b", {"l1_ratio": 0.5}, ["2021-06"]) and calls == [None]
+
+    def test_uncaptured_inputs_stop(self):
+        with pytest.raises(RuntimeError, match="捕まえられなかった"):
+            op.s2_predictions({}, TestProductionRow()._common(), TestProductionRow.BASES)
+
+    def test_runs_the_bakeoff_learner_on_the_m6_inputs_and_aligns_to_the_common_rows(self, monkeypatch):
+        common = TestProductionRow()._common()
+        seen = {}
+
+        def fake_fit_predict(name, m6p, diag):
+            seen["fit"] = (name, m6p)
+            return "fp"
+
+        def fake_m6_cv(b, m6p, yms, fit_predict=None):
+            seen["cv"] = (b, yms, fit_predict)
+            return {(ym, ec): (-yh[0], y) for ym, rows in common.items() for ec, yh, y in rows}, None
+
+        monkeypatch.setattr(op, "sell_candidate_fit_predict", fake_fit_predict)
+        monkeypatch.setattr(op.macro_ensemble.plugin, "_m6_cv", fake_m6_cv)
+        preds, info = op.s2_predictions({"args": ("b", {"l1_ratio": 0.5}, ["2021-06"])}, common,
+                                        TestProductionRow.BASES)
+        assert seen == {"fit": (op.SELL_S2_SOURCE, {"l1_ratio": 0.5}), "cv": ("b", ["2021-06"], "fp")}
+        assert preds == {(ym, ec): -yh[0] for ym, rows in common.items() for ec, yh, _y in rows}
+        assert isinstance(info, dict)
+
+    def test_run_replays_uses_the_given_sell_keys(self, monkeypatch):
+        row = TestProductionRow()
+        row._patch(monkeypatch)
+        common = row._common()
+        preds, _y = op.common_to_dicts(common, row.BASES)
+        args = (common, row.BASES, {}, None, ["macro_enet"], "macro_enet", 3, 1, 10.0)
+        plain = op.run_replays(*args)
+        same = op.run_replays(*args, sell_keys=preds["macro_enet"])
+        flipped = op.run_replays(*args, sell_keys={k: -v for k, v in preds["macro_enet"].items()})
+        assert same == plain
+        assert flipped["macro_enet"]["intervals"][1]["sold"] != plain["macro_enet"]["intervals"][1]["sold"]
+
+
+class TestPortfolioJob:
+    KEY = "measure:oof-replay-portfolio"
+
+    def test_job_runs_the_preregistered_measurement(self):
+        from scripts import prereg
+        job = rd.JOBS[self.KEY]
+        assert job.argv[1:3] == ("-m", "scripts.oof_portfolio_replay")
+        args = op.build_parser().parse_args(list(job.argv[3:]))
+        assert args.portfolio and args.start_shifts == (0, 1, 2) and args.sell_source == op.SELL_S2_SOURCE
+        assert args.prereg == op.PORTFOLIO_PREREG
+        assert args.prereg_sha == prereg.recorded_sha(prereg.read_document(op.PORTFOLIO_PREREG))
+        assert (args.top_k, args.sell_k, args.cost_bps, args.cost_bands_bps) == (10, 2, 10.0, None)
+        assert args.allow_full_pull and args.refresh_cache and not args.smoke
+        others = {op.build_parser().parse_args(list(rd.JOBS[k].argv[3:])).out
+                  for k in ("measure:oof-replay", "measure:oof-replay-paths", "measure:oof-replay-bands")}
+        assert args.out not in others
+        assert job.parallel_sensitive is True
+        assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN

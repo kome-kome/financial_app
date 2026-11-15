@@ -12,9 +12,10 @@
 - 予測は `sell_mu_source_bakeoff --in-layer`（#1043）と同じく M-4 を 1 回回して共通域の社ごとの OOF を取る
   （`_run_config(keep_common=True)`）。M-4 の基底は #1058 で本番の設定にそろえた（`M4_BASES_CAVEAT`）
 - 買いの並びは各モデルの画面の既定（M-1 / M-2 は U = μ̂ − λR・生の R2、λ=0 の M-6 は μ̂＝`buy_scores`）。
-  売りの並びは `--sell-source` の μ̂ の低い順（既定は M-6＝`sell_ranking.MU_SOURCE`）。本番の売りの並びのキーは
-  ADR-0076 で S2 になったが、S2 の OOF 予測はここに入っていないので M-6 の μ̂ のまま（#1238）。−R_macro は
-  過去の時点で作り直せないので使わない
+  売りの並びは `--sell-source` の低い順（既定は M-6 の μ̂＝`sell_ranking.MU_SOURCE`）。`--sell-source s2_quantile_low`
+  で本番の売りの並びのキー S2（ADR-0076）にできる（#1238）＝M-6 のレグの入力を捕まえ（`capture_m6_args`）、同じパネル・
+  fold で計測道具（#1158）と同じ関数で OOF を作る（`s2_predictions`）。予測が全社同じ値の期は、その期だけ M-6 の μ̂ で
+  並べる（`s2_sell_keys`・倒した期を JSON の `sell` に出す）。−R_macro は過去の時点で作り直せないので使わない
 - test 期（3 か月おき）ごとに: 予測が無くなった保有を外す → 残りの中で売りの並びの下位 k 社を売る →
   買いの並びの上位から K 社になるまで補充する（その期に売った社は買い戻さない）。最初の期は上位 K 社を買う
 - 期間のリターンは **y（52 週先）を繋げない**（四半期で繋ぐとラベルが重複する）。各社の月末の週の終値
@@ -79,7 +80,8 @@
   （`portfolio_decision`）。凍結値の照合（`--prereg`・`--prereg-sha`）が必須で、K・k・コストは事前登録の値のまま
 - 合算（`replay_combined`）は各モデルの運用を単独と同じ手続きで別々に進め、保有をその和集合にする。売買・コスト・入替率は
   和集合の出入りで数え、分母はその期の和集合の保有数。業種の上限は買うときだけ当てる（M-6 の運用が先に買う）
-- 日中枠のジョブは #1238（売りの並びに S2）で登録する。それまで計測は積まない
+- 売りの並びは本番と同じ S2 に固定する（`--sell-source s2_quantile_low` でなければ終了コード 2・#1238）。日中枠のジョブは
+  `measure:oof-replay-portfolio`（3 経路・積むのは親 #1227）
 
 実行:
     python -m scripts.oof_portfolio_replay                      # 既定 K=10・k=2・10bp
@@ -97,8 +99,8 @@ import os
 import random
 import statistics
 import sys
-from collections import namedtuple
-from contextlib import contextmanager
+from collections import defaultdict, namedtuple
+from contextlib import contextmanager, nullcontext
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -111,15 +113,17 @@ from model_comparison import VARIANT_PRODUCTION, _production_config, _safe_rollb
 from model_stats import (  # noqa: E402
     DEFAULT_AVG_BLOCK, DEFAULT_N_BOOT, DEFAULT_SEED, _percentile, _stationary_bootstrap_sample, bootstrap_mean_ci,
 )
-from plugins import get_plugin  # noqa: E402
+from plugins import get_plugin, macro_ensemble  # noqa: E402
 from plugins.macro_snapshots import _month_end_bound, month_end_indices, oof_backtest  # noqa: E402
+from plugins.model_candidates import make_diag, summarize_diag  # noqa: E402
 from plugins.utils import coerce_params, walk_forward_cv_monthly  # noqa: E402
 from portfolio_ledger import BENCHMARK_SERIES  # noqa: E402
 from scripts import prereg  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts.sell_mu_source_bakeoff import (  # noqa: E402
-    BASES, CANDIDATE, M4_BASES_CAVEAT, SHORT, buy_scores, common_to_dicts,
+    BASES, CANDIDATE, M4_BASES_CAVEAT, SELL_S2, SHORT, buy_scores, candidate_on_common, common_to_dicts,
+    sell_candidate_fit_predict,
 )
 
 _OUT = Path(__file__).resolve().parent / ".cache" / "oof_portfolio_replay.json"
@@ -166,6 +170,74 @@ PRODUCTION_MODEL = "macro_gbdt"
 PRODUCTION_KEY = f"{PRODUCTION_MODEL}:{VARIANT_PRODUCTION}"
 PRODUCTION_NOTE = ("M-2* は本番の設定（探索の 1 位）の M-2 を単体の手続きのまま回した予測。最初の学習期間だけを延ばして"
                    "test 月を共通域にそろえた。設定は採点と同じ期間のデータで選んでいる＝選択の楽観を含む（#1123）")
+
+
+# 売りの並びの S2（#1238）。本番の売りの並びのキー（ADR-0076）と同じ「52 週先リターンの下側 20% 点」の分位回帰で、名前は
+# 計測道具（#1158・`sell_mu_source_bakeoff`）の候補名を借りる。既定の売りの並びは M-6 の μ̂ のまま（既存の計測を変えない）
+SELL_S2_SOURCE = SELL_S2
+SELL_SOURCES = (*BASES, SELL_S2_SOURCE)
+SELL_NOTE = ("売りの並びの S2 は、M-4 の M-6 のレグと同じパネル・fold・前処理で、当てる答えを 52 週先リターンの下側 20% 点に"
+             "替えた分位回帰の OOF（計測道具 #1158 と同じ関数）。予測が全社同じ値の期は、その期だけ M-6 の μ̂ で並べる"
+             "（本番の `sell_ranking.choose_sell_keys` と同じ考え方・#1238）")
+
+
+def _sell_label(source: str) -> str:
+    return SHORT.get(source) or ("S2" if source == SELL_S2_SOURCE else source)
+
+
+@contextmanager
+def capture_m6_args(store: dict):
+    """M-4 の M-6 のレグ（`MacroEnsemblePlugin._m6_cv`）が受け取った入力 `(b, m6p, yms)` を `store["args"]` に捕まえる。
+
+    S2 を M-6 と同じパネル・月・fold で回すため（`sell_mu_source_bakeoff` の `--sell-candidates` と同じ手口・#1238）。
+    """
+    orig = macro_ensemble.plugin._m6_cv
+
+    def spy(b, m6p, yms, fit_predict=None):
+        store["args"] = (b, m6p, yms)
+        return orig(b, m6p, yms, fit_predict=fit_predict)
+
+    with patch.object(macro_ensemble.plugin, "_m6_cv", spy):
+        yield store
+
+
+def s2_predictions(captured: dict, common: dict, bases: list) -> tuple[dict, dict]:
+    """捕まえた M-6 のレグの入力で S2 を回し、M-4 の共通域にそろえた OOF `{(ym, 社): q̂}` と学習の要約を返す（#1238）。
+
+    学習関数は計測道具の `sell_candidate_fit_predict`（l1_ratio・内側 CV は本番の M-6 から取る）、そろえ方は
+    `candidate_on_common`（共通域の行が欠けたり実現リターンが食い違えば止める）。経路をずらした回は、呼び出し側が
+    `shifted_min_train` の内側で呼ぶ＝M-6 と同じ区切りになる。
+    """
+    if "args" not in captured:
+        raise RuntimeError("M-6 のレグの入力を捕まえられなかった（_m6_cv が呼ばれていない）＝S2 を同じ入力で回せない")
+    b, m6p, yms = captured["args"]
+    _preds, y = common_to_dicts(common, bases)
+    diag = make_diag()
+    aligned, _ctx = macro_ensemble.plugin._m6_cv(
+        b, m6p, yms, fit_predict=sell_candidate_fit_predict(SELL_S2_SOURCE, m6p, diag))
+    return candidate_on_common(aligned, y, SELL_S2_SOURCE), summarize_diag(diag)
+
+
+def s2_sell_keys(s2: dict, m6: dict) -> tuple[dict, list[str]]:
+    """S2 の OOF を売りのキーにする。予測が全社同じ値の期は、その期を M-6 の μ̂ で置き換え、置き換えた期を返す（#1238）。
+
+    同じ値では順位が付かない（#1158 の計測で 19 期のうち 2 期）。期を飛ばすと保有の入れ替えが止まって経路が変わるので、
+    本番（`sell_ranking.choose_sell_keys`）と同じく、その回は M-6 の μ̂ で並べる。期の中で S2 と μ̂ は混ぜない。
+    """
+    by_ym: dict[str, list] = defaultdict(list)
+    for key in s2:
+        by_ym[key[0]].append(key)
+    out: dict = {}
+    fallback: list[str] = []
+    for ym in sorted(by_ym):
+        keys = by_ym[ym]
+        vals = [s2[k] for k in keys]
+        if min(vals) == max(vals):
+            fallback.append(ym)
+            out.update({k: m6[k] for k in keys if k in m6})
+        else:
+            out.update({k: s2[k] for k in keys})
+    return out, fallback
 
 
 # ── 買い方の規則の計測（#1223・親 #1227・事前登録 docs/prereg/portfolio-construction.md）──────────
@@ -768,7 +840,8 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
                 sell_source: str, top_k: int, sell_k: int, cost_bps: float,
                 production: dict | None = None, extra_m2: dict | None = None,
                 band_cost: Callable[[str, str], float] | None = None,
-                index_bars: list | None = None, bands: dict | None = None) -> dict:
+                index_bars: list | None = None, bands: dict | None = None,
+                sell_keys: dict | None = None) -> dict:
     """買いの並び（models）ごとに OOF 運用再現を回す。
 
     `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
@@ -779,10 +852,12 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
     参考（#1224）: `index_bars`（`index_weekly_bars` の戻り）を渡すと、保有側と同じ `PriceBook` で月末の週の終値を引いて
     全ての行に指数に対する超過を足す。`bands`（`turnover_bands` の戻り）を渡すと、行に帯の内訳 `bands` を足す。
     どちらも渡さなければ（既定）、行と要約のキーは変わらない。
+
+    `sell_keys`（#1238）を渡すと、売りの並びは `preds[sell_source]` ではなくそれ（S2 の売りのキー・`s2_sell_keys`）を使う。
     """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
-    sell = preds[sell_source]
+    sell = sell_keys if sell_keys is not None else preds[sell_source]
     index_book = PriceBook({INDEX_SERIES: index_bars}) if index_bars is not None else None
 
     def index_ret(ym0: str, ym1: str) -> tuple[float | None, bool]:
@@ -820,7 +895,7 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
 
 def run_portfolio(common: dict, bases: list, prices_by_co: dict, db, production: dict | None,
                   sell_source: str, cost_bps: float, industry_of: dict,
-                  index_bars: list | None = None) -> tuple[dict | None, str | None]:
+                  index_bars: list | None = None, sell_keys: dict | None = None) -> tuple[dict | None, str | None]:
     """事前登録 §2.2 の 7 構成（`PORTFOLIO_LABELS`）を 1 つの経路で回す（#1223）。戻り値は `(構成ごとの行, 回せない理由)`。
 
     買いの並びは M-6（M-4 の基底）と M-2*（本番の設定・`production`）の画面の既定（`buy_scores`）。どの構成も同じ test 月
@@ -830,7 +905,7 @@ def run_portfolio(common: dict, bases: list, prices_by_co: dict, db, production:
         return None, "M-2*（本番の設定）の予測が無い"
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
-    sell = preds[sell_source]
+    sell = sell_keys if sell_keys is not None else preds[sell_source]
     index_book = PriceBook({INDEX_SERIES: index_bars}) if index_bars is not None else None
     index_ret = ((lambda ym0, ym1: index_book.period_return(INDEX_SERIES, ym0, ym1))
                  if index_book is not None else None)
@@ -913,7 +988,7 @@ def _label(name: str) -> str:
 def _print(results: dict, sell_source: str, top_k: int, sell_k: int, cost_bps: float,
            production: dict | None = None) -> None:
     print(f"\n=== OOF 運用再現（#1045・参考）K={top_k} k={sell_k} 片道 {cost_bps:g}bp・"
-          f"売りの並び={SHORT[sell_source]} の mu ===", flush=True)
+          f"売りの並び={_sell_label(sell_source)} ===", flush=True)
     print(f"注意: {DISCLAIMER}", flush=True)
     print(f"注意: {M4_BASES_CAVEAT}", flush=True)
     print(f"注意: {DELIST_NOTE}", flush=True)
@@ -1053,8 +1128,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  description="OOF 運用再現（#1045・参考で判定には使わない）")
     ap.add_argument("--models", nargs="+", choices=BASES, default=list(BASES),
                     help="買いの並びに使うモデル（各モデルの画面の既定の並び）")
-    ap.add_argument("--sell-source", choices=BASES, default=CANDIDATE,
-                    help="売りの並びに使う μ̂ の出所（既定は M-6。本番のキー S2 は未対応・#1238）")
+    ap.add_argument("--sell-source", choices=SELL_SOURCES, default=CANDIDATE,
+                    help=f"売りの並びに使う予測（既定は M-6 の μ̂。{SELL_S2_SOURCE}＝本番の売りの並びのキー S2・#1238）")
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="保有する社数 K")
     ap.add_argument("--sell-k", type=int, default=DEFAULT_SELL_K, help="毎期売る保有の下位の社数 k")
     ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS, help="片道の売買コスト（bp）")
@@ -1094,6 +1169,8 @@ def _portfolio_stamp(args) -> dict | int | None:
             or args.cost_bands_bps is not None):
         problems.append("--portfolio は事前登録の K・k・コストで回す（--top-k・--sell-k・--cost-bps・"
                         "--cost-bands-bps を変えない）")
+    if args.portfolio and args.sell_source != SELL_S2_SOURCE:
+        problems.append(f"--portfolio の売りの並びは本番と同じ S2（--sell-source {SELL_S2_SOURCE}・事前登録 §2.1）")
     if problems:
         print(f"[oof_replay] NG: {' / '.join(problems)}", file=sys.stderr)
         return prereg.EXIT_MISMATCH
@@ -1129,11 +1206,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     paths: dict[int, dict] = {}
     try:
         runs = {}
+        use_s2 = args.sell_source == SELL_S2_SOURCE
+        s2_by_shift: dict[int, tuple[dict, dict]] = {}
         for shift in args.start_shifts:
             # 開始月のずらし（#1167）。ずらし 0 は今までと同じ 1 回の M-4
             label = "M-4(3基底・rank_ic_grid)" + (f"・開始 +{shift}か月" if shift else "")
             with shifted_min_train(shift):
-                runs[shift] = _run_config(label, BASES, panel, db, weight_method="rank_ic_grid", keep_common=True)
+                captured: dict = {}
+                with capture_m6_args(captured) if use_s2 else nullcontext():
+                    runs[shift] = _run_config(label, BASES, panel, db, weight_method="rank_ic_grid", keep_common=True)
+                if use_s2:
+                    # 売りの並びの S2（#1238）。ずらしの内側で回す＝M-6 のレグと同じ区切り
+                    s2_by_shift[shift] = s2_predictions(captured, runs[shift]["common"], runs[shift]["bases"])
         check_paths_disjoint({s: set(r["common"]) for s, r in runs.items()})
         all_yms = sorted({ym for r in runs.values() for ym in r["common"]})
         # 比べる相手の指数（#1224・参考）。全ての経路に同じ週次足を渡す。test 月が 1 つも無ければ読まない
@@ -1148,6 +1232,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             bands = turnover_bands(turnover, all_yms)
         band_cost = make_band_cost(bands, args.cost_bands_bps, args.cost_bps) if bands is not None else None
         for shift, run in runs.items():
+            sell_keys, fallback = None, []
+            if use_s2:
+                m6_preds = common_to_dicts(run["common"], run["bases"])[0][CANDIDATE]
+                sell_keys, fallback = s2_sell_keys(s2_by_shift[shift][0], m6_preds)
             prod_preds, prod_info = None, None
             if PRODUCTION_MODEL in args.models or args.portfolio:
                 # 本番の設定の M-2（#1123）。test 月は（その経路の）M-4 の共通域にそろえる
@@ -1155,12 +1243,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
                                   args.sell_source, args.top_k, args.sell_k, args.cost_bps,
                                   production=prod_preds, band_cost=band_cost,
-                                  index_bars=index_bars, bands=bands)
+                                  index_bars=index_bars, bands=bands, sell_keys=sell_keys)
             paths[shift] = {"results": results, "production": prod_info, "has_production": prod_preds is not None,
                             "test_months": sorted(run["common"])}
+            if use_s2:
+                paths[shift]["sell"] = {"fallback_periods": fallback, "s2_fit": s2_by_shift[shift][1]}
             if args.portfolio:
                 rows, why = run_portfolio(run["common"], run["bases"], panel[0], db, prod_preds,
-                                          args.sell_source, args.cost_bps, industry_of, index_bars)
+                                          args.sell_source, args.cost_bps, industry_of, index_bars,
+                                          sell_keys=sell_keys)
                 paths[shift].update(portfolio=rows, portfolio_reason=why)
     finally:
         db.close()
@@ -1207,12 +1298,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "production": p["production"], "results": p["results"]}
             for shift, p in paths.items()}
         payload["path_summary"] = path_summary({s: p["results"] for s, p in paths.items()})
+    if use_s2:
+        # 売りの並びの S2（#1238）。経路ごとに、M-6 の μ̂ へ倒した期と S2 の学習の要約を残す（事前登録 §3 の参考）
+        payload["caveats"].append(SELL_NOTE)
+        payload["sell"] = {"source": SELL_S2_SOURCE,
+                           "paths": {str(s): p["sell"] for s, p in paths.items()}}
+        for s, p in paths.items():
+            print(f"売りの並び S2（経路 +{s}か月）: M-6 の μ̂ へ倒した期 {p['sell']['fallback_periods'] or 'なし'}",
+                  flush=True)
     if args.portfolio:
         # 買い方の規則の計測（#1223）。事前登録の印（本文の sha256・Issue・HEAD）と判定を残す
         payload["caveats"].append(PORTFOLIO_NOTE)
         payload["portfolio"] = {
             **stamp, "sell_source": args.sell_source, "decision": decision,
-            "paths": {str(s): {"reason": p.get("portfolio_reason"), "rows": p.get("portfolio")}
+            "paths": {str(s): {"reason": p.get("portfolio_reason"), "rows": p.get("portfolio"),
+                               "sell_fallback_periods": (p.get("sell") or {}).get("fallback_periods")}
                       for s, p in paths.items()},
         }
     out = Path(args.out)
