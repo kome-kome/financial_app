@@ -11,6 +11,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import FinancialMetric, prices_on_or_after, latest_prices
+# 決算日から公表までの遅れ。M 系のモデルと同じ値を読む（書き写さない・#1226）
+from plugins.macro_snapshots import FINANCIAL_LAG_DAYS
 from plugins.recommend import (DEFAULT_MIN_COVERAGE, SELECT_COLS, compute_momentum_z,
                                fit_view_metric_stats, resolve_weights, weighted_score)
 from plugins.net_cash_analysis import compute_net_cash, compute_nc_ratio
@@ -24,7 +26,7 @@ MULTI_PERIODS = [3, 6, 12, 18, 24]
 #   valuation : バリュエーション分析の期待総リターン（gap_ratio + 配当利回り）
 #   net_cash  : 清原式ネットキャッシュ比率
 # 以前あった `sell`（recommend の合成スコアの符号反転）は外した（ADR-0071）。売り候補ランキングの
-# 手法（M-6 の μ̂ の下位）とは別物で、売りとして画面に出す手法を 1 つに絞るため。売りの評価は
+# 手法（売り専用の予測 S2 の下位・ADR-0076）とは別物で、売りとして画面に出す手法を 1 つに絞るため。売りの評価は
 # OOF の売り側spread（`scripts.sell_mu_source_bakeoff`）で行う。
 SCORING_SOURCES = ("recommend", "valuation", "net_cash")
 
@@ -140,13 +142,20 @@ def run(
     start_date = today - timedelta(days=months_ago * 30)
     start_date_str = start_date.strftime("%Y-%m-%d")
     today_str = today.strftime("%Y-%m-%d")
+    # 開始日の時点で公表済みとみなせる決算だけを使う（#1226）。決算日から公表までには遅れがあり
+    # （3 月期なら決算短信が 5 月・有価証券報告書が 6 月）、`period_end <= start_date` だけで絞ると
+    # まだ出ていない数字で順位を付けてしまう＝成績が実際より良く見える。M 系のスナップショット
+    # （`macro_snapshots._latest_fin`）と同じ「決算日 + FINANCIAL_LAG_DAYS ≦ 基準日」にそろえる。
+    # 会社ごとの実際の公表日は VIEW に無いので、一律の日数で近似する。
+    fin_cutoff = start_date - timedelta(days=FINANCIAL_LAG_DAYS)
+    fin_cutoff_str = fin_cutoff.strftime("%Y-%m-%d")
 
     # スコア指標（z_roe / z_op_margin / gap_ratio 等）は financial_metrics VIEW が算出する
     # 派生値のため、FinancialRecord ではなく読み取りモデル FinancialMetric を引く。
     subq = (
         db.query(FinancialMetric.edinet_code,
                  func.max(FinancialMetric.year).label("max_year"))
-        .filter(FinancialMetric.period_end <= start_date)
+        .filter(FinancialMetric.period_end <= fin_cutoff)
         .group_by(FinancialMetric.edinet_code)
         .subquery()
     )
@@ -155,7 +164,7 @@ def run(
         db.query(*cols)
         .join(subq, (FinancialMetric.edinet_code == subq.c.edinet_code) &
                     (FinancialMetric.year == subq.c.max_year))
-        .filter(FinancialMetric.period_end <= start_date)
+        .filter(FinancialMetric.period_end <= fin_cutoff)
     )
     if industry:
         query = query.filter(FinancialMetric.industry == industry)
@@ -194,8 +203,10 @@ def run(
             "start_date": start_date_str, "end_date": today_str,
             "holding_months": months_ago, "top_n": top_n, "preset": preset_name,
             "source": source,
+            "financial_cutoff": fin_cutoff_str, "financial_lag_days": FINANCIAL_LAG_DAYS,
             "summary": None, "results": [], "total_candidates": 0,
-            "message": f"{start_date_str} 時点の財務データが見つかりませんでした",
+            "message": (f"{start_date_str} 時点で公表済みとみなせる財務データ"
+                        f"（決算日が {fin_cutoff_str} 以前）が見つかりませんでした"),
         }
 
     top = scored[:top_n]
@@ -303,6 +314,9 @@ def run(
         "preset":           preset_name,
         "source":           source,
         "cost_bps":         cost_bps,
+        # 順位付けに使った財務の境目（決算日がこの日以前の行だけ・#1226）と、公表までの遅れとして見た日数
+        "financial_cutoff":   fin_cutoff_str,
+        "financial_lag_days": FINANCIAL_LAG_DAYS,
         "total_candidates": len(scored),
         "n_delisted_in_top_n": n_delisted_in_top_n,
         "n_delisted_no_price": n_delisted_no_price,

@@ -902,12 +902,13 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <h2>バックテスト</h2>
   <span class="file-tag">backtest.py — GET /api/backtest（routers/analysis.py）</span>
 
-  <p>過去 N ヶ月前の時点で確定していた財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。以前の <code>sell</code>（買い系スコアの符号反転）は、売り候補ランキングの手法と別物なので外した（ADR-0071）。</p>
+  <p>過去 N ヶ月前の時点で公表済みとみなせる財務データを使いスコアリングし、その後の実際の株価リターンを計算することでモデルの有効性を事後的に検証する。<strong>検証対象のスコアリング手法は <code>source</code> で切替</strong>（<code>recommend</code> ＝複合スコア／<code>valuation</code> ＝期待総リターン gap_ratio＋配当／<code>net_cash</code> ＝清原式ネットキャッシュ比率）。ランキングを出す一次分析を同一土俵で比較できる（メタ層の一般化）。以前の <code>sell</code>（買い系スコアの符号反転）は、売り候補ランキングの手法と別物なので外した（ADR-0071）。</p>
 
   <h3>計算ロジック</h3>
   <div class="formula-block">start_date = today − months_ago × 30日
+cutoff     = start_date − FINANCIAL_LAG_DAYS  <span class="comment"># 決算日から公表までの遅れ（M 系と同じ定数）</span>
 
-1. start_date 以前に period_end が確定しているレコードで
+1. period_end ≤ cutoff のレコードで（開始日の時点で未公表の決算を読まない）
    各社の最新年度データを取得
 
 2. source のスコア関数で全社をランキング
@@ -926,7 +927,7 @@ benchmark    = スコアリング対象企業（最大500社）の平均リタ�
   <div class="warn-box">
     <strong>バイアスに注意:</strong>
     <br>• <strong>生存バイアス</strong>: 現在 DB に存在する企業のみ対象（過去に上場廃止した企業は含まれない）
-    <br>• <strong>決算ラグ</strong>: period_end ≤ start_date の制約のみで、実際の報告書公開日（+45–60日）は未考慮
+    <br>• <strong>決算ラグ</strong>: 決算日から公表までの遅れを、M 系と同じ一律の日数（<code>FINANCIAL_LAG_DAYS</code>）で見込む。会社ごとの実際の公表日は使っていないので、発表がそれより遅い会社では先読みが残りうる
     <br>• <strong>ベンチマーク</strong>: 全上場銘柄ではなくDBに収録された企業の部分集合
   </div>
 

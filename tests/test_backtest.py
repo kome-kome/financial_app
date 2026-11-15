@@ -124,6 +124,60 @@ class TestRun:
         assert res["source"] == "recommend"   # 既定 source
 
 
+# ── 公表前の決算を使わない（#1226）──────────────────────────────────────────────
+
+def _days_before_start(months_ago: int, days: int) -> str:
+    """開始日（today − months_ago × 30 日）の days 日前の日付。"""
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=months_ago * 30 + days)).isoformat()
+
+
+class TestFinancialLag:
+    def test_lag_is_the_same_constant_as_the_macro_models(self):
+        from plugins import macro_snapshots
+        assert backtest.FINANCIAL_LAG_DAYS == macro_snapshots.FINANCIAL_LAG_DAYS
+        assert 30 < backtest.FINANCIAL_LAG_DAYS < 60      # 下の 30 日前／60 日前の検体が境目をまたぐこと
+
+    def test_unpublished_financials_are_not_used(self, db, make_metric):
+        """決算日が開始日の 30 日前の行は選ばれず、60 日前の行は選ばれる。"""
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end=_days_before_start(6, 30), z_roe=2.0))
+        db.add(make_metric(edinet_code="E00002", year=2025, period_end=_days_before_start(6, 60), z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+        assert res["total_candidates"] == 1
+
+    def test_lag_changes_the_ranking(self, db, make_metric, monkeypatch):
+        """絞り込みが効いていることの確認: 遅れを 0 日（直す前）にすると、未公表の年度で順位が入れ替わる。"""
+        old, new = _days_before_start(6, 400), _days_before_start(6, 30)
+        db.add(make_metric(edinet_code="E00001", year=2024, period_end=old, z_roe=1.0))
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end=new, z_roe=5.0))   # 開始日の時点では未公表
+        db.add(make_metric(edinet_code="E00002", year=2024, period_end=old, z_roe=3.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002", "E00001"]
+        assert (res["results"][1]["period_end"], res["results"][1]["year"]) == (old, 2024)
+        monkeypatch.setattr(backtest, "FINANCIAL_LAG_DAYS", 0)
+        before = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert [r["edinet_code"] for r in before["results"]] == ["E00001", "E00002"]
+        assert before["results"][0]["period_end"] == new
+
+    def test_response_reports_the_cutoff(self, db, make_metric):
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=2.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["financial_lag_days"] == backtest.FINANCIAL_LAG_DAYS
+        assert res["financial_cutoff"] == _days_before_start(6, backtest.FINANCIAL_LAG_DAYS)
+
+    def test_no_data_message_reports_the_cutoff(self, db, make_metric):
+        db.add(make_metric(edinet_code="E00001", year=2025, period_end=_days_before_start(6, 10), z_roe=2.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["total_candidates"] == 0
+        assert res["financial_cutoff"] in res["message"]
+        assert res["financial_lag_days"] == backtest.FINANCIAL_LAG_DAYS
+
+
 # ── scoring source パラメータ化（#206・メタ層の一般化）──────────────────────
 
 class TestScoringSource:

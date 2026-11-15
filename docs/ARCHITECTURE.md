@@ -1447,7 +1447,7 @@ graph LR
         AN5["POST /api/screen\nスクリーニング（条件絞り込み）"]
         AN6["GET /api/recommend/presets\n推薦プリセット一覧"]
         AN7["POST /api/recommend\n推薦スクリーニング実行\nweights.mu は opt-in（mu_source 必須・未指定は400）\n既定プリセットは mu 重みを持たない＝既定は μ̂ 不使用"]
-        AN8["GET /api/backtest\n過去スコアリングの実績リターン検証\n?preset&months_ago&top_n&source&cost_bps / summary+percentiles（*_net併記）\nmu を含む重みは400（as-of再現不能・ADR-0030）"]
+        AN8["GET /api/backtest\n過去スコアリングの実績リターン検証\n?preset&months_ago&top_n&source&cost_bps / summary+percentiles（*_net併記）\n財務は決算日が開始日 − FINANCIAL_LAG_DAYS 以前の行だけ（未公表の決算を読まない・financial_cutoff を返す）\nmu を含む重みは400（as-of再現不能・ADR-0030）"]
         AN9["GET /api/backtest/multi\n複数保有期間（3/6/12/18/24ヶ月）一括比較\n?preset&top_n&source&cost_bps"]
         AN17["POST /api/backtest/model-comparison\n将来リターン予測 M-1/M-2/M-3/M-4/M-5/M-6 の OOF 横並び比較\n（各モデルの oof_backtest を集約・as-of上位Nとは別手法）\n6モデルとも heavy＝ローカル専用（Renderは各モデルskip）"]
         AN13["GET /api/morning\n朝の推奨（読むだけ・学習も再計算もしない）\n?preset&top_n&mu_source / recommend + 鮮度ブロック\n（price/gap_ratio/mu/macro/batch/overall_verdict/tradable/reasons）\n赤でもランキングは返し発注非推奨だけ明示する"]
