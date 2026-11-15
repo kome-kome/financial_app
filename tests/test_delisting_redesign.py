@@ -324,6 +324,27 @@ class TestBuildReport:
         assert report["scores"]["with_ended"] == report["scores"]["base"]
         assert report["prereg_decision"]["decision"] == "keep"
 
+    def test_series_exposes_the_period_values_already_scored(self):
+        """期ごとの rank-IC と上位10社超過（#1225・買いの主役の点検が読む）。`scores.base` と同じ採点の値を出すだけ。"""
+        prices = {f"E_{i}": _series(_weeks(150), _rising(150, base=100.0 + 7 * i, step=0.3 + 0.05 * i))
+                  for i in range(6)}
+        run, ex, captured = _fake_run(prices)
+        report = X.build_report(run, ex, captured, prices)
+        assert set(report["series"]) == set(X.PAIR)
+        for name in X.PAIR:
+            o = run["base_oof"][name]
+            assert report["series"][name] == X.period_series(o)
+            assert report["series"][name]["rank_ic"] == o["rank_ic_by_period"]
+            assert set(report["series"][name]["rank_ic"]) <= set(report["test_months"])
+
+    def test_period_series_picks_the_operational_top_k(self):
+        o = _scores(0.05, 0.02)["macro_enet"]
+        s = X.period_series(o)
+        assert s == {"rank_ic": o["rank_ic_by_period"],
+                     "top_k_excess": o["top_k_excess_return_by_period"][str(X.TOP_K)]}
+        assert s["rank_ic"] is not o["rank_ic_by_period"]              # 写し（元の結果を共有しない）
+        assert X.period_series({}) == {"rank_ic": {}, "top_k_excess": {}}
+
     def test_prediction_errors_stop(self):
         prices = _panel()
         run, ex, captured = _fake_run(prices)
