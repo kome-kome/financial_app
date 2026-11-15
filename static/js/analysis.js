@@ -915,8 +915,12 @@ async function runBacktest() {
     if (industry) url += `&industry=${encodeURIComponent(industry)}`;
     const d = await apiFetch(url);
     btResults = d.results;
+    // 順位付けに使った財務の境目（#1226）。基準日の時点で未公表の決算を読まないよう、サーバーが決算日で絞っている
+    const finNote = d.financial_cutoff
+      ? `　財務: 決算日が ${d.financial_cutoff} 以前の数字（基準日の ${Number(d.financial_lag_days)} 日前まで＝公表済みとみなせるもの）`
+      : '';
     document.getElementById('bt-period-label').textContent =
-      `基準日: ${d.start_date}（${d.holding_months}ヶ月前）→ ${d.end_date}　対象候補: ${d.total_candidates}社`;
+      `基準日: ${d.start_date}（${d.holding_months}ヶ月前）→ ${d.end_date}　対象候補: ${d.total_candidates}社${finNote}`;
     _renderBtSummary(d.summary);
     _renderBtBenchmark(d.summary);
     _renderBtHistogram(btResults);
