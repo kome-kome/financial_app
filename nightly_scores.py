@@ -228,6 +228,62 @@ VERIFIERS = {
 }
 
 
+# ── 相乗りの成果物の点検（#1237）────────────────────────────────────────────
+# producer が μ̂ とは別の表へ一緒に書く成果物のうち、**失敗しても producer を止めない**作りのもの。
+# 画面から M-6 を回したときは今のまま M-6 の結果を返す（`MacroEnetPlugin._fit_sell_quantile`）が、夜間では
+# その表が本番の入力なので、黙って成功で終わらせず非ゼロ終了の理由に足す。μ̂ の保存は巻き戻さない
+# （診断値の記録の失敗 `<model>:diagnostics` と同じ扱い）。
+
+def _check_sell_quantile(db, result: dict, started_at: datetime) -> str:
+    """売り専用の予測 S2（`sell_quantile_scores`）が今回の実行で正しく書けたかを確かめる。
+
+    S2 は `sell_ranking` の既定の並びのキー（ADR-0076）。学習・保存に失敗すると表は前の晩のまま残り、日付の
+    食い違いで売りの並びが M-6 の μ̂ へ黙って倒れる。だから失敗は `VerificationError` にする:
+      - 結果に `sell_quantile` が無い（S2 が走っていない）／`error`（学習の失敗）／`persist_error`（保存の失敗）
+      - 成功した回に、表の行数・基準日が M-6 の表（`macro_enet_scores`）と食い違う、または今回より古い
+    予測が全社同じ値の回（`flat`）は仕様どおり（#1158 の計測で 19 期のうち 2 期）なので失敗にしない。表が空で
+    あることだけ確かめ、ログ用の要約を返す（売りの並びは M-6 の μ̂ で並ぶ）。
+    """
+    from sqlalchemy import func
+
+    from database import MacroEnetScore, SellQuantileScore
+
+    info = result.get("sell_quantile")
+    if not isinstance(info, dict):
+        raise VerificationError("M-6 の結果に sell_quantile が無い＝売り専用の予測 S2 が走っていない"
+                                "（売りの並びは M-6 の μ̂ へ倒れる）")
+    if info.get("error"):
+        raise VerificationError(f"S2 の学習に失敗: {info['error']}（表は前の晩のまま＝売りの並びは M-6 の μ̂ へ倒れる）")
+    if info.get("persist_error"):
+        raise VerificationError(f"S2 の保存に失敗: {info['persist_error']}（売りの並びは M-6 の μ̂ へ倒れる）")
+
+    n_s2, s2_snap, s2_created = db.query(
+        func.count(SellQuantileScore.edinet_code), func.max(SellQuantileScore.snapshot_date),
+        func.max(SellQuantileScore.created_at)).one()
+    if info.get("flat"):
+        if n_s2:
+            raise VerificationError(f"S2 は全社同値なのに sell_quantile_scores に {n_s2} 行残っている（空で全置換されていない）")
+        return "S2: 予測が全社同じ値のため保存なし（表は空・売りの並びは M-6 の μ̂）"
+
+    n_m6, m6_snap = db.query(func.count(MacroEnetScore.edinet_code), func.max(MacroEnetScore.snapshot_date)).one()
+    if not n_s2 or s2_created is None:
+        raise VerificationError("sell_quantile_scores が空です（S2 の予測が 1 件も永続化されていません）")
+    s2_created = _aware_utc(s2_created)
+    if s2_created < started_at:
+        raise VerificationError(f"sell_quantile_scores の max(created_at)={s2_created.isoformat()} が"
+                                f" 実行開始 {started_at.isoformat()} より古い＝今回の書き込みが反映されていません")
+    if (n_s2, s2_snap) != (n_m6, m6_snap):
+        raise VerificationError(f"sell_quantile_scores（{n_s2}社・{s2_snap}）が macro_enet_scores（{n_m6}社・{m6_snap}）"
+                                "と食い違う（売りの並びは日付が違えば M-6 の μ̂ へ倒れる）")
+    return f"S2: {n_s2}社 / snapshot_date={s2_snap}（M-6 と一致） / {info.get('seconds')}秒"
+
+
+# モデル名 → (失敗の理由のラベル, 点検する関数)。点検は μ̂ の検証と診断値の記録の後に走る。
+SIDE_OUTPUT_CHECKS: dict[str, tuple[str, Callable]] = {
+    "macro_enet": ("sell_quantile", _check_sell_quantile),
+}
+
+
 # ── 診断値の記録（#726・ADR-0061）──────────────────────────────────────────
 # 夜間の producer が毎晩計算しているのに捨てていた値（選ばれた正則化の強さ・OOF 成績・業種別の統計）を
 # `nightly_model_diagnostics` へ積む。読むのは `python -m scripts.nightly_diag_report` だけで、
@@ -355,7 +411,8 @@ def _extract_macro_enet(result: dict) -> dict:
         "size_neutral":      dict(result.get("size_neutral") or {}),
         # 売り専用の候補 S2 の相乗り（#1202）: 行数・全社同値・選ばれた α/l1_ratio・端への張り付き・反復の上限・
         # 所要・失敗。キーは `MacroEnetPlugin._fit_sell_quantile` が作る少数の固定値で、予測そのものは入らない。
-        # 本番の売りの並びの入力（ADR-0076・#1201）。毎晩そろうか・何秒かかるかをここで読む（失敗の起票は #1237）
+        # 本番の売りの並びの入力（ADR-0076・#1201）。毎晩そろうか・何秒かかるかをここで読む（失敗は
+        # `SIDE_OUTPUT_CHECKS` が非ゼロ終了の理由 `macro_enet:sell_quantile` にする・#1237）
         "sell_quantile":     dict(result.get("sell_quantile") or {}),
     }
 
@@ -541,7 +598,8 @@ async def _run_models_inner(models: list[str], db, run_ctx: dict) -> list[dict]:
         t0 = time.time()
         entry: dict = {"model": name, "ok": False, "summary": None,
                        "verified": None, "error": None,
-                       "diagnostics": None, "diagnostics_error": None}
+                       "diagnostics": None, "diagnostics_error": None,
+                       "side_output": None, "side_output_error": None}
         result = None
         try:
             plugin = get_plugin(name)
@@ -570,19 +628,32 @@ async def _run_models_inner(models: list[str], db, run_ctx: dict) -> list[dict]:
                 db.rollback()
                 entry["diagnostics_error"] = _redact(f"{type(e).__name__}: {e}")
                 logger.error("[%s] 診断値を記録できなかった: %s", name, entry["diagnostics_error"])
+            # 相乗りの成果物（#1237）。失敗しても μ̂ は巻き戻さず、非ゼロ終了の理由に足すだけ
+            side = SIDE_OUTPUT_CHECKS.get(name)
+            if side is not None:
+                try:
+                    entry["side_output"] = side[1](db, result, started_at)
+                    logger.info("[%s] %s", name, entry["side_output"])
+                except Exception as e:   # noqa: BLE001 — 失敗として数え、次のモデルへ進む
+                    db.rollback()
+                    entry["side_output_error"] = _redact(f"{type(e).__name__}: {e}")
+                    logger.error("[%s] %s が失敗: %s", name, side[0], entry["side_output_error"])
         entry["elapsed_min"] = round((time.time() - t0) / 60, 1)
         entries.append(entry)
     return entries
 
 
 def failed_labels(entries: list[dict]) -> list[str]:
-    """非ゼロ終了の理由になるラベル（モデルの失敗と、診断値の記録の失敗を分けて出す）。"""
+    """非ゼロ終了の理由になるラベル（モデルの失敗・診断値の記録の失敗・相乗りの成果物の失敗を分けて出す）。"""
     out: list[str] = []
     for e in entries:
         if not e["ok"]:
             out.append(e["model"])
-        elif e.get("diagnostics_error"):
+            continue
+        if e.get("diagnostics_error"):
             out.append(f"{e['model']}:diagnostics")
+        if e.get("side_output_error"):
+            out.append(f"{e['model']}:{SIDE_OUTPUT_CHECKS[e['model']][0]}")
     return out
 
 
@@ -636,6 +707,10 @@ async def _run(args: argparse.Namespace) -> None:
                     e["verified"] or e["error"] or e["summary"] or "")
         if e.get("diagnostics_error"):
             logger.info("%-8s %-14s        診断値: %s", "FAILED", e["model"], e["diagnostics_error"])
+        if e.get("side_output_error"):
+            logger.info("%-8s %-14s        %s", "FAILED", e["model"], e["side_output_error"])
+        elif e.get("side_output"):
+            logger.info("%-8s %-14s        %s", "OK", e["model"], e["side_output"])
     for source, (status, detail) in snapshot.items():
         logger.info("%-8s 予測の写し %-17s %s", status, source, detail)
     logger.info("総所要時間: %.1f分", (time.time() - t0) / 60)
