@@ -28,6 +28,8 @@
   fold の月（3 か月おき）だけ。2023 年以前に廃止した社はパネルに居ない（#1188）ので、その月は足す行が無い
 
 日中キュー `measure:delisting-redesign`（並走に敏感）で単独に回す。結果は `scripts/.cache/delisting_redesign.json`。
+結果の `series`（答えのある行だけの、M-6 と M-2 の期ごとの rank-IC と上位10社超過）は、買いの主役の点検
+（`scripts.buy_lead_watch`・#1225・`docs/prereg/buy-lead-watch.md`）が読む。既に計算している値を出すだけ。
 
 終了コード: 0 = 完了 / 2 = 事前登録の不一致 / 3 = 入力がそろわない・照合が合わない。
 
@@ -211,6 +213,16 @@ def neutralize_extras(raw_by_ym: dict, extra: dict, ids_by_ym: dict, logcap_lab:
 
 # ── 判定 ────────────────────────────────────────────────────────────────────────
 
+def period_series(o: dict) -> dict:
+    """採点の結果から、期ごとの rank-IC と上位10社超過を `{ym: 値}` で取り出す（#1225）。
+
+    買いの主役の点検（`scripts.buy_lead_watch`・`docs/prereg/buy-lead-watch.md`）が読む。既に計算している値を
+    出すだけで、新しい計測は足さない。形は `measure_selection_optimism` の `series` と同じ。
+    """
+    return {"rank_ic": dict(o.get("rank_ic_by_period") or {}),
+            "top_k_excess": dict((o.get("top_k_excess_return_by_period") or {}).get(str(TOP_K)) or {})}
+
+
 def include_decision(base: dict, with_ended: dict) -> dict:
     """事前登録 §4 の判定。主審 2 本の判定の入れ替わりか、上位10社超過の差の符号の入れ替わりで propose_include。"""
     a, b = PAIR
@@ -363,6 +375,8 @@ def build_report(run: dict, ex: ExtraPredictor, captured: dict, prices_by_co: di
             "covered_base": _metrics(base_cov),
             "covered_with_ended": _metrics(with_cov),
         },
+        # 答えのある行だけ（`scores.base` と同じ採点）の期ごとの値（#1225）。足すだけで、他の項目は変えない
+        "series": {name: period_series(base[name]) for name in PAIR},
         "prereg_decision": include_decision(base, with_exit),
         "reference": {
             "bankrupt_minus_99": include_decision(base, with_bank),
