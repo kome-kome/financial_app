@@ -40,8 +40,10 @@ from nightly_scores import (  # noqa: E402
     LOCAL_PREFIX,
     NIGHTLY_MODELS,
     NIGHTLY_PARAMS,
+    SIDE_OUTPUT_CHECKS,
     VERIFIERS,
     VerificationError,
+    _check_sell_quantile,
     _code_version,
     _edge_warnings,
     _extract_macro_enet,
@@ -518,6 +520,139 @@ class TestDiagnosticsRecording:
         assert entries[0]["diagnostics"] is None
         assert entries[0]["diagnostics_error"] is None
         assert failed_labels(entries) == []
+
+
+class TestSellQuantileCheck:
+    """売り専用の予測 S2 の失敗を、夜間バッチの失敗として現す（#1237）。
+
+    S2 は `sell_ranking` の既定の並びのキー（ADR-0076）。M-6 のプラグインは S2 が失敗しても止まらない作り
+    （画面から回したときに M-6 の結果を返すため）なので、夜間側で応答と表を点検する。
+    """
+
+    SNAP = "2026-11-13"
+    OK_INFO = {"flat": False, "n_rows": 2, "seconds": 12.3, "n_saved": 2}
+
+    def _seed(self, db, *, m6=("E1", "E2"), s2=("E1", "E2"), s2_snap=SNAP):
+        from database import replace_macro_enet_scores, replace_sell_quantile_scores
+        replace_macro_enet_scores(db, [{"edinet_code": ec, "mu": 0.1} for ec in m6], self.SNAP)
+        replace_sell_quantile_scores(db, [{"edinet_code": ec, "q20": -0.2} for ec in s2], s2_snap)
+
+    @staticmethod
+    def _before() -> datetime:
+        return datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    def test_registry_points_at_nightly_models(self):
+        assert SIDE_OUTPUT_CHECKS == {"macro_enet": ("sell_quantile", _check_sell_quantile)}
+        assert set(SIDE_OUTPUT_CHECKS) <= set(NIGHTLY_MODELS)
+
+    def test_success_matches_the_m6_table(self, db):
+        self._seed(db)
+        msg = _check_sell_quantile(db, {"sell_quantile": self.OK_INFO}, self._before())
+        assert "2社" in msg and f"snapshot_date={self.SNAP}" in msg and "M-6 と一致" in msg
+
+    @pytest.mark.parametrize("result, match", [
+        ({}, "走っていない"),
+        ({"sell_quantile": None}, "走っていない"),
+        ({"sell_quantile": {"error": "RuntimeError: 解けない", "seconds": 1.0}}, "学習に失敗"),
+        ({"sell_quantile": {"flat": False, "n_rows": 2, "persist_error": "OperationalError: x"}}, "保存に失敗"),
+    ])
+    def test_reported_failures_raise(self, db, result, match):
+        self._seed(db)                       # 表が前の晩のまま残っていても、応答の失敗で落とす
+        with pytest.raises(VerificationError, match=match):
+            _check_sell_quantile(db, result, self._before())
+
+    def test_flat_is_not_a_failure_when_the_table_is_empty(self, db):
+        self._seed(db, s2=())
+        msg = _check_sell_quantile(db, {"sell_quantile": {"flat": True, "n_rows": 0, "n_saved": 0}}, self._before())
+        assert "全社同じ値" in msg
+
+    def test_flat_with_leftover_rows_raises(self, db):
+        self._seed(db)
+        with pytest.raises(VerificationError, match="残っている"):
+            _check_sell_quantile(db, {"sell_quantile": {"flat": True, "n_rows": 0}}, self._before())
+
+    def test_empty_table_after_success_raises(self, db):
+        self._seed(db, s2=())
+        with pytest.raises(VerificationError, match="空です"):
+            _check_sell_quantile(db, {"sell_quantile": self.OK_INFO}, self._before())
+
+    def test_stale_table_raises(self, db):
+        self._seed(db)
+        future = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with pytest.raises(VerificationError, match="より古い"):
+            _check_sell_quantile(db, {"sell_quantile": self.OK_INFO}, future)
+
+    @pytest.mark.parametrize("kw", [{"s2": ("E1",)}, {"s2_snap": "2026-11-12"}])
+    def test_mismatch_with_the_m6_table_raises(self, db, kw):
+        self._seed(db, **kw)
+        with pytest.raises(VerificationError, match="食い違う"):
+            _check_sell_quantile(db, {"sell_quantile": self.OK_INFO}, self._before())
+
+    # ── run_models を通した経路（M-6 を作り物に差し替える・学習はしない）──────────
+
+    def _fake_m6(self, info: dict | None, s2_rows=("E1", "E2")):
+        from plugins.base import AnalysisPlugin
+
+        snap = self.SNAP
+
+        class _FakeEnet(AnalysisPlugin):
+            name = "macro_enet"
+            label = "fake"
+            description = "test"
+
+            def params_schema(self) -> dict:
+                return {}
+
+            def execute(self, params, db) -> dict:
+                from database import replace_macro_enet_scores, replace_sell_quantile_scores
+                replace_macro_enet_scores(db, [{"edinet_code": "E1", "mu": 0.1},
+                                               {"edinet_code": "E2", "mu": 0.2}], snap)
+                if s2_rows is not None:
+                    replace_sell_quantile_scores(db, [{"edinet_code": ec, "q20": -0.2} for ec in s2_rows], snap)
+                out = {"asof": {"snapshot_date": snap}, "n_companies": 2}
+                if info is not None:
+                    out["sell_quantile"] = info
+                return out
+
+        return _FakeEnet()
+
+    def _run(self, db, monkeypatch, plugin):
+        import plugins
+        monkeypatch.setattr(plugins, "get_plugin", lambda name: plugin)
+        return asyncio.run(run_models(["macro_enet"], db, code_version="unknown"))
+
+    def test_s2_failure_fails_the_batch_but_keeps_mu(self, db, monkeypatch):
+        from database import MacroEnetScore
+
+        entries = self._run(db, monkeypatch, self._fake_m6({"error": "RuntimeError: 解けない", "seconds": 1.0},
+                                                           s2_rows=None))
+        e = entries[0]
+        assert e["ok"] is True, "M-6 の μ̂ の永続化は成功しているので、モデル自体は失敗にしない"
+        assert e["diagnostics_error"] is None and e["diagnostics"]
+        assert "学習に失敗" in e["side_output_error"] and e["side_output"] is None
+        assert failed_labels(entries) == ["macro_enet:sell_quantile"]
+        assert db.query(MacroEnetScore).count() == 2
+
+    def test_missing_s2_result_fails_the_batch(self, db, monkeypatch):
+        entries = self._run(db, monkeypatch, self._fake_m6(None, s2_rows=None))
+        assert "走っていない" in entries[0]["side_output_error"]
+        assert failed_labels(entries) == ["macro_enet:sell_quantile"]
+
+    def test_s2_success_passes(self, db, monkeypatch):
+        entries = self._run(db, monkeypatch, self._fake_m6(dict(self.OK_INFO)))
+        e = entries[0]
+        assert e["side_output_error"] is None and "M-6 と一致" in e["side_output"]
+        assert failed_labels(entries) == []
+
+    def test_flat_night_passes(self, db, monkeypatch):
+        entries = self._run(db, monkeypatch, self._fake_m6({"flat": True, "n_rows": 0, "n_saved": 0}, s2_rows=()))
+        assert "全社同じ値" in entries[0]["side_output"]
+        assert failed_labels(entries) == []
+
+    def test_diagnostics_and_s2_failures_are_both_reported(self):
+        entries = [{"model": "macro_enet", "ok": True, "diagnostics_error": "x", "side_output_error": "y"},
+                   {"model": "sector_ols", "ok": False}]
+        assert failed_labels(entries) == ["macro_enet:diagnostics", "macro_enet:sell_quantile", "sector_ols"]
 
 
 class TestDiagnosticsExtraction:

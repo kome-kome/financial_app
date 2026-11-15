@@ -45,6 +45,7 @@ M-2（macro_gbdt・XGBoost）の**線形兄弟**。Issue #372 の候補メニュ
     52 週先リターンの下側 20% 点に替えた分位回帰（`model_candidates.make_quantile_enet_fit_predict`・#1158 で
     採用）も 1 回解き、`sell_quantile_scores` へ全置換で保存する。M-6 と同じパネルであることを構造で保つため
     に別プラグインにしない。S2 の失敗は M-6 を止めない（応答と夜間の診断値の `sell_quantile.error` に残す）。
+    夜間バッチは応答と表を点検し、失敗を非ゼロ終了の理由にする（`nightly_scores.SIDE_OUTPUT_CHECKS`・#1237）。
     売りの並びの既定のキーはこの表（`sell_ranking.SELL_KEY_SOURCE`・ADR-0076）。S2 が失敗した回は売りの並びが M-6 の μ̂ へ倒れる。
 """
 import logging
