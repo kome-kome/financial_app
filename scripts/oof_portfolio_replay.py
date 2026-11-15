@@ -73,6 +73,14 @@
   （`band_breakdown`）。帯は売買代金がそろう全社の三等分なので、偏りが無ければ割合は約 1/3。記述だけで検定しない
 - 既定の呼び出し（`index_ret`・`index_bars`・`bands` を渡さない）では、行と要約のキーは変わらない
 
+## 買い方の規則の計測（#1223・親 #1227・事前登録 docs/prereg/portfolio-construction.md）
+
+- `--portfolio` で、事前登録の 7 構成（`PORTFOLIO_LABELS`）を経路ごとに回し（`run_portfolio`）、§4 の判定を機械的に出す
+  （`portfolio_decision`）。凍結値の照合（`--prereg`・`--prereg-sha`）が必須で、K・k・コストは事前登録の値のまま
+- 合算（`replay_combined`）は各モデルの運用を単独と同じ手続きで別々に進め、保有をその和集合にする。売買・コスト・入替率は
+  和集合の出入りで数え、分母はその期の和集合の保有数。業種の上限は買うときだけ当てる（M-6 の運用が先に買う）
+- 日中枠のジョブは #1238（売りの並びに S2）で登録する。それまで計測は積まない
+
 実行:
     python -m scripts.oof_portfolio_replay                      # 既定 K=10・k=2・10bp
     python -m scripts.oof_portfolio_replay --top-k 30 --sell-k 6 --cost-bps 20
@@ -107,6 +115,7 @@ from plugins import get_plugin  # noqa: E402
 from plugins.macro_snapshots import _month_end_bound, month_end_indices, oof_backtest  # noqa: E402
 from plugins.utils import coerce_params, walk_forward_cv_monthly  # noqa: E402
 from portfolio_ledger import BENCHMARK_SERIES  # noqa: E402
+from scripts import prereg  # noqa: E402
 from scripts._cache import set_refresh  # noqa: E402
 from scripts.ensemble_base_bakeoff import _load_panel, _run_config  # noqa: E402
 from scripts.sell_mu_source_bakeoff import (  # noqa: E402
@@ -157,6 +166,29 @@ PRODUCTION_MODEL = "macro_gbdt"
 PRODUCTION_KEY = f"{PRODUCTION_MODEL}:{VARIANT_PRODUCTION}"
 PRODUCTION_NOTE = ("M-2* は本番の設定（探索の 1 位）の M-2 を単体の手続きのまま回した予測。最初の学習期間だけを延ばして"
                    "test 月を共通域にそろえた。設定は採点と同じ期間のデータで選んでいる＝選択の楽観を含む（#1123）")
+
+
+# ── 買い方の規則の計測（#1223・親 #1227・事前登録 docs/prereg/portfolio-construction.md）──────────
+# 値は事前登録 §2〜§4 と同じ（変えるなら文書を凍結し直す・tests が文書の文言と照合する）。
+PORTFOLIO_PREREG = "docs/prereg/portfolio-construction.md"
+# 合算する運用の並び。各期は M-6 の運用が先に買う（業種の上限の当て方が順に依る・事前登録 §2.2）
+COMBINED_LEGS = (CANDIDATE, PRODUCTION_KEY)
+INDUSTRY_CAPS = {"D4": 4, "D3": 3}
+PORTFOLIO_TOP_K, PORTFOLIO_SELL_K = 10, 2          # 各運用の K・k
+PORTFOLIO_TOP_K20, PORTFOLIO_SELL_K20 = 20, 4      # 保有数をそろえた対照（A20・B20）
+# 構成の記号 → 表示名。C が基準（今の運用）
+PORTFOLIO_LABELS = {
+    "C": "合算", "D4": "合算+業種上限4", "D3": "合算+業種上限3",
+    "A": "M-6", "B": "M-2*", "A20": "M-6(20社)", "B20": "M-2*(20社)",
+}
+PORTFOLIO_BASELINE = "C"
+PORTFOLIO_CANDIDATES = ("D4", "D3", "A")           # 採る候補の優先順（今の運用からの変更が小さい順）
+PORTFOLIO_N_PATHS = 3                              # 経路の数（--start-shifts 0,1,2）
+PORTFOLIO_MAX_EXCESS_DROP = 0.02                   # TOPIX に対する年率の超過の低下の許容（3 経路の平均）
+_FLOAT_TOL = 1e-12                                 # 「−0.02 以上」を小数の丸め誤差で外さないための許容
+PORTFOLIO_NOTE = ("買い方の規則の計測（#1227・事前登録 docs/prereg/portfolio-construction.md）。合算は各モデルの運用を別々に"
+                  "進めた保有の和集合で、業種の上限は買うときだけ当てる。業種は今の値（過去の業種は持っていない）。"
+                  "運用再現は参考（ADR-0069）で、この計測が決めるのは保有の組み方だけ")
 
 
 class NotAligned(ValueError):
@@ -280,6 +312,131 @@ def replay(periods: list[str], buy: dict, sell: dict,
     return intervals
 
 
+def _industry_counts(holdings, industry_of: dict) -> dict:
+    """保有の業種ごとの社数。業種が空の社は数えない（上限の対象にしない・事前登録 §2.2）。"""
+    counts: dict[str, int] = {}
+    for ec in holdings:
+        ind = industry_of.get(ec)
+        if ind:
+            counts[ind] = counts.get(ind, 0) + 1
+    return counts
+
+
+def replay_combined(periods: list[str], buys: dict[str, dict], sell: dict,
+                    ret: Callable[[str, str, str], tuple[float | None, bool]],
+                    top_k: int, sell_k: int, cost_bps: float,
+                    industry_of: dict | None = None, industry_cap: int | None = None,
+                    index_ret: Callable[[str, str], tuple[float | None, bool]] | None = None) -> list[dict]:
+    """複数の運用（`buys` = {運用の名前: 買いのスコア}）を別々に進め、保有をその和集合にした入れ替え（#1223）。
+
+    各運用の手続きは `replay` と同じ（K 社を持ち、2 回目以降は自分の保有の売りのキーの下位 k 社を売り、自分の並びの
+    上位から K 社まで補充する・その期に自分が売った社は買い戻さない）。和集合の社に等金額で配る（両方が持つ社は 1 社）。
+
+    - 売買の数は**和集合から出た社と入った社**で数える。片方の運用が売っても、もう片方が持ち続ける・買う社は売買に
+      数えない。出た社のうち、どの運用にもその期の予測が無い社は `forced`、それ以外は `sold`
+    - コストと入替率の分母は、その期の和集合の保有数（行の `size`。`summarize` の入替率もこれで割る）
+    - `industry_cap` を渡すと、買うとき（最初の期と補充）だけ業種の上限を当てる。その時点の和集合（売った後の保有＋
+      この期に先の運用が買った社）でその社の業種が上限に達していれば、その社を飛ばして次の順位へ進む。すでに和集合に
+      ある社は業種の数を増やさないので買える。業種が空の社は数えない。上限のために持っている社を売らない
+    - 買う順は `buys` の順（`COMBINED_LEGS` は M-6 が先）
+
+    行には `replay` と同じ列に加えて、`size`（和集合の保有数）・`n_overlap`（2 つ以上の運用が持つ社数）・
+    `max_industry`（業種ごとの保有数の最大）・`n_cap_skipped`（上限で飛ばした社の数）を足す。
+    """
+    industry_of = industry_of or {}
+    legs = list(buys)
+    domain: dict[str, dict[str, set]] = {}
+    for leg in legs:
+        by_ym: dict[str, set] = {}
+        for ym, ec in buys[leg].keys() & sell.keys():
+            by_ym.setdefault(ym, set()).add(ec)
+        domain[leg] = by_ym
+    cost_rate = cost_bps / 10_000.0
+    holdings: dict[str, list[str]] = {leg: [] for leg in legs}
+    union_prev: set = set()
+    intervals: list[dict] = []
+    for i, ym in enumerate(periods[:-1]):
+        kept: dict[str, set] = {}
+        sold_by: dict[str, set] = {}
+        for leg in legs:
+            dom = domain[leg].get(ym, set())
+            keep = [ec for ec in holdings[leg] if ec in dom]
+            sold = sorted(keep, key=lambda ec: (sell[(ym, ec)], ec))[:min(sell_k, len(keep))] if i else []
+            kept[leg], sold_by[leg] = set(keep) - set(sold), set(sold)
+        union_now: set = set().union(*kept.values())
+        skipped = 0
+        for leg in legs:
+            need = top_k - len(kept[leg])
+            got: list[str] = []
+            for ec in sorted((ec for ec in domain[leg].get(ym, set())
+                              if ec not in kept[leg] and ec not in sold_by[leg]),
+                             key=lambda ec: (-buys[leg][(ym, ec)], ec)):
+                if len(got) >= need:
+                    break
+                ind = industry_of.get(ec)
+                if (industry_cap is not None and ec not in union_now and ind
+                        and _industry_counts(union_now, industry_of).get(ind, 0) >= industry_cap):
+                    skipped += 1
+                    continue
+                got.append(ec)
+                union_now.add(ec)
+            holdings[leg] = sorted(kept[leg] | set(got))
+        union = sorted(union_now)
+        domain_any = set().union(*(domain[leg].get(ym, set()) for leg in legs))
+        left = union_prev - union_now
+        forced = sorted(ec for ec in left if ec not in domain_any)
+        sold_u = sorted(left - set(forced))
+        bought = sorted(union_now - union_prev)
+        size = len(union)
+        cost = cost_rate * (len(sold_u) + len(forced) + len(bought)) / size if size else 0.0
+
+        nxt = periods[i + 1]
+        rets, stopped, missing = [], 0, 0
+        for ec in union:
+            r, stale = ret(ec, ym, nxt)
+            if r is None:
+                missing += 1
+                continue
+            rets.append(r)
+            stopped += stale
+        bench = [r for r, _s in (ret(ec, ym, nxt) for ec in sorted(domain_any)) if r is not None]
+        gross = statistics.mean(rets) if rets else 0.0
+        sold_r = [r for r, _s in (ret(ec, ym, nxt) for ec in sold_u) if r is not None]
+        bought_r = [r for r, _s in (ret(ec, ym, nxt) for ec in bought) if r is not None]
+        held_by = [ec for ec in union if sum(ec in holdings[leg] for leg in legs) >= 2]
+        row = {
+            "from": ym, "to": nxt, "months": months_between(ym, nxt),
+            "holdings": union, "sold": sold_u, "forced": forced, "bought": bought,
+            "gross": gross, "cost": cost, "net": gross - cost,
+            "bench": statistics.mean(bench) if bench else 0.0,
+            "n_domain": len(domain_any), "n_stopped": stopped, "n_missing": missing,
+            "swap_gain": (statistics.mean(bought_r) - statistics.mean(sold_r)) if i and sold_r and bought_r else None,
+            "size": size, "n_overlap": len(held_by),
+            "max_industry": max(_industry_counts(union, industry_of).values(), default=0),
+            "n_cap_skipped": skipped,
+        }
+        if index_ret is not None:
+            row["index"], row["index_stale"] = index_ret(ym, nxt)
+        intervals.append(row)
+        union_prev = union_now
+    return intervals
+
+
+def construction_stats(intervals: list[dict], industry_of: dict) -> dict:
+    """保有の組み方の参考の値（事前登録 §3）: 期ごとの保有数・重複した社数・業種ごとの保有数の最大・上限で飛ばした数。"""
+    if not intervals:
+        return {"mean_holdings": None, "min_holdings": None, "mean_overlap": None,
+                "max_industry": None, "n_cap_skipped": 0}
+    sizes = [len(iv["holdings"]) for iv in intervals]
+    return {
+        "mean_holdings": statistics.mean(sizes), "min_holdings": min(sizes),
+        "mean_overlap": statistics.mean(iv.get("n_overlap", 0) for iv in intervals),
+        "max_industry": max(max(_industry_counts(iv["holdings"], industry_of).values(), default=0)
+                            for iv in intervals),
+        "n_cap_skipped": sum(iv.get("n_cap_skipped", 0) for iv in intervals),
+    }
+
+
 def _annualized(rets: list[float], years: float) -> float | None:
     wealth = math.prod(1.0 + r for r in rets)
     if years <= 0 or wealth <= 0:
@@ -301,7 +458,8 @@ def max_drawdown(rets: list[float]) -> float:
 def summarize(intervals: list[dict], top_k: int) -> dict:
     """年率（コスト前・後・全社平均）・超過・最大下落・入替率。年率は実際の経過月数で割る幾何平均。
 
-    入替率は、2 回目以降の入れ替えで手放した社数（予測が無くなった社を含む）÷ K の平均。
+    入替率は、2 回目以降の入れ替えで手放した社数（予測が無くなった社を含む）÷ K の平均。合算の行（`replay_combined`）は
+    K の代わりに、その期の和集合の保有数（行の `size`）で割る（#1223）。
     超過は、年率（コスト後）− 全社平均の年率。
 
     参考（#1167）: `excess_ci` は区間ごとの「純リターン − 全社平均」の平均の定常ブートストラップ CI
@@ -317,7 +475,7 @@ def summarize(intervals: list[dict], top_k: int) -> dict:
     years = sum(iv["months"] for iv in intervals) / 12.0
     ann_net = _annualized([iv["net"] for iv in intervals], years)
     ann_bench = _annualized([iv["bench"] for iv in intervals], years)
-    turns = [(len(iv["sold"]) + len(iv["forced"])) / top_k for iv in intervals[1:]]
+    turns = [(len(iv["sold"]) + len(iv["forced"])) / (iv.get("size") or top_k) for iv in intervals[1:]]
     gains = [iv["swap_gain"] for iv in intervals if iv.get("swap_gain") is not None]
     out = {
         "n_intervals":       len(intervals),
@@ -660,6 +818,88 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
     return out
 
 
+def run_portfolio(common: dict, bases: list, prices_by_co: dict, db, production: dict | None,
+                  sell_source: str, cost_bps: float, industry_of: dict,
+                  index_bars: list | None = None) -> tuple[dict | None, str | None]:
+    """事前登録 §2.2 の 7 構成（`PORTFOLIO_LABELS`）を 1 つの経路で回す（#1223）。戻り値は `(構成ごとの行, 回せない理由)`。
+
+    買いの並びは M-6（M-4 の基底）と M-2*（本番の設定・`production`）の画面の既定（`buy_scores`）。どの構成も同じ test 月
+    （両方の並びと売りのキーがそろう月）で回す＝構成どうしを同じ期で比べる。M-2* の予測が無い経路は回さない（理由を返す）。
+    """
+    if not production:
+        return None, "M-2*（本番の設定）の予測が無い"
+    preds, y = common_to_dicts(common, bases)
+    book = PriceBook(prices_by_co)
+    sell = preds[sell_source]
+    index_book = PriceBook({INDEX_SERIES: index_bars}) if index_bars is not None else None
+    index_ret = ((lambda ym0, ym1: index_book.period_return(INDEX_SERIES, ym0, ym1))
+                 if index_book is not None else None)
+    buy_a, _ = buy_scores(CANDIDATE, preds[CANDIDATE], y, prices_by_co, db)
+    buy_b, _ = buy_scores(PRODUCTION_MODEL, {k: v for k, v in production.items() if k in y}, y, prices_by_co, db)
+    yms = (lambda buy: {ym for ym, _ec in buy.keys() & sell.keys()})
+    periods = sorted(yms(buy_a) & yms(buy_b))
+    if len(periods) < 2:
+        return None, f"M-6 と M-2* の test 月が 2 つ以上そろわない（{len(periods)} 期）"
+    ret = book.period_return
+
+    def single(buy: dict, top_k: int, sell_k: int) -> list[dict]:
+        return replay(periods, buy, sell, ret, top_k, sell_k, cost_bps, index_ret=index_ret)
+
+    def combined(cap: int | None) -> list[dict]:
+        return replay_combined(periods, {COMBINED_LEGS[0]: buy_a, COMBINED_LEGS[1]: buy_b}, sell, ret,
+                               PORTFOLIO_TOP_K, PORTFOLIO_SELL_K, cost_bps, industry_of, cap, index_ret)
+
+    built = {
+        "C": (combined(None), 2 * PORTFOLIO_TOP_K),
+        **{key: (combined(cap), 2 * PORTFOLIO_TOP_K) for key, cap in INDUSTRY_CAPS.items()},
+        "A": (single(buy_a, PORTFOLIO_TOP_K, PORTFOLIO_SELL_K), PORTFOLIO_TOP_K),
+        "B": (single(buy_b, PORTFOLIO_TOP_K, PORTFOLIO_SELL_K), PORTFOLIO_TOP_K),
+        "A20": (single(buy_a, PORTFOLIO_TOP_K20, PORTFOLIO_SELL_K20), PORTFOLIO_TOP_K20),
+        "B20": (single(buy_b, PORTFOLIO_TOP_K20, PORTFOLIO_SELL_K20), PORTFOLIO_TOP_K20),
+    }
+    return {key: {"label": PORTFOLIO_LABELS[key], "summary": summarize(ivs, k),
+                  "construction": construction_stats(ivs, industry_of), "intervals": ivs}
+            for key, (ivs, k) in built.items()}, None
+
+
+def portfolio_decision(paths: dict) -> dict:
+    """事前登録 §4 の判定を機械的に当てはめる（#1223）。`paths` = {経路: run_portfolio の行 or None}。
+
+    候補 X を採るのは、(1) 全ての経路で X の最大下落が基準 C より小さく、(2) 経路の平均で X − C の TOPIX に対する年率の
+    超過が −`PORTFOLIO_MAX_EXCESS_DROP` 以上のとき。複数が満たせば `PORTFOLIO_CANDIDATES` の順に 1 つ、どれも満たさ
+    なければ C（今のまま）。経路が `PORTFOLIO_N_PATHS` 本そろわない・回せない経路がある・TOPIX の値が取れない区間が
+    ある構成は判定しない（`judged=False` と理由）。検定はしない（経路は独立な標本ではない）。
+    """
+    rule = {"baseline": PORTFOLIO_BASELINE, "candidates": list(PORTFOLIO_CANDIDATES),
+            "n_paths": PORTFOLIO_N_PATHS, "max_excess_drop": PORTFOLIO_MAX_EXCESS_DROP}
+    reasons = []
+    if len(paths) != PORTFOLIO_N_PATHS:
+        reasons.append(f"経路が {len(paths)} 本（{PORTFOLIO_N_PATHS} 本で判定する）")
+    for shift, rows in paths.items():
+        if rows is None:
+            reasons.append(f"経路 +{shift}: 構成を回せていない")
+            continue
+        for key in (PORTFOLIO_BASELINE, *PORTFOLIO_CANDIDATES):
+            s = rows[key]["summary"]
+            if s.get("n_index_missing") or s.get("annual_excess_index") is None or s.get("max_drawdown") is None:
+                reasons.append(f"経路 +{shift}・{key}: TOPIX に対する超過か最大下落が無い")
+    if reasons:
+        return {"judged": False, "decision": None, "reasons": reasons, "candidates": {}, "rule": rule}
+    candidates = {}
+    for key in PORTFOLIO_CANDIDATES:
+        dd = {str(s): (rows[key]["summary"]["max_drawdown"], rows[PORTFOLIO_BASELINE]["summary"]["max_drawdown"])
+              for s, rows in paths.items()}
+        diffs = {str(s): rows[key]["summary"]["annual_excess_index"]
+                 - rows[PORTFOLIO_BASELINE]["summary"]["annual_excess_index"] for s, rows in paths.items()}
+        mean_diff = statistics.mean(diffs.values())
+        dd_smaller = all(x < c for x, c in dd.values())
+        candidates[key] = {"max_drawdown_vs_baseline": dd, "dd_smaller_on_every_path": dd_smaller,
+                           "excess_index_diff": diffs, "excess_index_diff_mean": mean_diff,
+                           "passes": dd_smaller and mean_diff >= -PORTFOLIO_MAX_EXCESS_DROP - _FLOAT_TOL}
+    decision = next((k for k in PORTFOLIO_CANDIDATES if candidates[k]["passes"]), PORTFOLIO_BASELINE)
+    return {"judged": True, "decision": decision, "reasons": [], "candidates": candidates, "rule": rule}
+
+
 def _pct(v) -> str:
     return f"{v * 100:+.2f}%" if isinstance(v, (int, float)) else "n/a"
 
@@ -753,6 +993,38 @@ def _print_paths(paths: dict) -> None:
               + f"{_pct(row['mean']):>10}{_pct(row['min']):>10}{_pct(row['max']):>10}", flush=True)
 
 
+def _print_portfolio(paths: dict, decision: dict) -> None:
+    """買い方の規則の計測（#1223・事前登録 docs/prereg/portfolio-construction.md）の構成ごとの表と判定。"""
+    print(f"\n=== 買い方の規則（事前登録・参考）===\n注意: {PORTFOLIO_NOTE}", flush=True)
+    for shift, p in paths.items():
+        rows = p.get("portfolio")
+        if rows is None:
+            print(f"  経路 +{shift}か月: 回せない（{p.get('portfolio_reason')}）", flush=True)
+            continue
+        print(f"  経路 +{shift}か月", flush=True)
+        print(f"    {'構成':<16}{'年率(後)':>10}{'対TOPIX':>10}{'最大下落':>10}{'入替率':>8}{'保有数':>8}{'重複':>6}"
+              f"{'業種最大':>8}{'上限で飛ばした':>14}", flush=True)
+        for key, row in rows.items():
+            s, c = row["summary"], row["construction"]
+            dd = f"{s['max_drawdown'] * 100:.2f}%" if s.get("max_drawdown") is not None else "n/a"
+            turn = f"{s['turnover']:.3f}" if s.get("turnover") is not None else "n/a"
+            size = f"{c['mean_holdings']:.1f}" if c.get("mean_holdings") is not None else "n/a"
+            overlap = f"{c['mean_overlap']:.1f}" if c.get("mean_overlap") is not None else "n/a"
+            print(f"    {key + ' ' + row['label']:<16}{_pct(s.get('annual_net')):>10}{_pct(s.get('annual_excess_index')):>10}"
+                  f"{dd:>10}{turn:>8}{size:>8}{overlap:>6}{c.get('max_industry') or 0:>8}"
+                  f"{c.get('n_cap_skipped', 0):>14}", flush=True)
+    if not decision["judged"]:
+        print(f"判定（事前登録 §4）: 判定しない — {' / '.join(decision['reasons'])}", flush=True)
+        return
+    for key, c in decision["candidates"].items():
+        print(f"  候補 {key}: 全経路で最大下落が C より小さい={c['dd_smaller_on_every_path']}・対TOPIX の差の平均"
+              f" {_pct(c['excess_index_diff_mean'])}（許容 −{PORTFOLIO_MAX_EXCESS_DROP * 100:.0f} ポイント）"
+              f" → {'満たす' if c['passes'] else '満たさない'}", flush=True)
+    picked = decision["decision"]
+    print(f"判定（事前登録 §4）: {picked}（{PORTFOLIO_LABELS[picked]}）"
+          + ("＝今のまま" if picked == PORTFOLIO_BASELINE else "を採る候補"), flush=True)
+
+
 def _start_shifts(text: str) -> tuple[int, ...]:
     """`--start-shifts` の値（例 "0,1,2"）。0〜MAX_START_SHIFT の相異なる整数。"""
     try:
@@ -791,6 +1063,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cost-bands-bps", type=_band_bps, default=None,
                     help=f"売買代金の三分位ごとの片道コスト（bp・小さい帯から {N_COST_BANDS} 個。例 30,15,8。"
                          "既定は無効。参考・#1167）")
+    ap.add_argument("--portfolio", action="store_true",
+                    help=f"買い方の規則の 7 構成（合算・業種の上限・単独）を回し、事前登録の判定を出す（#1223・"
+                         f"{PORTFOLIO_PREREG}。--prereg と --prereg-sha が要る）")
+    ap.add_argument("--prereg", default=None, help=f"--portfolio の事前登録文書（{PORTFOLIO_PREREG}）")
+    ap.add_argument("--prereg-sha", default=None, help="その凍結値（本文の sha256・追記節に記録したもの）")
     ap.add_argument("--smoke", action="store_true", help="企業を絞った軽量パネルで動作確認")
     ap.add_argument("--smoke-companies", type=int, default=120)
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -798,6 +1075,33 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--refresh-cache", action="store_true", help="キャッシュを無視して再取得")
     ap.add_argument("--out", default=str(_OUT), help="結果の JSON")
     return ap
+
+
+def _portfolio_stamp(args) -> dict | int | None:
+    """`--portfolio` の前提を確かめ、事前登録の印を返す（#1223）。前提を外れたら終了コード（2）を返す。
+
+    `--portfolio` を付けない呼び出しは None（既定の出力は変えない）。`--portfolio` は事前登録の文書と凍結値を必須にし、
+    K・k・コストは事前登録の値のまま（変えると別の計測になる）。`--prereg` だけを付けた呼び出しも止める。
+    """
+    if not (args.portfolio or args.prereg or args.prereg_sha):
+        return None
+    problems = []
+    if not args.portfolio:
+        problems.append("--prereg・--prereg-sha は --portfolio と一緒に使う")
+    if not args.prereg or not args.prereg_sha or Path(args.prereg).as_posix() != PORTFOLIO_PREREG:
+        problems.append(f"--portfolio には --prereg {PORTFOLIO_PREREG} と --prereg-sha が要る")
+    if ((args.top_k, args.sell_k, args.cost_bps) != (PORTFOLIO_TOP_K, PORTFOLIO_SELL_K, DEFAULT_COST_BPS)
+            or args.cost_bands_bps is not None):
+        problems.append("--portfolio は事前登録の K・k・コストで回す（--top-k・--sell-k・--cost-bps・"
+                        "--cost-bands-bps を変えない）")
+    if problems:
+        print(f"[oof_replay] NG: {' / '.join(problems)}", file=sys.stderr)
+        return prereg.EXIT_MISMATCH
+    try:
+        return prereg.verify(args.prereg, args.prereg_sha)
+    except prereg.PreregError as e:
+        print(f"[oof_replay] NG: {e}", file=sys.stderr)
+        return prereg.EXIT_MISMATCH
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -813,9 +1117,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[oof_replay] NG: 0 <= --sell-k <= --top-k かつ --top-k >= 1 にする"
               f"（top_k={args.top_k} sell_k={args.sell_k}）", file=sys.stderr)
         return 2
+    stamp = _portfolio_stamp(args)            # 不一致は重い計算の前に止める（#1223）
+    if isinstance(stamp, int):
+        return stamp
     set_refresh(args.refresh_cache)
 
     panel = _load_panel(args)
+    # 業種は今の値（companies.industry・事前登録 §2.2）。空は None＝上限の対象にしない
+    industry_of = {ec: (getattr(c, "industry", None) or None) for ec, c in panel[2].items()}
     db = SessionLocal()
     paths: dict[int, dict] = {}
     try:
@@ -840,7 +1149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         band_cost = make_band_cost(bands, args.cost_bands_bps, args.cost_bps) if bands is not None else None
         for shift, run in runs.items():
             prod_preds, prod_info = None, None
-            if PRODUCTION_MODEL in args.models:
+            if PRODUCTION_MODEL in args.models or args.portfolio:
                 # 本番の設定の M-2（#1123）。test 月は（その経路の）M-4 の共通域にそろえる
                 prod_preds, prod_info = production_predictions(panel, db, sorted(run["common"]))
             results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
@@ -849,6 +1158,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                   index_bars=index_bars, bands=bands)
             paths[shift] = {"results": results, "production": prod_info, "has_production": prod_preds is not None,
                             "test_months": sorted(run["common"])}
+            if args.portfolio:
+                rows, why = run_portfolio(run["common"], run["bases"], panel[0], db, prod_preds,
+                                          args.sell_source, args.cost_bps, industry_of, index_bars)
+                paths[shift].update(portfolio=rows, portfolio_reason=why)
     finally:
         db.close()
     for shift, p in paths.items():
@@ -861,6 +1174,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print_paths(paths)
     if bands is not None:
         print(f"注意: {BAND_NOTE}", flush=True)
+    decision = None
+    if args.portfolio:
+        decision = portfolio_decision({s: p["portfolio"] for s, p in paths.items()})
+        _print_portfolio(paths, decision)
 
     head = paths[args.start_shifts[0]]
     payload = {
@@ -890,6 +1207,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "production": p["production"], "results": p["results"]}
             for shift, p in paths.items()}
         payload["path_summary"] = path_summary({s: p["results"] for s, p in paths.items()})
+    if args.portfolio:
+        # 買い方の規則の計測（#1223）。事前登録の印（本文の sha256・Issue・HEAD）と判定を残す
+        payload["caveats"].append(PORTFOLIO_NOTE)
+        payload["portfolio"] = {
+            **stamp, "sell_source": args.sell_source, "decision": decision,
+            "paths": {str(s): {"reason": p.get("portfolio_reason"), "rows": p.get("portfolio")}
+                      for s, p in paths.items()},
+        }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

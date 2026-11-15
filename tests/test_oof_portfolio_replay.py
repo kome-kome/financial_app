@@ -791,3 +791,245 @@ class TestIndexAndBandsWiring:
         assert "bands" not in row and "annual_excess_index" in row["summary"]
         assert op.INDEX_NOTE in payload["caveats"] and op.BREAKDOWN_NOTE not in payload["caveats"]
         assert payload["index"]["n_weeks"] == 0
+
+
+# ── 買い方の規則の計測（#1223・親 #1227・事前登録 docs/prereg/portfolio-construction.md）──────────
+
+class TestReplayCombined:
+    """K=2・k=1 の 2 つの運用（L1・L2）を合わせた手計算の検体。
+
+    P1: L1 は A>B>C>D → {A, B}、L2 は B>C>A>D → {B, C}。和集合 {A, B, C}（B は 1 社）
+    P2: L1 は自分の保有 {A, B} のうち売りのキーが低い A を売り、E を買う → {B, E}
+        L2 は {B, C} のうち C を売り、A を買う（L1 が売った社でも L2 は買える）→ {A, B}
+        和集合 {A, B, E}: 出たのは C だけ、入ったのは E だけ（A は L1 が売り L2 が買った＝和集合では動かない）
+    """
+    BUYS = {
+        "L1": {**{(P1, ec): s for ec, s in zip("ABCD", [4, 3, 2, 1])},
+               **{(P2, ec): s for ec, s in zip("EADCB", [5, 4, 3, 2, 1])}},
+        "L2": {**{(P1, ec): s for ec, s in zip("BCAD", [4, 3, 2, 1])},
+               **{(P2, ec): s for ec, s in zip("ADEBC", [5, 4, 3, 2, 1])}},
+    }
+    SELL = {**{(P1, ec): 0.0 for ec in "ABCD"},
+            **{(P2, ec): s for ec, s in zip("ABCDE", [0.1, 0.5, 0.2, 0.3, 0.4])}}
+    RET = {("A", P1, P2): 0.10, ("B", P1, P2): 0.20, ("C", P1, P2): 0.30, ("D", P1, P2): 0.00,
+           ("A", P2, P3): 0.00, ("B", P2, P3): 0.10, ("C", P2, P3): -0.20, ("D", P2, P3): 0.00,
+           ("E", P2, P3): 0.30}
+
+    def _run(self, **kw):
+        return op.replay_combined([P1, P2, P3], self.BUYS, self.SELL, _table_ret(self.RET), 2, 1, 100.0, **kw)
+
+    def test_union_counts_a_company_held_by_both_once(self):
+        iv1, _ = self._run()
+        assert (iv1["holdings"], iv1["bought"], iv1["size"], iv1["n_overlap"]) == (["A", "B", "C"], ["A", "B", "C"], 3, 1)
+        assert iv1["cost"] == pytest.approx(0.01 * 3 / 3)
+        assert iv1["gross"] == pytest.approx((0.10 + 0.20 + 0.30) / 3)
+        assert iv1["bench"] == pytest.approx((0.10 + 0.20 + 0.30 + 0.00) / 4)
+
+    def test_a_sale_by_one_leg_kept_by_the_other_is_not_a_trade(self):
+        _, iv2 = self._run()
+        assert iv2["holdings"] == ["A", "B", "E"]
+        assert (iv2["sold"], iv2["forced"], iv2["bought"]) == (["C"], [], ["E"])
+        assert iv2["cost"] == pytest.approx(0.01 * 2 / 3)               # 和集合の保有数で割る
+        assert iv2["gross"] == pytest.approx((0.00 + 0.10 + 0.30) / 3)
+        assert iv2["swap_gain"] == pytest.approx(0.30 - (-0.20))
+
+    def test_turnover_divides_by_the_union_size(self):
+        s = op.summarize(self._run(), 2 * 2)
+        assert s["turnover"] == pytest.approx(1 / 3)                     # 2 回目の入れ替え: 出た 1 社 ÷ 3 社
+
+    def test_a_single_leg_matches_replay(self):
+        legs = {"L1": self.BUYS["L1"]}
+        combined = op.replay_combined([P1, P2, P3], legs, self.SELL, _table_ret(self.RET), 2, 1, 100.0)
+        single = op.replay([P1, P2, P3], self.BUYS["L1"], self.SELL, _table_ret(self.RET), 2, 1, 100.0)
+        for c, s in zip(combined, single):
+            assert {k: c[k] for k in s} == s
+
+
+class TestIndustryCap:
+    """業種の上限 2 社。A・B・C は業種 X、D は Y、E は業種が空。"""
+    IND = {"A": "X", "B": "X", "C": "X", "D": "Y", "E": None}
+    BUYS = {"L1": {(P1, ec): s for ec, s in zip("ABCD", [4, 3, 2, 1])},
+            "L2": {(P1, ec): s for ec, s in zip("BCED", [5, 4, 3, 2])}}
+    SELL = {(P1, ec): 0.0 for ec in "ABCDE"}
+
+    def _run(self, cap):
+        return op.replay_combined([P1, P2], self.BUYS, self.SELL, _table_ret({}), 2, 1, 0.0, self.IND, cap)
+
+    def test_cap_skips_and_refills_from_the_next_rank(self):
+        (iv,) = self._run(2)
+        # L1 が A・B（X が 2 社）。L2 の B は和集合に既にある＝数を増やさないので買える。C は X が上限で飛ばし、
+        # 業種が空の E を買う
+        assert iv["holdings"] == ["A", "B", "E"]
+        assert (iv["n_cap_skipped"], iv["max_industry"]) == (1, 2)
+
+    def test_without_cap_the_industry_piles_up(self):
+        (iv,) = self._run(None)
+        assert iv["holdings"] == ["A", "B", "C"]
+        assert (iv["n_cap_skipped"], iv["max_industry"]) == (0, 3)
+
+    def test_construction_stats(self):
+        stats = op.construction_stats(self._run(2), self.IND)
+        assert stats == {"mean_holdings": 3, "min_holdings": 3, "mean_overlap": 1, "max_industry": 2, "n_cap_skipped": 1}
+        assert op.construction_stats([], self.IND)["mean_holdings"] is None
+
+
+def _decision_rows(dd: dict, ex: dict, missing: int = 0) -> dict:
+    """{構成: {"summary": 最大下落・対TOPIX の超過}}（判定に要る値だけ）。"""
+    return {k: {"summary": {"max_drawdown": dd[k], "annual_excess_index": ex[k], "n_index_missing": missing}}
+            for k in dd}
+
+
+class TestPortfolioDecision:
+    BASE_DD, BASE_EX = 0.30, 0.10
+
+    def _paths(self, cand: dict, n: int = 3) -> dict:
+        """cand = {構成: [(最大下落, 対TOPIX の超過) を経路ごとに]}。指定しない構成は基準と同じ（＝下落が浅くない）。"""
+        out = {}
+        for s in range(n):
+            dd = {k: self.BASE_DD for k in op.PORTFOLIO_LABELS}
+            ex = {k: self.BASE_EX for k in op.PORTFOLIO_LABELS}
+            for k, vals in cand.items():
+                dd[k], ex[k] = vals[s]
+            out[s] = _decision_rows(dd, ex)
+        return out
+
+    def test_the_first_candidate_that_passes_is_picked(self):
+        d = op.portfolio_decision(self._paths({"D4": [(0.25, 0.09)] * 3, "D3": [(0.20, 0.10)] * 3}))
+        assert d["judged"] and d["decision"] == "D4"
+        assert d["candidates"]["D4"]["excess_index_diff_mean"] == pytest.approx(-0.01)
+
+    def test_a_deeper_drawdown_on_one_path_fails(self):
+        d = op.portfolio_decision(self._paths({"D4": [(0.25, 0.10), (0.31, 0.10), (0.25, 0.10)],
+                                               "D3": [(0.28, 0.10)] * 3}))
+        assert not d["candidates"]["D4"]["dd_smaller_on_every_path"] and d["decision"] == "D3"
+
+    def test_the_excess_drop_boundary(self):
+        ok = op.portfolio_decision(self._paths({"A": [(0.2, self.BASE_EX - 0.02)] * 3}))
+        ng = op.portfolio_decision(self._paths({"A": [(0.2, self.BASE_EX - 0.021)] * 3}))
+        assert ok["decision"] == "A" and ng["decision"] == op.PORTFOLIO_BASELINE
+
+    def test_nothing_passes_keeps_the_current_rule(self):
+        d = op.portfolio_decision(self._paths({}))
+        assert d["judged"] and d["decision"] == "C" and not any(c["passes"] for c in d["candidates"].values())
+
+    @pytest.mark.parametrize("case", ["two_paths", "missing_path", "missing_index"])
+    def test_unusable_inputs_are_not_judged(self, case):
+        paths = self._paths({"D4": [(0.2, 0.1)] * 3}, n=2 if case == "two_paths" else 3)
+        if case == "missing_path":
+            paths[1] = None
+        if case == "missing_index":
+            paths[2]["C"]["summary"]["n_index_missing"] = 1
+        d = op.portfolio_decision(paths)
+        assert d["judged"] is False and d["decision"] is None and d["reasons"]
+
+
+class TestRunPortfolio:
+    """7 構成を 1 つの経路で回す。買いの並びは予測そのまま、株価はどの社も +1%（TestProductionRow と同じ差し替え）。"""
+    BASES = TestProductionRow.BASES
+    YMS = TestProductionRow.YMS
+
+    def _common(self):
+        rng = random.Random(9)
+        return {ym: [(f"E{i:02d}", (rng.random(), rng.random(), float(i)), rng.gauss(0, 0.1)) for i in range(25)]
+                for ym in self.YMS}
+
+    def _run(self, monkeypatch, production, industry_of=None):
+        TestProductionRow()._patch(monkeypatch)
+        return op.run_portfolio(self._common(), self.BASES, {}, None, production, "macro_enet", 10.0,
+                                industry_of or {})
+
+    def test_every_construction_is_built(self, monkeypatch):
+        prod = {(ym, f"E{i:02d}"): float(-i) for ym in self.YMS for i in range(25)}   # M-6 と逆の並び
+        rows, why = self._run(monkeypatch, prod)
+        assert why is None and list(rows) == list(op.PORTFOLIO_LABELS)
+        first = {k: rows[k]["intervals"][0]["holdings"] for k in rows}
+        top_a, top_b = [f"E{i:02d}" for i in range(15, 25)], [f"E{i:02d}" for i in range(10)]
+        assert first["A"] == top_a and first["B"] == top_b
+        assert first["C"] == sorted(top_a + top_b) and rows["C"]["construction"]["mean_overlap"] == 0
+        assert len(first["A20"]) == 20 and len(first["B20"]) == 20
+        assert rows["C"]["label"] == "合算" and "annual_net" in rows["D4"]["summary"]
+
+    def test_the_cap_binds_when_one_industry_dominates(self, monkeypatch):
+        prod = {(ym, f"E{i:02d}"): float(i) for ym in self.YMS for i in range(25)}    # M-6 と同じ並び
+        ind = {f"E{i:02d}": ("X" if i >= 15 else "Y") for i in range(25)}
+        rows, _ = self._run(monkeypatch, prod, ind)
+        assert rows["C"]["construction"]["max_industry"] == 10
+        assert rows["D4"]["construction"]["max_industry"] <= 4 and rows["D3"]["construction"]["max_industry"] <= 3
+        assert rows["D4"]["construction"]["n_cap_skipped"] > 0
+
+    def test_no_production_is_not_run(self, monkeypatch):
+        assert self._run(monkeypatch, None) == (None, "M-2*（本番の設定）の予測が無い")
+
+
+class TestPortfolioCli:
+    @pytest.fixture(autouse=True)
+    def _quiet(self, monkeypatch):
+        from scripts import prereg
+        monkeypatch.setattr(prereg, "_head_sha", lambda: "a" * 40)
+
+    @staticmethod
+    def _sha():
+        from scripts import prereg
+        return prereg.body_sha256(prereg.read_document(op.PORTFOLIO_PREREG))
+
+    def test_document_states_the_same_values(self):
+        from scripts import prereg
+        text = prereg.read_document(op.PORTFOLIO_PREREG)
+        body, _ = prereg.split_document(text)
+        assert prereg.recorded_sha(text) == self._sha()
+        assert prereg.issue_url(text).endswith("/issues/1227")
+        for phrase in ("業種の上限 4 社", "業種の上限 3 社", "−0.02 以上", "D4 → D3 → A", "--start-shifts 0,1,2",
+                       "M-6 の運用が先", "#1238 で登録する"):
+            assert phrase in body, phrase
+        assert op.INDUSTRY_CAPS == {"D4": 4, "D3": 3} and op.PORTFOLIO_CANDIDATES == ("D4", "D3", "A")
+        assert op.PORTFOLIO_MAX_EXCESS_DROP == 0.02 and op.PORTFOLIO_N_PATHS == 3
+        assert op.COMBINED_LEGS == ("macro_enet", op.PRODUCTION_KEY)
+
+    @pytest.mark.parametrize("argv", [
+        ["--portfolio"],
+        ["--portfolio", "--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", "f" * 64],
+        ["--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", "f" * 64],
+        ["--portfolio", "--prereg", "docs/prereg/live-oos.md", "--prereg-sha", "f" * 64],
+    ])
+    def test_bad_prereg_stops_before_loading(self, monkeypatch, argv):
+        monkeypatch.setattr(op, "_load_panel", lambda args: pytest.fail("照合の前にパネルを読んだ"))
+        assert op.main(argv) == 2
+
+    def test_portfolio_keeps_the_preregistered_k_and_cost(self, monkeypatch):
+        monkeypatch.setattr(op, "_load_panel", lambda args: pytest.fail("照合の前にパネルを読んだ"))
+        base = ["--portfolio", "--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", self._sha()]
+        for extra in (["--top-k", "5"], ["--sell-k", "1"], ["--cost-bps", "20"], ["--cost-bands-bps", "30,15,8"]):
+            assert op.main(base + extra) == 2, extra
+
+    def test_main_writes_the_constructions_and_the_decision(self, monkeypatch, tmp_path):
+        import json
+
+        common = TestRunPortfolio()._common()
+        _fake_main(monkeypatch, common, self.BASES, _fake_book())
+        prod = {(ym, ec): -yh[2] for ym, rows in common.items() for ec, yh, _y in rows}
+        monkeypatch.setattr(op, "production_predictions", lambda panel, db, yms: (prod, {"available": True}))
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        out = tmp_path / "portfolio.json"
+        code = op.main(["--portfolio", "--prereg", op.PORTFOLIO_PREREG, "--prereg-sha", self._sha(),
+                        "--models", "macro_enet", "--out", str(out)])
+        assert code == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        pf = payload["portfolio"]
+        assert pf["prereg_sha256"] == self._sha() and pf["prereg_issue"].endswith("/issues/1227")
+        assert list(pf["paths"]["0"]["rows"]) == list(op.PORTFOLIO_LABELS)
+        assert pf["decision"]["judged"] is False                  # 経路が 1 本だけ＝判定しない
+        assert op.PORTFOLIO_NOTE in payload["caveats"]
+        assert list(payload["results"]) == ["macro_enet"]         # 既定の行は今のまま
+
+    BASES = TestProductionRow.BASES
+
+    def test_default_call_has_no_portfolio(self, monkeypatch, tmp_path):
+        import json
+
+        _fake_main(monkeypatch, TestRunPortfolio()._common(), self.BASES, _fake_book())
+        monkeypatch.setattr(op, "production_predictions", lambda *a: pytest.fail("M-2 を選ばない既定で本番の M-2 を回した"))
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        out = tmp_path / "plain.json"
+        assert op.main(["--models", "macro_enet", "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert "portfolio" not in payload and op.PORTFOLIO_NOTE not in payload["caveats"]
