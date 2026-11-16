@@ -99,6 +99,8 @@ python collector.py --market            # 株価のみ更新
 python collector.py --incremental       # XBRL 差分のみ（**株価は更新しない**）
 python collector.py --macro                              # マクロ全系列
 python collector.py --macro --macro-series JP10Y_FRED    # 指定系列のみ（定義是正後の再収集用）
+# 夜間ログ／watchdog の「未調整の分割・併合: N社」（#1253）が出たらこの2本。--persist の前に見本の社で
+# Yahoo の履歴が分割の比で調整済みかを読み比べる（#1254 の手順）。後処理は出力の案内どおり（point-in-time・キャッシュ退避）
 python collector.py --repair-price-breaks                # 週次株価の分割段差を検出（dry-run）
 python collector.py --repair-price-breaks --persist      # 同上＋該当銘柄をYahooで取り直し検算
 

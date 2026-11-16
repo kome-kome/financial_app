@@ -885,6 +885,14 @@ Phase 4 の末尾では、書き手によらず株価表そのもの（日次＝
 `scripts/check_nightly_collect.py` が読む。既に入った行は `scripts/repair_consolidation_prices.py`
 （台帳方式・既定はドライラン）が直す。
 
+続けて、2〜10 倍の**未調整の分割・併合**を探す（`scan_unadjusted_corporate_actions`・#1253）。契約窓から
+等間隔の 3 日（`NIGHTLY_PRICE_BREAK_PROBE_MONTHS`）だけ週次の終値を公式 `AdjC` と突合し（`detect_price_scale_breaks`・
+約 1 分）、比が分割・併合の比（`corporate_actions.snap_to_canonical`）にそろう社だけを数える。
+`WITHHELD_OFFICIAL_ADJUSTMENTS` と `collector_utils.PRICE_BREAK_ACCEPTED` の社は除いて数だけ出す。書式は
+`unadjusted_split_log_line` が唯一の源で、`check_nightly_collect` の警告の種類 `unadjusted_splits` になる。
+**直さない**（直すのは人が `collector.py --repair-price-breaks --persist` で行う・GOTCHAS「株価のスケール（1）」）。
+失敗（J-Quants のキーが無い・応答の異常）は握って「検知に失敗」と出し、収集は続ける。
+
 ---
 
 ## 4-3. 認証フロー

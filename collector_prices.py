@@ -33,7 +33,8 @@ from collector_utils import (
     HEAVY_STATEMENT_TIMEOUT, JQUANTS_BACKFILL_DAYS, JQUANTS_ENDPOINT,
     JQUANTS_MASTER_ENDPOINT, JQUANTS_MAX_CONSECUTIVE_FORBIDDEN, JQUANTS_RATE_SLEEP,
     JQuantsAccessError, JQuantsOutOfCoverage, JST, MARKET_CLOSE_JST, MAX_GAP_DAYS,
-    OFFICIAL_SCALE_WRITABLE_UNTIL, PRICE_BATCH_MAX_ATTEMPTS, PRICE_BATCH_RETRY_SLEEP,
+    NIGHTLY_PRICE_BREAK_PROBE_MONTHS, OFFICIAL_SCALE_WRITABLE_UNTIL, PRICE_BATCH_MAX_ATTEMPTS,
+    PRICE_BATCH_RETRY_SLEEP, PRICE_BREAK_ACCEPTED,
     PRICE_BREAK_MAX_REPAIR, PRICE_BREAK_PROBE_MONTHS, PRICE_BREAK_THRESHOLD,
     PRICE_COMMIT_BATCH, PRICE_REFRESH_TAIL_DAYS, PROGRESS_REPORT_BATCH,
     ROUNDTRIP_MAX_GAP_DAYS, ROUNDTRIP_MIN_GAP_DAYS, ROUNDTRIP_NET_TOL, ROUNDTRIP_THRESHOLD,
@@ -44,7 +45,8 @@ from collector_utils import (
     yahoo_ticker,
 )
 # 企業イベントの知識（公式 AdjFactor の判定・登録済みスピンオフ）は台帳が唯一の源（#746・ADR-0062）。
-from corporate_actions import adj_factor_event, before_spinoff_ex_date, spinoff_factor
+from corporate_actions import (WITHHELD_OFFICIAL_ADJUSTMENTS, adj_factor_event, before_spinoff_ex_date,
+                               snap_to_canonical, spinoff_factor)
 
 
 async def _save_price_batch_with_retry(db, batch: list) -> int:
@@ -2119,6 +2121,76 @@ async def detect_price_scale_breaks(
     result["probe_dates"] = list(probe_dates)
     result["coverage"] = cover
     return result
+
+
+def classify_unadjusted_breaks(found: dict, *, accepted: Optional[dict] = None,
+                               withheld: Optional[dict] = None) -> dict:
+    """`detect_price_scale_breaks` の結果から「未調整の分割・併合」の社を選ぶ（#1253・純関数）。
+
+    **形だけでは選ばない**: 公式 AdjC と DB の比（`ratio`）が分割・併合の比（`snap_to_canonical`）に
+    そろう社だけを残す。実際の値動きでは公式と DB が食い違わないので、ずれていて比が定番にそろうのは
+    「DB だけ遡及調整されていない」形。定番の比の表は 1 より大きい側と小さい側で対になっていないので、
+    1 より小さい比は逆数にしてから寄せる（1/1.1 の無償割当も 1.1 へ寄る）。合成（増資を含む等）は採らない。
+
+    除くもの（数は返す＝黙って消さない）:
+    - `withheld`（既定 `corporate_actions.WITHHELD_OFFICIAL_ADJUSTMENTS`）の社＝公式だけが調整し DB が正しい（#652）
+    - `accepted`（既定 `collector_utils.PRICE_BREAK_ACCEPTED`）の社＝確かめて直さないと決めた社
+    """
+    accepted = PRICE_BREAK_ACCEPTED if accepted is None else accepted
+    withheld = WITHHELD_OFFICIAL_ADJUSTMENTS if withheld is None else withheld
+    hits, n_withheld, n_accepted, n_unsnapped = [], 0, 0, 0
+    for b in found.get("breaks", []):
+        ec, ratio = b["edinet_code"], b.get("ratio")
+        if ec in withheld:
+            n_withheld += 1
+            continue
+        if ec in accepted:
+            n_accepted += 1
+            continue
+        if not ratio or ratio <= 0:
+            n_unsnapped += 1
+            continue
+        canonical, _residual, kind = snap_to_canonical(ratio if ratio >= 1 else 1.0 / ratio)
+        if kind not in ("split", "reverse"):
+            n_unsnapped += 1
+            continue
+        hits.append({**b, "canonical": canonical if ratio >= 1 else 1.0 / canonical})
+    return {"companies": hits, "n_breaks": len(found.get("breaks", [])), "n_withheld": n_withheld,
+            "n_accepted": n_accepted, "n_unsnapped": n_unsnapped,
+            "probe_dates": list(found.get("probe_dates", []))}
+
+
+async def scan_unadjusted_corporate_actions(db, api_key: Optional[str] = None, *,
+                                            months: int = NIGHTLY_PRICE_BREAK_PROBE_MONTHS) -> dict:
+    """夜間の「未調整の分割・併合」の検知（#1253・読み取りのみ・直さない）。
+
+    週次の終値を、契約窓の全体から等間隔に選んだ `months` 日で公式 AdjC と突合し（`detect_price_scale_breaks`）、
+    比が分割・併合の比にそろう社を返す。直すのは人がコマンドで行う（`collector.py --repair-price-breaks [--persist]`）——GOTCHAS
+    「株価のスケール（1）」が自動化しないと決めている（Yahoo で取り直す修復は #765 の汚染を広げうる）。
+
+    直前に catchup が J-Quants を叩いているので、最初の問い合わせの前に `JQUANTS_RATE_SLEEP` 待つ
+    （キーが無ければ待たずに落とす＝夜間は握って「検知に失敗」と出す）。
+    """
+    api_key = api_key or os.environ.get("JQUANTS_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("環境変数 JQUANTS_API_KEY が未設定です")
+    if JQUANTS_RATE_SLEEP > 0:
+        await asyncio.sleep(JQUANTS_RATE_SLEEP)
+    return classify_unadjusted_breaks(await detect_price_scale_breaks(db, api_key, months=months))
+
+
+def unadjusted_split_log_line(res: dict) -> str:
+    """夜間ログの1行（`scripts/check_nightly_collect.py::RE_UNADJ_SPLITS` が読む・#1253）。"""
+    comps = res["companies"]
+    line = (f"未調整の分割・併合: {len(comps)}社（公式 AdjC と 1% 超ずれ {res['n_breaks']}社・"
+            f"突合 {len(res['probe_dates'])}日・比が分割にそろわない {res['n_unsnapped']}社・"
+            f"DB が正と登録 {res['n_withheld']}社・直さないと登録 {res['n_accepted']}社を除く）")
+    if not comps:
+        return line
+    ex = [f"{c.get('sec_code') or c['edinet_code']} 公式/DB={c['ratio']:.4f}" for c in comps[:3]]
+    return (line + "（例: " + " / ".join(ex) + "）＝分割・併合の後で過去の株価が調整されていない。"
+            "`python collector.py --repair-price-breaks` で確かめてから `--persist` で直す"
+            "（docs/GOTCHAS.md「株価のスケール（1）」・#1253）")
 
 
 async def repair_price_scale_breaks(

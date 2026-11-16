@@ -8,7 +8,7 @@ import pytest
 
 from collector_prices import (
     format_yahoo_http_stats, roundtrip_log_line, scale_rejection_log_line,
-    scale_step_log_line,
+    scale_step_log_line, unadjusted_split_log_line,
 )
 from nightly_scores import ridge_high_edge_log_line
 from scripts._textwidth import display_width, pad
@@ -390,6 +390,47 @@ class TestScaleGuardRules:
         assert r["scale_steps"] is None and r["scale_steps_failed"] is None
 
 
+class TestUnadjustedSplitRules:
+    """未調整の分割・併合の行（#1253）を読む。検体は `_pipeline_incremental.py` と同じく書式関数の実出力。
+    直すまで毎晩警告する（状態を持たない）。"""
+
+    @staticmethod
+    def res(n=0):
+        comps = [{"edinet_code": f"E{i:05d}", "sec_code": f"{1000 + i}", "ratio": 0.5} for i in range(n)]
+        return {"companies": comps, "n_breaks": n + 2, "n_withheld": 1, "n_accepted": 1,
+                "n_unsnapped": 0, "probe_dates": ["2026-08-21"] * 3}
+
+    @classmethod
+    def night(cls, n=0, failed=False):
+        line = ("[17:49:30]   未調整の分割・併合の検知に失敗（継続します）: RuntimeError: x" if failed
+                else "[17:49:30]   " + unadjusted_split_log_line(cls.res(n)))
+        return LOG_AFTER + line + "\n"
+
+    def test_line_is_read(self):
+        r = parse_nightly_log(self.night(2))
+        assert (r["unadjusted_splits"], r["unadjusted_splits_failed"]) == (2, False)
+
+    def test_companies_are_flagged_with_the_repair_command(self):
+        w = warning_items(parse_nightly_log(self.night(2)))
+        assert [k for k, _ in w if k == "unadjusted_splits"] == ["unadjusted_splits"]
+        assert any("2社" in m and "--repair-price-breaks" in m for _, m in w)
+
+    def test_zero_night_is_quiet_and_known(self):
+        r = parse_nightly_log(self.night(0))
+        assert not [k for k, _ in warning_items(r) if k == "unadjusted_splits"]
+        assert WARNING_KINDS["unadjusted_splits"].known(r)          # 0 社の晩は ok と言える＝閉じる根拠
+
+    def test_failure_is_flagged(self):
+        r = parse_nightly_log(self.night(failed=True))
+        assert r["unadjusted_splits_failed"] is True and r["unadjusted_splits"] is None
+        assert any("検知が例外で落ちた" in m for k, m in warning_items(r) if k == "unadjusted_splits")
+
+    def test_old_format_is_unknown_not_zero(self):
+        r = parse_nightly_log(LOG_AFTER)
+        assert r["unadjusted_splits"] is None and r["unadjusted_splits_failed"] is None
+        assert not WARNING_KINDS["unadjusted_splits"].known(r)
+
+
 # 2026-09-29 の実ログ（`.logs/nightly_20260929.log`）から写した。往復段差 4社・解決済みなのに空
 # 1社が出ていたが `END pipeline: exit=0` で何も起票されなかった晩（#767 の発端）。
 LOG_0929 = """\
@@ -417,11 +458,13 @@ class TestWarningKinds:
             _night_with("[17:49:05]   往復段差の検知に失敗（継続します）: RuntimeError: x"),
             guard._night(rejected=4, new=1, steps=guard._steps(2)),
             _night_with(TestRidgeHighEdge.line(high=1)),
+            TestUnadjustedSplitRules.night(2),
         )
         kinds = {k for t in logs for k, _ in warning_items(parse_nightly_log(t))}
         assert kinds <= set(WARNING_KINDS)
         assert {"collect_incomplete", "yahoo_http", "exchange_rejected", "roundtrip",
-                "price_freshness", "scale_rejected", "scale_steps", "ridge_high_edge"} == kinds
+                "price_freshness", "scale_rejected", "scale_steps", "ridge_high_edge",
+                "unadjusted_splits"} == kinds
 
     def test_warnings_for_is_the_text_of_warning_items(self):
         r = parse_nightly_log(LOG_0929)

@@ -14,13 +14,17 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import collector_prices                   # noqa: E402
 from collector_prices import (            # noqa: E402
     _pick_probe_dates,
     _probe_official_closes,
+    classify_unadjusted_breaks,
     collect_stock_price_history_jquants,
     compare_official_vs_weekly,
     detect_price_scale_breaks,
     repair_price_scale_breaks,
+    scan_unadjusted_corporate_actions,
+    unadjusted_split_log_line,
 )
 from collector_utils import (             # noqa: E402
     JQuantsOutOfCoverage,
@@ -514,3 +518,88 @@ class TestRepairPriceScaleBreaks:
         rec.assert_not_called()
         assert r["repaired"] == 0
         assert "スケール段差" in r["failed"][0]["reason"]
+
+
+class TestClassifyUnadjustedBreaks:
+    """夜間の「未調整の分割・併合」の選び方（#1253）。形だけでは選ばず、公式 AdjC と DB の比が
+    分割・併合の比にそろう社だけを残す。除いた社は数で返す（黙って消さない）。"""
+
+    @staticmethod
+    def _found(*pairs):
+        return {"breaks": [{"edinet_code": ec, "ratio": r, "sec_code": ec[-4:], "max_dev": abs(r - 1)}
+                           for ec, r in pairs],
+                "probe_dates": ["2026-07-21", "2026-08-21", "2026-06-19"]}
+
+    def _codes(self, *pairs, **kw):
+        res = classify_unadjusted_breaks(self._found(*pairs), accepted=kw.get("accepted", {}),
+                                         withheld=kw.get("withheld", {}))
+        return [c["edinet_code"] for c in res["companies"]], res
+
+    def test_split_and_consolidation_ratios_are_kept(self):
+        """1:2 分割（公式/DB=0.5）・10:1 併合（10.0）・1:15（0.0667）・1:1.1 の無償割当（0.9091）。"""
+        codes, res = self._codes(("E00001", 0.5), ("E00002", 10.0), ("E00003", 1 / 15),
+                                 ("E00004", 1 / 1.1))
+        assert codes == ["E00001", "E00002", "E00003", "E00004"]
+        assert [round(c["canonical"], 4) for c in res["companies"]] == [0.5, 10.0, round(1 / 15, 4),
+                                                                       round(1 / 1.1, 4)]
+
+    def test_ratio_that_is_not_a_split_is_dropped_and_counted(self):
+        """公式とずれていても比が分割の比にそろわない（1.37 倍・0.6391 倍）社は選ばない。"""
+        codes, res = self._codes(("E00001", 1.37), ("E00002", 0.6391), ("E00003", 0.5))
+        assert codes == ["E00003"]
+        assert (res["n_breaks"], res["n_unsnapped"]) == (3, 2)
+
+    def test_withheld_and_accepted_are_excluded_and_counted(self):
+        codes, res = self._codes(("E34165", 2 / 3), ("E32779", 1 / 1.2), ("E00001", 0.5),
+                                 withheld={"E34165": ()}, accepted={"E32779": "理由"})
+        assert codes == ["E00001"]
+        assert (res["n_withheld"], res["n_accepted"]) == (1, 1)
+
+    def test_defaults_read_the_registries(self):
+        """既定は DB が正と決めた公式イベント（#652）と、直さないと決めた社の登録表を読む。"""
+        from collector_utils import PRICE_BREAK_ACCEPTED
+        assert "E34165" in WITHHELD_OFFICIAL_ADJUSTMENTS
+        res = classify_unadjusted_breaks(self._found(("E34165", 2 / 3),
+                                                     (next(iter(PRICE_BREAK_ACCEPTED)), 1 / 1.2)))
+        assert res["companies"] == []
+        assert (res["n_withheld"], res["n_accepted"]) == (1, 1)
+
+    def test_every_accepted_entry_has_a_reason(self):
+        from collector_utils import PRICE_BREAK_ACCEPTED
+        assert all(isinstance(v, str) and v.strip() for v in PRICE_BREAK_ACCEPTED.values())
+
+    def test_log_line(self):
+        _codes, res = self._codes(("E00065", 0.5), ("E00001", 1.37))
+        line = unadjusted_split_log_line(res)
+        assert line.startswith("未調整の分割・併合: 1社（公式 AdjC と 1% 超ずれ 2社・突合 3日・"
+                               "比が分割にそろわない 1社・")
+        assert "0065 公式/DB=0.5000" in line and "--repair-price-breaks" in line
+        assert unadjusted_split_log_line(self._codes(("E00001", 1.37))[1]).endswith("社を除く）")
+
+
+class TestScanUnadjustedCorporateActions:
+    """夜間の入口（#1253）。突合は契約窓から等間隔の 3 日だけで、読み取りのみ（直さない）。"""
+
+    def test_uses_the_nightly_probe_months_and_classifies(self, monkeypatch):
+        from collector_utils import NIGHTLY_PRICE_BREAK_PROBE_MONTHS
+        seen = {}
+
+        async def fake_detect(db, api_key=None, *, months, **_kw):
+            seen["months"] = months
+            return {"breaks": [{"edinet_code": "E00001", "ratio": 0.5, "sec_code": "1001"}],
+                    "probe_dates": ["2026-08-21"], "compared": 1, "coverage": (None, None)}
+
+        monkeypatch.setattr(collector_prices, "detect_price_scale_breaks", fake_detect)
+        monkeypatch.setattr(collector_prices, "JQUANTS_RATE_SLEEP", 0)
+        res = asyncio.run(scan_unadjusted_corporate_actions(object(), "key"))
+        assert seen["months"] == NIGHTLY_PRICE_BREAK_PROBE_MONTHS == 3
+        assert [c["edinet_code"] for c in res["companies"]] == ["E00001"]
+
+    def test_missing_key_fails_before_waiting(self, monkeypatch):
+        """キーが無い晩は待たずに落とす（夜間は握って「検知に失敗」と出す）。"""
+        slept = AsyncMock()
+        monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
+        monkeypatch.setattr(collector_prices.asyncio, "sleep", slept)
+        with pytest.raises(RuntimeError, match="JQUANTS_API_KEY"):
+            asyncio.run(scan_unadjusted_corporate_actions(object()))
+        slept.assert_not_called()
