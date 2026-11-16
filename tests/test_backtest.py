@@ -573,6 +573,182 @@ class TestTradableAtStart:
         assert "開始日の時点で株価が無かった 2 社" in res["message"]
 
 
+# ── 株価を使う列を開始日の株価で作り直す（#1248）──────────────────────────────────
+
+class TestAsOfValuation:
+    """as-of の行の時価総額・配当利回り・gap_ratio は毎晩、今の株価で上書きされる。そのまま使うと
+    「開始日から今までに値下がりした社ほど割安に見えて上位に来る」。開始日の株価で作り直すこと。"""
+
+    YEAR = 2025
+
+    @staticmethod
+    def _start():
+        from datetime import date, timedelta
+        return date.today() - timedelta(days=6 * 30)          # months_ago=6 と一致させる
+
+    def _seed(self, db, make_metric, make_weekly, ec, *, at_start, now, **kw):
+        """開始日の終値 at_start・今の終値 now（＝毎晩の収集が保存した株価）の 1 社。
+
+        株数 1e6 なので、時価総額[百万円]は株価と同じ数になる。保存された時価総額・配当利回りは今の株価のもの。
+        """
+        from datetime import date, timedelta
+        dps = kw.pop("dps", None)
+        db.add(make_metric(edinet_code=ec, year=self.YEAR, period_end=_days_before_start(6, 100),
+                           issued_shares=1.0e6, stock_price=now, market_cap=now, dps=dps,
+                           div_yield=(dps / now * 100 if dps else None), **kw))
+        for days, close in ((-3, at_start), (5, at_start)):
+            db.add(make_weekly(edinet_code=ec, close_last=close,
+                               trade_date=(self._start() + timedelta(days=days)).isoformat()))
+        db.add(make_weekly(edinet_code=ec, close_last=now, trade_date=date.today().isoformat()))
+
+    @staticmethod
+    def _fake_gaps(monkeypatch, gaps=None, calls=None):
+        """開始日の gap の回帰（sector_gap_asof.gaps_on）の代わり。渡された終値だけから gap を決める。"""
+        import sector_gap_asof
+
+        def fake(db, closes, on_date):
+            if calls is not None:
+                calls.append((dict(closes), on_date))
+            out = gaps if gaps is not None else {
+                (ec, TestAsOfValuation.YEAR): 1.0e5 / c for ec, c in closes.items()}
+            return dict(out), {"n_universe": len(closes), "n_gap": len(out)}
+        monkeypatch.setattr(sector_gap_asof, "gaps_on", fake)
+
+    @staticmethod
+    def _ranking(res):
+        return [(r["edinet_code"], r["score"]) for r in res["results"]]
+
+    def test_net_cash_does_not_rank_a_company_by_its_fall_after_the_start(
+            self, db, make_metric, make_weekly, tradability_filter):
+        """本文の症状: 開始日の後に株価が半分になった社は、今の時価総額で割ると比率が倍になって上位に来る。"""
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0,
+                   bs_current_assets=1.0e9, bs_total_liabilities=0.0)
+        self._seed(db, make_metric, make_weekly, "E00002", at_start=1000.0, now=1000.0,
+                   bs_current_assets=1.2e9, bs_total_liabilities=0.0)
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="net_cash")
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002", "E00001"]
+        assert res["results"][1]["score"] == pytest.approx(1.0)      # 1e9 ÷ 開始日の時価総額 1,000 百万円
+        assert res["asof_valuation"] is True
+        assert res["asof_gap"] is None                               # net_cash は gap を使わない
+
+    def test_valuation_uses_the_start_date_gap(self, db, make_metric, make_weekly, tradability_filter,
+                                               monkeypatch):
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0, gap_ratio=500.0)
+        self._seed(db, make_metric, make_weekly, "E00002", at_start=1000.0, now=1000.0, gap_ratio=1.0)
+        db.commit()
+        self._fake_gaps(monkeypatch, gaps={("E00001", self.YEAR): 10.0, ("E00002", self.YEAR): 20.0})
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert self._ranking(res) == [("E00002", 20.0), ("E00001", 10.0)]
+        assert res["asof_gap"] == {"n_universe": 2, "n_gap": 2}
+
+    def test_valuation_uses_the_start_date_dividend_yield(self, db, make_metric, make_weekly,
+                                                          tradability_filter, monkeypatch):
+        """配当利回りも今の株価で割ってある（値下がりした社ほど高い）。開始日の株価で割り直す。"""
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0, dps=50.0)   # 今 10% / 開始日 5%
+        self._seed(db, make_metric, make_weekly, "E00002", at_start=1000.0, now=1000.0, dps=60.0)  # 6% / 6%
+        db.commit()
+        self._fake_gaps(monkeypatch, gaps={("E00001", self.YEAR): 10.0, ("E00002", self.YEAR): 10.0})
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert self._ranking(res) == [("E00002", 16.0), ("E00001", 15.0)]
+
+    @pytest.mark.parametrize("source,preset", [("recommend", "割安重視"), ("valuation", "バランス型"),
+                                               ("net_cash", "バランス型")])
+    def test_price_moves_after_the_start_do_not_change_the_ranking(
+            self, db, make_metric, make_weekly, tradability_filter, monkeypatch, source, preset):
+        """開始日より後の値（保存された株価・時価総額・配当利回り・gap、開始日の後の終値）を書き換えても、
+        順位とスコアは 1 つも変わらない（変わるのはその後のリターンだけ）。"""
+        from database import FinancialMetric
+        for i, ec in enumerate(("E00001", "E00002", "E00003"), 1):
+            self._seed(db, make_metric, make_weekly, ec, at_start=800.0 + 150.0 * i, now=1000.0,
+                       dps=10.0 * i, bs_current_assets=1.0e9 * (4 - i), bs_total_liabilities=1.0e8,
+                       z_roe=0.3 * i, gap_ratio=5.0 * i)
+        db.commit()
+        self._fake_gaps(monkeypatch)
+        before = self._ranking(backtest.run(db, preset, 6, 20, None, None, source=source))
+        assert len(before) == 3
+        for r in db.query(FinancialMetric).all():
+            r.stock_price, r.market_cap = r.stock_price * 0.3, r.market_cap * 0.3
+            r.div_yield, r.gap_ratio = (r.div_yield or 0.0) * 9.0, -100.0
+        from datetime import date, timedelta
+        db.add(make_weekly(edinet_code="E00003", close_last=1.0,
+                           trade_date=(date.today() - timedelta(days=7)).isoformat()))
+        db.commit()
+        after = self._ranking(backtest.run(db, preset, 6, 20, None, None, source=source))
+        assert after == before
+
+    def test_gap_regression_gets_only_prices_up_to_the_start(self, db, make_metric, make_weekly,
+                                                             tradability_filter, monkeypatch):
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0)
+        db.commit()
+        calls: list = []
+        self._fake_gaps(monkeypatch, calls=calls)
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert calls == [({"E00001": 1000.0}, res["start_date"])]
+
+    @pytest.mark.parametrize("source,preset", [("net_cash", "バランス型"), ("recommend", "高収益重視")])
+    def test_gap_regression_runs_only_when_the_method_uses_it(
+            self, db, make_metric, make_weekly, tradability_filter, monkeypatch, source, preset):
+        import sector_gap_asof
+
+        def must_not_run(*_a, **_k):
+            raise AssertionError("gap を使わない手法で回帰を回した")
+        monkeypatch.setattr(sector_gap_asof, "gaps_on", must_not_run)
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0,
+                   bs_current_assets=1.0e9, bs_total_liabilities=0.0)
+        db.commit()
+        res = backtest.run(db, preset, 6, 20, None, None, source=source)
+        assert res["total_candidates"] == 1
+        assert res["asof_gap"] is None
+
+    def test_min_market_cap_uses_the_start_date_market_cap(self, db, make_metric, make_weekly,
+                                                            tradability_filter):
+        """今の時価総額で絞ると、開始日の後に値上がりした社だけが残る（選んだ理由がその後の値動きになる）。"""
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=500.0, now=5000.0)
+        self._seed(db, make_metric, make_weekly, "E00002", at_start=5000.0, now=500.0)
+        db.commit()
+        res = backtest.run(db, "高収益重視", 6, 20, None, 1000.0)
+        assert [r["edinet_code"] for r in res["results"]] == ["E00002"]
+
+    def test_same_correction_as_the_view_when_the_price_did_not_move(self):
+        """開始日の株価が保存された株価と同じなら、作り直した値は VIEW の値（F と基準の遅れを当てた値）と一致する。
+
+        株価 1,000 円・株数 1e6・1 株配当 40 円の生の値は 時価総額 1,000 百万円・配当利回り 4.0%。VIEW は
+        F=2・株数の遅れ 1.5 を時価総額へ掛け、F=2・配当の遅れ 4 で配当利回りを割る（ADR-0055）。
+        """
+        from collections import namedtuple
+        Row = namedtuple("Row", "pl_eps bs_bps issued_shares bs_total_equity dps split_factor "
+                                "split_shares_lag split_dps_lag market_cap div_yield gap_ratio")
+        r = Row(pl_eps=50.0, bs_bps=800.0, issued_shares=1.0e6, bs_total_equity=8.0e8, dps=40.0,
+                split_factor=2.0, split_shares_lag=1.5, split_dps_lag=4.0,
+                market_cap=3000.0, div_yield=0.5, gap_ratio=99.0)
+        out = backtest.asof_row(r, 1000.0, None)
+        assert out.market_cap == pytest.approx(r.market_cap)
+        assert out.div_yield == pytest.approx(r.div_yield)
+        assert out.gap_ratio is None                                  # VIEW の gap（今の株価で回した値）は残さない
+        plain = backtest.asof_row(r._replace(split_factor=None, split_shares_lag=None, split_dps_lag=None),
+                                  1000.0, 7.0)
+        assert (plain.market_cap, plain.div_yield, plain.gap_ratio) == (1000.0, 4.0, 7.0)
+
+    def test_regression_failure_is_reported_in_the_message(self, db, make_metric, make_weekly,
+                                                           tradability_filter):
+        """回帰が成り立たない（財務の元の行が無い）なら、候補 0 社とその理由を返す（黙って今の gap を使わない）。"""
+        self._seed(db, make_metric, make_weekly, "E00001", at_start=1000.0, now=500.0, gap_ratio=50.0)
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None, source="valuation")
+        assert res["total_candidates"] == 0
+        assert res["asof_gap"]["skipped"]
+        assert "gap_ratio を作れませんでした" in res["message"]
+
+    def test_switch_off_keeps_the_view_values(self, db, make_metric):
+        """窓（ASOF_PRICE_WINDOW_DAYS）が None のときは絞り込みも作り直しもしない（テスト用の切り替え）。"""
+        db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31", z_roe=1.0))
+        db.commit()
+        res = backtest.run(db, "バランス型", 6, 20, None, None)
+        assert res["asof_valuation"] is False
+        assert res["asof_gap"] is None
+
+
 class TestColumnScoping:
     """`_BACKTEST_FIELDS` が `score_record` の読む列を覆っていること（Issue #489）。
 
