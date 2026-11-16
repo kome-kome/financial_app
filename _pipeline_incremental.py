@@ -23,6 +23,7 @@ from collector_prices import (
     format_yahoo_http_stats, oldest_daily_trade_date, scale_rejection_log_line,
     scale_step_log_line,
     scan_price_scale_steps,
+    scan_unadjusted_corporate_actions, unadjusted_split_log_line,
 )
 from corporate_actions import build_ledger, rebuild_split_adjustment_factors
 from ttm_composite import rebuild_ttm_financial_records
@@ -244,6 +245,16 @@ async def main():
         except Exception as e:
             db4.rollback()      # 後続の往復段差の検知が同じセッションを使う
             log(f"  株価スケール段差の走査に失敗（継続します）: {type(e).__name__}: {e}")
+
+        # 分割・併合の後で過去の株価が調整されないまま残っていないか（#1253）。週次は追記だけで、
+        # 過去の行を自動で調整する経路は無い（手で回す修復だけ）。上の走査は 100 倍以上しか見ないので、
+        # 2〜10 倍の分割・併合は鳴らない（2026-11-16 に 61 社が 7 週残っていた）。公式 AdjC と比が分割の
+        # 比にそろう社だけを数える（形だけでは選ばない）。状態を持たない＝直すまで毎晩出る。直さない。
+        try:
+            log(f"  {unadjusted_split_log_line(await scan_unadjusted_corporate_actions(db4))}")
+        except Exception as e:
+            db4.rollback()
+            log(f"  未調整の分割・併合の検知に失敗（継続します）: {type(e).__name__}: {e}")
 
         # 「飛んで数日で戻る」帯の検知（#620）。**この壊れ方は例外を出さない**——
         # どちらの値も妥当な株価で、upsert は成功し、行数も鮮度も上の指標も正常に見える。

@@ -93,6 +93,10 @@ RE_SCALE_REJ  = re.compile(r"Yahoo スケール段差で不採用: (\d+)社・(\
 # 株価表に残っている100倍以上の段差（#765・源は `collector_prices.scale_step_log_line`）
 RE_SCALE_STEPS = re.compile(r"株価スケール段差（≥\d+倍）: (\d+)社（日次 (\d+)件・週次 (\d+)件）")
 RE_SCALE_STEPS_FAIL = re.compile(r"株価スケール段差の走査に失敗")
+# 公式 AdjC と比が分割の比にそろう社＝未調整の分割・併合（#1253・源は `collector_prices.unadjusted_split_log_line`）。
+# 括弧の中の内訳は読まない（足しても読み落とさない）
+RE_UNADJ_SPLITS = re.compile(r"未調整の分割・併合: (\d+)社")
+RE_UNADJ_SPLITS_FAIL = re.compile(r"未調整の分割・併合の検知に失敗")
 # 夜間バッチの開始・終了行（源は `batch_common.run_batch` の `{spec.name}開始` / `{spec.name}終了`）。
 # 同じ日のログに2回ぶん追記されることがある（手動の追いつき実行）ので、**最後の開始の後に
 # 終了がある**ときだけ完了とみなす。
@@ -128,6 +132,7 @@ WARNING_KINDS: dict[str, WarningKind] = {
     "price_freshness":    WarningKind("株価鮮度の低下", ("fresh_level",)),
     "scale_rejected":     WarningKind("Yahoo のスケール段差で不採用", ("scale_rejected_new",)),
     "scale_steps":        WarningKind("株価表のスケール段差", ("scale_steps_failed",)),
+    "unadjusted_splits":  WarningKind("株価の履歴で未調整の分割・併合", ("unadjusted_splits_failed",)),
     "ridge_high_edge":    WarningKind("業種別回帰の ridge α が上端", ("ridge_high_edge",)),
 }
 
@@ -156,6 +161,7 @@ def parse_nightly_log(text: str) -> dict:
         "scale_rejected": None, "scale_dropped_bars": None, "scale_rejected_new": None,
         "scale_steps": None, "scale_steps_daily": None, "scale_steps_weekly": None,
         "scale_steps_failed": None, "ridge_high_edge": None,
+        "unadjusted_splits": None, "unadjusted_splits_failed": None,
         "completed": False,
     }
     t_start = t_end = None
@@ -220,6 +226,11 @@ def parse_nightly_log(text: str) -> dict:
             r["scale_steps_failed"] = False
         elif RE_SCALE_STEPS_FAIL.search(line):
             r["scale_steps_failed"] = True
+        if (m := RE_UNADJ_SPLITS.search(line)):
+            r["unadjusted_splits"] = int(m.group(1))
+            r["unadjusted_splits_failed"] = False
+        elif RE_UNADJ_SPLITS_FAIL.search(line):
+            r["unadjusted_splits_failed"] = True
         if (m := RE_RIDGE_HIGH_HIT.search(line)):
             r["ridge_high_edge"] = int(m.group(1))
         elif RE_RIDGE_HIGH_NONE.search(line):
@@ -293,6 +304,14 @@ def warning_items(row: dict) -> list:
                   "＝Yahoo で取り直す修復コマンドは使わない。docs/GOTCHAS.md の #765 を参照"))
     if row.get("scale_steps_failed"):
         w.append(("scale_steps", "株価スケール段差の走査が例外で落ちた（収集自体は継続している）"))
+    if row.get("unadjusted_splits"):
+        w.append(("unadjusted_splits",
+                  f"公式 AdjC と比が分割・併合の比にそろう社 {row['unadjusted_splits']}社＝過去の株価が"
+                  "調整されていない。`python collector.py --repair-price-breaks` で確かめてから `--persist`"
+                  " で直す（docs/GOTCHAS.md「株価のスケール（1）」・#1253）"))
+    if row.get("unadjusted_splits_failed"):
+        w.append(("unadjusted_splits",
+                  "未調整の分割・併合の検知が例外で落ちた（収集自体は継続している・J-Quants のキーや応答を確かめる）"))
     if row.get("ridge_high_edge"):
         w.append(("ridge_high_edge",
                   f"業種別回帰の ridge α が上端（1000）{row['ridge_high_edge']}業種"
@@ -363,6 +382,8 @@ ROWS = [
                                              f"（{_fmt(r['scale_rejected_new'])}）"),
     ("株価スケール段差 社",  lambda r: "失敗" if r.get("scale_steps_failed")
                                        else _fmt(r["scale_steps"])),
+    ("未調整の分割・併合 社", lambda r: "失敗" if r.get("unadjusted_splits_failed")
+                                       else _fmt(r["unadjusted_splits"])),
     ("鮮度 p50",             lambda r: _fmt(r["fresh_p50"])),
     ("鮮度 p05",             lambda r: _fmt(r["fresh_p05"])),
     ("鮮度 level",           lambda r: _fmt(r["fresh_level"])),

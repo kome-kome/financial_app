@@ -18,6 +18,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _pipeline_incremental as pinc
 from collector_utils import EdinetAccessError
 
+# 未調整の分割・併合の検知（#1253）が何も見つけなかった晩の戻り
+_EMPTY_UNADJ = {"companies": [], "n_breaks": 0, "n_withheld": 0, "n_accepted": 0,
+                "n_unsnapped": 0, "probe_dates": []}
+
+
+@pytest.fixture(autouse=True)
+def _no_jquants_in_unadjusted_scan(monkeypatch):
+    """未調整の分割・併合の検知は J-Quants を叩く。`.env` にキーがある環境で本物へ届かないよう、
+    このファイルの全テストで差し替える（測るテストは `patch.multiple` で上書きする）。"""
+    monkeypatch.setattr(pinc, "scan_unadjusted_corporate_actions",
+                        AsyncMock(return_value=dict(_EMPTY_UNADJ)))
+
 
 def _run_main_with_mocks(*, cancelled=False):
     """main() の外部依存をモックし、各モックを返す。実 DB / 通信なし。"""
@@ -274,4 +286,41 @@ class TestScaleGuardLines:
         lines = self._run({"skipped": False, "upserted": 0, "from": "a", "to": "b"}, scan)
         assert any("株価スケール段差の走査に失敗（継続します）: RuntimeError: boom" in l
                    for l in lines)
+        assert any("差分収集パイプライン完了" in l for l in lines)
+
+
+class TestUnadjustedSplitLine:
+    """未調整の分割・併合の検知（#1253）の行が毎晩出る。失敗しても収集は止めない。"""
+
+    _SCAN = MagicMock(return_value={"companies": [], "daily_steps": 0, "weekly_steps": 0, "hits": []})
+
+    def _run(self, unadj):
+        mocks = {
+            "log": MagicMock(),
+            "init_db": MagicMock(),
+            "SessionLocal": MagicMock(return_value=MagicMock()),
+            "run_full_collection": AsyncMock(return_value=False),
+            "collect_macro_data": AsyncMock(return_value=0),
+            "collect_stock_price_history_jquants": AsyncMock(return_value={"upserted": 0}),
+            "fill_recent_stock_price_gap_yahoo": AsyncMock(
+                return_value={"skipped": False, "upserted": 0, "from": "a", "to": "b"}),
+            "update_market_data_from_history": MagicMock(return_value=0),
+            "scan_price_scale_steps": self._SCAN,
+            "scan_unadjusted_corporate_actions": unadj,
+        }
+        with patch.multiple(pinc, **mocks):
+            asyncio.run(pinc.main())
+        return [str(c.args[0]) for c in mocks["log"].call_args_list if c.args]
+
+    def test_line_is_logged_every_night(self):
+        unadj = AsyncMock(return_value={**_EMPTY_UNADJ, "n_breaks": 2, "n_withheld": 1,
+                                        "probe_dates": ["2026-08-21"] * 3})
+        lines = self._run(unadj)
+        unadj.assert_awaited_once()
+        assert any("未調整の分割・併合: 0社（公式 AdjC と 1% 超ずれ 2社・突合 3日" in l for l in lines)
+
+    def test_failure_does_not_stop_the_pipeline(self):
+        lines = self._run(AsyncMock(side_effect=RuntimeError("JQUANTS_API_KEY が未設定")))
+        assert any("未調整の分割・併合の検知に失敗（継続します）: RuntimeError" in l for l in lines)
+        assert any("往復段差" in l for l in lines)                 # 後続の検知も回る
         assert any("差分収集パイプライン完了" in l for l in lines)
