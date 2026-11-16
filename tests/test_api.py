@@ -439,8 +439,13 @@ class TestBacktestEndpoint:
         api.app.dependency_overrides[api.get_db] = lambda: db
         assert client.get("/api/backtest", params={"source": "nope"}).status_code == 400
 
-    def test_valuation_source_passes_through(self, db, make_metric, make_weekly):
-        # source=valuation: gap_ratio を持つ銘柄のみ候補化（HTTP レイヤ）
+    def test_valuation_source_passes_through(self, db, make_metric, make_weekly, monkeypatch):
+        # source=valuation: gap_ratio を持つ銘柄のみ候補化（HTTP レイヤ）。gap は開始日 1 日分の回帰で
+        # 作り直す（#1248）ので、回帰そのもの（tests/test_sector_gap_asof.py）はここでは差し替える
+        import sector_gap_asof
+        monkeypatch.setattr(sector_gap_asof, "gaps_on",
+                            lambda _db, closes, _d: ({(ec, 2020): 15.0 for ec in closes},
+                                                     {"n_universe": len(closes), "n_gap": len(closes)}))
         db.add(make_metric(edinet_code="E00001", year=2020, period_end="2020-03-31",
                            gap_ratio=15.0, div_yield=2.0))
         db.add(self._bar_at_start(make_weekly))
@@ -451,6 +456,8 @@ class TestBacktestEndpoint:
         body = r.json()
         assert body["source"] == "valuation"
         assert body["total_candidates"] == 1
+        assert body["asof_valuation"] is True
+        assert body["asof_gap"] == {"n_universe": 1, "n_gap": 1}
 
 
 class TestCompaniesEndpoint:

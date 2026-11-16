@@ -28,6 +28,9 @@
 - **回帰の母集団はその月末に株価がある全社**（パネルの標本＝52週先リターンがある社ではない）。
   本番の回帰も上場している全社で回っており、将来の上場廃止で母集団を削ると生存バイアスになる。
 
+バックテスト（`backtest.run`）も、開始日 1 日分を `gaps_on` で作る（#1248）。本番の gap は今の株価で
+回した値なので、開始日の順位付けに使うと「開始日から今までに値下がりした社ほど割安に見える」先読みになる。
+
 純関数ブロックは database・scripts を import しない（ttm_composite.py と同じ置き方）。
 """
 from __future__ import annotations
@@ -159,13 +162,20 @@ def nightly_params() -> dict:
     return coerce_params(plugin.params_schema(), NIGHTLY_PARAMS.get(SECTOR_MODEL, {}))
 
 
-def load_inputs(db, features: list) -> tuple[dict[str, list], dict[tuple[str, int], float]]:
-    """全年度の通期行（社ごとに period_end 昇順）と分割補正係数 F を読む。"""
+def load_inputs(db, features: list, *, period_end_until=None
+                ) -> tuple[dict[str, list], dict[tuple[str, int], float]]:
+    """全年度の通期行（社ごとに period_end 昇順）と分割補正係数 F を読む。
+
+    `period_end_until` を渡すと、決算日がその日以前の各社の最新の 1 行だけを読む（`gaps_on`・#1248）。
+    """
     from database import SplitAdjustmentFactor
     from plugins.sector_ols import plugin
 
     fin_by_co: dict[str, list] = defaultdict(list)
-    for r in plugin._load_records(db, None, features, all_years=True):
+    rows = (plugin._load_records(db, None, features, period_end_until=period_end_until)
+            if period_end_until is not None
+            else plugin._load_records(db, None, features, all_years=True))
+    for r in rows:
         fin_by_co[r.edinet_code].append(r)
     for recs in fin_by_co.values():
         recs.sort(key=lambda r: str(r.period_end))
@@ -192,3 +202,34 @@ def build_asof_gaps(db, prices_by_co: Mapping[str, list],
     log.info("時点再現の gap_ratio: %d か月・%d 件（回帰が成り立たなかった月 %d）",
              len(stats), len(gaps), n_skipped)
     return gaps, stats
+
+
+def gaps_on(db, closes: Mapping[str, float], on_date: str) -> tuple[dict[tuple[str, int], float], dict]:
+    """1 日分の時点再現の gap_ratio（バックテストの開始日・#1248）。DB へは書かない。
+
+    `closes` は `{edinet_code: その日までの最後の週次終値}`（分割を遡って調整済みの値。F はここで掛ける）。
+    回帰の母集団は `closes` を持つ全社——呼び出し側の絞り込み（業種・時価総額）の前の社で回す。絞った
+    母集団で回すと、同じ社の gap が画面の条件ごとに変わる。見える行は月末の版と同じ「期末 + 45 日 ≦ その日」。
+
+    戻りは `({(edinet_code, year): gap_ratio}, 件数)`。回帰が成り立たない（行が無い・採用列が残らない）ときは
+    空の dict と `skipped` に理由を入れて返す（例外にしない・黙って 0 で埋めない）。
+    """
+    from datetime import date, timedelta
+
+    from plugins.macro_snapshots import FINANCIAL_LAG_DAYS
+    from plugins.sector_ols import plugin
+
+    params = nightly_params()
+    until = date.fromisoformat(on_date) - timedelta(days=FINANCIAL_LAG_DAYS)
+    try:
+        fin_by_co, factors = load_inputs(db, params["features"], period_end_until=until)
+    except ValueError as e:                 # 行が 1 つも無い（_load_records が送出）
+        return {}, {"n_universe": 0, "n_gap": 0, "skipped": str(e)}
+    recs = asof_records(fin_by_co, {ec: {on_date: (on_date, float(c))} for ec, c in closes.items()},
+                        factors, on_date)
+    try:
+        by_key = plugin.predict_gaps(recs, params)
+    except ValueError as e:
+        return {}, {"n_universe": len(recs), "n_gap": 0, "skipped": str(e)}
+    gaps = {(ec, int(year)): g for (ec, year, _pe), g in by_key.items() if g is not None}
+    return gaps, {"n_universe": len(recs), "n_gap": len(gaps)}

@@ -64,7 +64,7 @@
 | `corporate_actions.py` | 企業イベント台帳（F の検出器・登録表・TTM の分割窓・ADR-0062）。**一晩1回作り F の表と TTM へ同じものを渡す／本番から `scripts/` を import しない** |
 | `index_events.py` | 指数イベント台帳（TOPIX の移行措置・新規採用を公表日 as-of で時点再現・ADR-0068）。**F・TTM・`tradable_filters` へ流さない／一覧はリポジトリへ入れない（`.index_lists/`）** |
 | `ttm_composite.py` | TTM 行（直近12か月）の合成（ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期と並べる（規則は設計制約）。**純関数ブロックは database・scripts を import しない**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `sector_gap_asof.py` | 学習パネル用の**時点再現の gap_ratio**（ADR-0057）。`build_period_panel(with_gap_ratio=True)` だけが使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F／回帰の設定は `NIGHTLY_PARAMS` を借りる／ridge の α は LOO で選ぶ（KFold へ戻さない・ADR-0058）**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `sector_gap_asof.py` | **時点再現の gap_ratio**（ADR-0057）。学習パネル（`build_period_panel`）とバックテストの開始日（`gaps_on`・#1248）が使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F／回帰の設定は `NIGHTLY_PARAMS` を借りる／ridge の α は LOO で選ぶ（KFold へ戻さない・ADR-0058）**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` へ戻さない）。**例外文字列は `redact_secrets()` で API キーを消す**／**「走ったが全部失敗した」を失敗として現す**。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |

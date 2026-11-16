@@ -18,6 +18,7 @@ from sector_gap_asof import (
     asof_gap_ratios,
     asof_records,
     attach_gap_ratio,
+    gaps_on,
     load_inputs,
     month_end_closes,
     nightly_params,
@@ -218,3 +219,72 @@ class TestLoadInputs:
         fin_by_co, factors = load_inputs(db, DEFAULT_FEATURES_PRICE)
         assert [r.year for r in fin_by_co["E00001"]] == [2022, 2023]
         assert factors == {("E00001", 2022): 2.0}
+
+    def test_period_end_until_reads_only_the_latest_visible_row(self, db, make_fin):
+        """1 日分の時点再現（#1248）: 決算日がその日以前の各社の最新の 1 行だけを読む（全年度を読まない）。"""
+        db.add_all([
+            make_fin(edinet_code="E00001", year=2021, period_end="2021-03-31", bs_bps=700.0),
+            make_fin(edinet_code="E00001", year=2022, period_end="2022-03-31", bs_bps=800.0),
+            make_fin(edinet_code="E00001", year=2023, period_end="2023-03-31", bs_bps=900.0),
+            make_fin(edinet_code="E00002", year=2023, period_end="2023-03-31", bs_bps=900.0),
+        ])
+        db.commit()
+        fin_by_co, _factors = load_inputs(db, DEFAULT_FEATURES_PRICE, period_end_until=date(2023, 1, 1))
+        assert {ec: [r.year for r in rows] for ec, rows in fin_by_co.items()} == {"E00001": [2022]}
+
+    def test_period_end_until_cannot_be_combined(self, db):
+        with pytest.raises(ValueError):
+            plugin._load_records(db, None, DEFAULT_FEATURES_PRICE, all_years=True,
+                                 period_end_until=date(2023, 1, 1))
+
+
+class TestGapsOn:
+    """1 日分の時点再現（バックテストの開始日・#1248）。DB へ書かず、その日に見えた行とその日の株価だけで決まる。"""
+
+    @staticmethod
+    def _closes(n=12):
+        return {f"E{i:05d}": 1500.0 + 100.0 * i + (i % 3) * 50.0 for i in range(1, n + 1)}
+
+    def test_gap_for_each_company_and_nothing_is_written(self, db, make_fin):
+        from database import RegressionResult
+        from tests.test_sector_ols import _seed_sector
+        _seed_sector(db, make_fin)                                   # 2023-03-31 期の 12 社
+        gaps, stats = gaps_on(db, self._closes(), "2023-06-30")
+        assert stats["n_universe"] == 12
+        assert stats["n_gap"] == len(gaps) > 0
+        assert {year for (_ec, year) in gaps} == {2023}
+        assert db.query(RegressionResult).count() == 0
+
+    def test_row_not_yet_published_is_not_used(self, db, make_fin):
+        """決算日 + 45 日（2023-05-15）より前の日には、その期の行は見えない＝回帰が成り立たず理由を返す。"""
+        from tests.test_sector_ols import _seed_sector
+        _seed_sector(db, make_fin)
+        gaps, stats = gaps_on(db, self._closes(), "2023-05-14")
+        assert gaps == {}
+        assert stats["skipped"]
+
+    def test_stored_price_does_not_matter(self, db, make_fin):
+        """保存された株価（毎晩、今の株価で上書きされる列）を書き換えても gap は 1 件も変わらない。"""
+        from database import FinancialRecord
+        from tests.test_sector_ols import _seed_sector
+        _seed_sector(db, make_fin)
+        before, _ = gaps_on(db, self._closes(), "2023-06-30")
+        for r in db.query(FinancialRecord).all():
+            r.stock_price, r.market_cap = r.stock_price * 0.5, r.market_cap * 0.5
+        db.commit()
+        after, _ = gaps_on(db, self._closes(), "2023-06-30")
+        assert after == before
+
+    def test_companies_without_a_price_are_left_out(self, db, make_fin):
+        from tests.test_sector_ols import _seed_sector
+        _seed_sector(db, make_fin)
+        closes = self._closes()
+        closes.pop("E00001")
+        gaps, stats = gaps_on(db, closes, "2023-06-30")
+        assert stats["n_universe"] == 11
+        assert all(ec != "E00001" for (ec, _y) in gaps)
+
+    def test_no_rows_at_all_is_reported_not_raised(self, db):
+        gaps, stats = gaps_on(db, {"E00001": 1000.0}, "2023-06-30")
+        assert gaps == {}
+        assert stats["skipped"]

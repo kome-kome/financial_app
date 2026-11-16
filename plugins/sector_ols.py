@@ -420,7 +420,7 @@ class SectorOLSPlugin(AnalysisPlugin):
         }
 
     def _load_records(self, db, year: int | None, features: list, *,
-                      all_years: bool = False) -> list:
+                      all_years: bool = False, period_end_until=None) -> list:
         """回帰の母集団を読む。既定は各社の最新の通期行、`year` 指定でその年度の通期行。
 
         既定と `year` 指定（＝当日回帰）は、**今買える社だけ**を読む（`tradable_filters`・#780）。
@@ -432,7 +432,14 @@ class SectorOLSPlugin(AnalysisPlugin):
         `all_years=True` は**全年度の通期行**を返す（時点再現 `sector_gap_asof` 用・#626）。
         どの行を使うかは呼び出し側が月末ごとに選ぶので、ここでは絞らない。**今日の上場状態でも
         絞らない**——過去の月末に生きていた社を落とすと生存者バイアスになる（#315）。
+
+        `period_end_until`（日付）は、**決算日がその日以前の通期行のうち各社の最新の 1 行**を返す
+        （1 日分の時点再現・バックテストの開始日・#1248）。全年度を読まないのは、Render が読む
+        Supabase の転送量を増やさないため（全年度は約 3 万行・1 社 1 行なら約 4 千行）。今日の上場状態では
+        `all_years` と同じ理由で絞らない。`year`・`all_years` とは同時に使えない。
         """
+        if period_end_until is not None and (year or all_years):
+            raise ValueError("period_end_until は year・all_years と同時に使えません")
         from sqlalchemy import func as _sqla_func
 
         from database import (Company, FinancialRecord, SplitAdjustmentFactor, latest_year_subq,
@@ -496,7 +503,19 @@ class SectorOLSPlugin(AnalysisPlugin):
                              FinancialRecord.period_type == "annual"))
         elif all_years:
             query = _base_query().filter(FinancialRecord.period_type == "annual")
-        if not all_years:
+        elif period_end_until is not None:
+            visible = (db.query(FinancialRecord.edinet_code,
+                                _sqla_func.max(FinancialRecord.year).label("max_year"))
+                       .filter(FinancialRecord.period_type == "annual",
+                               FinancialRecord.period_end <= period_end_until)
+                       .group_by(FinancialRecord.edinet_code)
+                       .subquery())
+            query = (_base_query()
+                     .filter(FinancialRecord.period_type == "annual",
+                             FinancialRecord.period_end <= period_end_until)
+                     .join(visible, (FinancialRecord.edinet_code == visible.c.edinet_code) &
+                                    (FinancialRecord.year == visible.c.max_year)))
+        if not all_years and period_end_until is None:
             # 推奨系の表示母集団と同じ判定（唯一の源）を、この JOIN の列で掛ける。companies は
             # 外部結合なので、行の無い社は is_active が NULL になり残る（VIEW 側と同じ扱い）。
             query = query.filter(*tradable_filters(db, is_active=Company.is_active,
