@@ -110,3 +110,26 @@ class TestCollectionFirstScreen:
         html = _read(TEMPLATES / "collection.html")
         assert not re.search(r"ダッシュボード(</a>)?の「自動収集」", html), (
             "表はこの画面にある。「ダッシュボードの『自動収集』で確認」の案内を残さない")
+
+
+class TestStaleRowsAreNotColorOnly:
+    """遅れた行は赤い文字に加えて文言でも示す（色の区別がつかない人・白黒の印刷・#1263）。"""
+
+    def test_every_non_fresh_status_has_a_word(self):
+        src = _read(ROOT / "batch_freshness.py")
+        m = re.search(r"BATCH_LEVEL\s*=\s*\{(.*?)\}", src, flags=re.S)
+        assert m, "batch_freshness.BATCH_LEVEL を拾えない"
+        statuses = [k for k, v in re.findall(r'"(\w+)":\s*"(\w+)"', m.group(1)) if v != "fresh"]
+        assert statuses, "fresh 以外の status を拾えない"
+        js = _read(STATIC_JS / "common.js")
+        words = re.search(r"const SCHED_ROW_WORD = \{(.*?)\};", js, flags=re.S)
+        assert words, "common.js の SCHED_ROW_WORD を拾えない"
+        missing = [s for s in statuses if not re.search(rf"\b{s}:\s*'[^']+'", words.group(1))]
+        assert not missing, f"文言の無い status: {missing}"
+
+    def test_the_row_value_carries_the_word(self):
+        js = _read(STATIC_JS / "common.js")
+        body = js[js.index("function renderSchedule("):]
+        assert "${schedRowValue(r)}" in body
+        helper = js[js.index("function schedRowValue("):js.index("function renderSchedule(")]
+        assert "SCHED_ROW_WORD[r.status]" in helper

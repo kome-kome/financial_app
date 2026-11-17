@@ -325,3 +325,25 @@ def test_analysis_result_rows_have_keyboard_entry_and_company_links():
     # 行の中のリンクは行の data-click を起こさない（企業詳細を開くたびに詳細パネルも開いてしまう）
     delegate = js[js.index("function _wireDelegate("):]
     assert "closest('a[href]')" in delegate[:800]
+
+
+_RANGE_RE = re.compile(r'<input\b[^>]*\btype="range"[^>]*>', re.S)
+_ID_RE = re.compile(r'\bid="([^"]+)"')
+
+
+def test_every_range_input_has_a_bound_label():
+    """スライダー（range）は `<label for>` で名前を持つ（JS が組み立てるものも・#1263）。
+
+    名前が無いと読み上げは値（例「1」）しか読まず、どの指標の重みか分からない。
+    `<label>` の照合（test_labels_name_their_field）はラベルの側から見るので、ラベルの無い欄は拾えない。
+    """
+    found, unbound = 0, []
+    for path in TEMPLATES + STATIC_JS:
+        text = _read(path)
+        for tag in _RANGE_RE.findall(text):
+            found += 1
+            m = _ID_RE.search(tag)
+            if not m or f'for="{m.group(1)}"' not in text:
+                unbound.append(f"{_name(path)}: {' '.join(tag.split())[:80]}")
+    assert found >= 2, "range 入力を拾えない（検出の正規表現が実体とずれた）"
+    assert not unbound, "\n".join(unbound)

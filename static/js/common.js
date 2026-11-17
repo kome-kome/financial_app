@@ -309,6 +309,16 @@ const SCHED_LEVEL = {
   unknown: { dot: 'dot-amber', head: 'バッチの足跡を読めませんでした' },
 };
 
+// 遅れた行は赤い文字に加えて文言でも示す（色だけでは見分けられない人・白黒の印刷・#1263）。
+// 行の status（batch_freshness.BATCH_LEVEL の左辺）から引く。日時が無く「未実行」と出る行には足さない。
+const SCHED_ROW_WORD = { stale: '遅れ', missing: '記録なし', unreadable: '読めず' };
+
+function schedRowValue(r) {
+  if (r.level === 'fresh') return esc(r.last_run || '未実行');
+  if (!r.last_run) return '未実行';
+  return `${esc(r.last_run)}（${esc(SCHED_ROW_WORD[r.status] || '要確認')}）`;
+}
+
 // b = /api/stats の batch（{level, rows, url}）。
 // opts.manualLink: 末尾に「収集画面から実行」のタイルを出す（ホームだけ。収集画面は自分自身なので出さない）。
 function renderSchedule(b, opts) {
@@ -336,7 +346,7 @@ function renderSchedule(b, opts) {
     grid.innerHTML = rows.map(r => `
       <div class="sched-item">
         <div class="sched-item-label">${esc(r.label)}</div>
-        <div class="sched-item-value"${r.level === 'fresh' ? '' : ' style="color:var(--status-bad-text)"'}>${esc(r.last_run || '未実行')}</div>
+        <div class="sched-item-value"${r.level === 'fresh' ? '' : ' style="color:var(--status-bad-text)"'}>${schedRowValue(r)}</div>
         <div class="sched-item-label">${esc(r.task_name)}</div>
       </div>`).join('') + ((opts && opts.manualLink) ? `
       <div class="sched-item">
