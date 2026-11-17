@@ -103,7 +103,7 @@ def _make_xgb_rank_fit_predict(xgb_params: dict, best_iterations: list) -> calla
 
 class MacroGbdtRankPlugin(MacroGbdtPlugin):
     name = "macro_gbdt_rank"
-    label = "M-5: マクロ×財務 ランク学習（learning-to-rank）"
+    label = "ランク学習（M-5）"
     description = (
         "M-2 と同一データ・同一 fold で、学習目的を評価指標（期内クロスセクション rank-IC）へ"
         "整合させた兄弟モデル。XGBoost の learning-to-rank（rank:pairwise 既定）で各月を1クエリ"
@@ -113,8 +113,8 @@ class MacroGbdtRankPlugin(MacroGbdtPlugin):
     depends_on: list[str] = []
     heavy: bool = True
     writes = ()   # _persist_producer が no-op（順位はリターン単位でない・#362）
-    category = "③ 将来リターンを予測"
-    ui_order = 380                       # M-4=370 の後（M-1→M-2→M-3→M-4→M-5 順）
+    category = "比較用のモデル"
+    ui_order = 540                       # 退役（hidden）。サイドバーには出ない
     # 退役（#570・ADR-0044）: ADR-0017 が約束していた実測をようやく取ったところ、
     # **M-2(MSE) に有意に劣後**した（rank-IC 0.0808 vs 0.1578・差 −0.0771・
     # 95%CI [−0.0995, −0.0558]・p=0.001／17期・OOF 25,738ペア・2026-08-30）。ADR-0017 の

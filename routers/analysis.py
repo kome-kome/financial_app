@@ -103,10 +103,10 @@ SPECIAL_ANALYSES = [
         "description": "ROE・PER・自己資本比率などの財務条件で銘柄を絞り込みます",
         "depends_on": [],
         "heavy": False,
-        "category": "① 銘柄を探す",
-        "ui_order": 130,
+        "category": "銘柄を探す",
+        "ui_order": 330,
         "params_schema": {},
-        "href": "/collection",  # 既存UIは収集ページ。分析ハブへの統合は後続PRで対応
+        "href": "/collection?tab=screen",  # 画面は収集ページのスクリーニングのタブ（collection.js が ?tab= を読む）
     },
     {
         "name": "backtest",
@@ -114,22 +114,29 @@ SPECIAL_ANALYSES = [
         "description": "過去時点でのスコアリング（おすすめ／バリュエーション／ネットキャッシュ）の期待リターン（その後の株価変化）を検証します",
         "depends_on": [],
         "heavy": False,
-        "category": "④ 戦略を検証",
-        "ui_order": 410,
+        "category": "戦略を検証",
+        "ui_order": 620,
         "params_schema": {},  # 専用UI（既存タブ）を使用するため空
     },
     {
         "name": "model_comparison",
-        "label": "モデル比較（OOF）",
+        "label": "モデル比較",
         "description": "将来リターン予測モデル M-1〜M-6 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）。退役した M-4/M-5 もここには並びます",
         "depends_on": [],
         "heavy": True,   # 全モデル（heavy）を実行するため。Render では各モデルがスキップされる
         "writes": [],    # 各モデルを tuning_dry_run で回す＝保存済みの表は変えない（model_comparison.py）
-        "category": "④ 戦略を検証",
-        "ui_order": 420,
+        "category": "戦略を検証",
+        "ui_order": 610,
         "params_schema": {},  # 専用UI（静的タブ）を使用するため空
     },
 ]
+
+# 実際の売買に使うモデル。サイドバーで「本番」の札を付ける（/api/plugins の `production`）。
+# 運用の定義は2か所にある: 朝の買い候補（static/js/morning.js の CAND_MODELS・ADR-0070）と
+# 売り判定の出所（plugins/sell_ranking.MU_SOURCE・ADR-0071）。手で書き写した集合なので、
+# 両者の和と一致すること・本番は「将来リターンを予測」、残りの比較ファミリーは「比較用のモデル」に
+# いることを tests/test_analysis_meta.py が照合する（運用を変えたら札とカテゴリも直す）。
+PRODUCTION_MODELS = ("macro_enet", "macro_gbdt")
 
 
 @router.get("/api/plugins")
@@ -138,9 +145,12 @@ async def list_plugins():
 
     `hidden=True` のプラグインは除外する（ADR-0044 の退役＝サイドバーに出さない）。除外は
     ここだけで、レジストリ・`/api/plugins/{name}/run`・`model_comparison` には残る。
+    各メタへ `production`（`PRODUCTION_MODELS` に入るか）を足す。SPECIAL_ANALYSES の辞書は
+    モジュールの定数なので書き換えずに写す。
     """
     metas = [p.to_meta() for p in plugin_registry.list_plugins() if not p.hidden]
     metas.extend(SPECIAL_ANALYSES)
+    metas = [{**m, "production": m["name"] in PRODUCTION_MODELS} for m in metas]
     metas.sort(key=lambda m: m.get("ui_order", 999))
     return {"plugins": metas}
 
@@ -739,7 +749,7 @@ async def backtest_model_comparison(request: Request, db: Session = Depends(api.
     # 進捗つきで包む（#593）。内部で heavy 3本を順に回すので**実行が最も長いのがここ**
     # なのに、#545 の配線は `/api/plugins/{name}/run` 経路にしか通っていなかった。
     label = next((e["label"] for e in SPECIAL_ANALYSES if e["name"] == "model_comparison"),
-                 "モデル比較（OOF）")
+                 "モデル比較")
     # try の外で断る（下の `except Exception` に 409 を 500 へ化けさせない）
     _refuse_heavy_while_unsafe("model_comparison", label)
     try:

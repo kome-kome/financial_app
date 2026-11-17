@@ -314,8 +314,8 @@ class SectorOLSPlugin(AnalysisPlugin):
     writes = ("regression_results",)
     writes_impact = ("朝の推奨とバリュエーション分析の乖離率、乖離率を使うおすすめ銘柄のプリセット。"
                      "次の夜間バッチまでこの設定の値に置き換わります")
-    category = "② 割安度を測る"
-    ui_order = 210
+    category = "割安度を測る"
+    ui_order = 420
 
     def produced_output(self, db) -> bool:
         """regression_results に gap_ratio 付きの予測値を書き終えているか。

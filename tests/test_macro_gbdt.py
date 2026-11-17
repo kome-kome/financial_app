@@ -869,10 +869,10 @@ class TestPluginMeta:
         assert plugin.heavy is True
 
     def test_plugin_ui_order(self):
-        assert plugin.ui_order == 340
+        assert plugin.ui_order == 120
 
     def test_plugin_category(self):
-        assert plugin.category == "③ 将来リターンを予測"
+        assert plugin.category == "将来リターンを予測"
 
 
 # ── 6. ハイパーパラメータ探索中のスコアリング省略モード（Issue #299） ────────────

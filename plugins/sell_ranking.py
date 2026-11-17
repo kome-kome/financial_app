@@ -210,8 +210,8 @@ class SellRankingPlugin(AnalysisPlugin):
     )
     # S2 は M-6 の実行が一緒に作り、S2 が使えない回の倒れる先も M-6 の μ̂（未実行なら runner が 400）
     depends_on = [MU_SOURCE]
-    category = "⑤ 保有を見直す"
-    ui_order = 510
+    category = "保有を見直す"
+    ui_order = 210
 
     def params_schema(self) -> dict:
         return {

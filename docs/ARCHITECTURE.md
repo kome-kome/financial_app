@@ -41,7 +41,7 @@ graph LR
         D["🏠 ダッシュボード\ndashboard.html\n企業数・収録状況サマリー"]
         MO["☀️ 朝の推奨\nmorning.html\n発注判定・鮮度・推奨ランキング（読むだけ）"]
         C["📦 収集管理\ncollection.html\n財務収集/株価収集/市場データ更新/DB閲覧\n（4タブ構成・ウィザードUX）"]
-        A["📊 分析画面\nanalysis.html\n目的別5カテゴリの左サイドバー\n（銘柄を探す/割安度/リターン予測/検証/保有を見直す・ステータスバー）"]
+        A["📊 分析画面\nanalysis.html\nよく使う順6カテゴリの左サイドバー\n（リターン予測/保有を見直す/銘柄を探す/割安度/比較用/検証・ステータスバー）"]
         CP["🏢 企業詳細\ncompany.html\n企業検索・個別企業の業績/財務/CF"]
         M["📖 モデル解説\nmodels.html\n数式・参考文献・DOIリンク"]
         G["🔰 やさしい解説\nguide.html\nはじめに・画面の歩き方・分析手法・用語集"]
@@ -1124,21 +1124,26 @@ stateDiagram-v2
 
     state Analysis {
         direction TB
-        [*] --> Find
-        Find    : ① 銘柄を探す\nおすすめ/ネットキャッシュ/スクリーニング
-        Value   : ② 割安度を測る\n業種別OLS → バリュエーション分析
-        Predict : ③ 将来リターンを予測\n株価リターン/マクロ×リスクリターン
-        Verify  : ④ 戦略を検証\nバックテスト / モデル比較（OOF）
+        [*] --> Predict : 既定タブ（ui_order 最小）
+        Predict : 将来リターンを予測\n本番のモデル（「本番」の札）
+        Hold    : 保有を見直す\n売り候補ランキング・売買の記録
+        Find    : 銘柄を探す\nおすすめ銘柄/ネットキャッシュ/スクリーニング
+        Value   : 割安度を測る\nバリュエーション分析 ← 業種別OLS
+        Compare : 比較用のモデル\n本番以外の比較ファミリー
+        Verify  : 戦略を検証\nモデル比較 / バックテスト
 
+        Predict --> Hold    : サイドバー切替
+        Hold    --> Find    : サイドバー切替
         Find    --> Value   : サイドバー切替
-        Value   --> Predict : サイドバー切替
-        Predict --> Verify  : サイドバー切替
+        Value   --> Compare : サイドバー切替
+        Compare --> Verify  : サイドバー切替
     }
 
     note right of Analysis
       左サイドバー = /api/plugins のメタ（category/ui_order）から
-      目的別カテゴリで動的生成（投資フロー順）。
-      スクリーニングは /collection へのリンク（特例エントリ・href）。
+      目的別カテゴリで動的生成（よく使う順。先頭＝既定タブは本番のモデル）。
+      本番の札は meta.production（routers/analysis.PRODUCTION_MODELS）。
+      スクリーニングは /collection?tab=screen へのリンク（特例エントリ・href）。
       ステータスバー: 財務/株価データ件数（不足時に実行ボタンを自動 disabled）
     end note
 
@@ -1263,7 +1268,7 @@ classDiagram
 
     class RecommendPlugin {
         +name = "recommend"
-        +label = "推薦スクリーニング"
+        +label = "おすすめ銘柄"
         +depends_on = []
         +params_schema() プリセット選択・指標ウェイト
         +execute() 複合スコアでランキング生成
@@ -1271,7 +1276,7 @@ classDiagram
 
     class SectorOLSPlugin {
         +name = "sector_ols"
-        +label = "業種別OLS分析"
+        +label = "業種別OLS"
         +depends_on = []
         +heavy = True
         +params_schema() 業種選択・説明変数
@@ -1288,30 +1293,27 @@ classDiagram
 
     class MacroRiskReturnPlugin {
         +name = "macro_risk_return"
-        +label = "M-1: マクロ×リスク-リターン推奨"
+        +label = "線形回帰（M-1）"
         +depends_on = []
         +heavy = True
-        +ui_order = 330
         +params_schema() lambda_risk/risk_axis/fin_features(価格フリー含む)/use_macro(既定OFF・#615)/macro_features(multiselect・選択肢と既定の正本は macro_snapshots の MACRO_FEATURE_OPTIONS / DEFAULT_MACRO_FEATURES)/top_n 等
         +execute() 交差項OLS(財務×マクロ)+LassoLarsIC(BIC)選択+OLS再フィット+Walk-forward CV+James-Stein縮小。全社raw+selected_features+feature_coefs(標準化係数)を返却(効用U/Pareto/top_nはJS後処理)
     }
 
     class MacroEnetPlugin {
         +name = "macro_enet"
-        +label = "M-6: マクロ×財務 正則化線形（ElasticNet）"
+        +label = "正則化線形（M-6）"
         +depends_on = []
         +heavy = True
-        +ui_order = 390
         +params_schema() fin_features/use_macro/macro_features/use_momentum/price_features 等（α・l1_ratio は fold 内で選ぶ）
         +execute() ElasticNet（build_interactions=False）で μ̂ 推定 → macro_enet_scores へ保存（売りの画面の参考表示と、S2 が使えない回の並び）。同じパネルで S2（下側20%点）も解き sell_quantile_scores へ（#1202・売りの並びの既定のキー・ADR-0076）
     }
 
     class MacroGbdtRankPlugin {
         +name = "macro_gbdt_rank"
-        +label = "M-5: マクロ×財務 ランク学習（learning-to-rank）"
+        +label = "ランク学習（M-5）"
         +heavy = True
         +hidden = True
-        +ui_order = 380
         +execute() M-2 を継承し4フックのみ override（producer なし＝OOF 比較専用）
     }
 
@@ -1450,7 +1452,7 @@ graph LR
     end
 
     subgraph ANALYSIS["📊 分析 /api/"]
-        AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
+        AN1["GET /api/plugins\nプラグイン + 特例エントリ(screen/backtest/model_comparison)のメタ一覧\n（category/ui_order/heavy/hidden/production 含む・ui_order 昇順）\n退役（hidden=True・ADR-0044）は除外"]
         AN2["POST /api/plugins/{name}/run?persist=\nプラグインを実行\n（heavy かつ writes_blocked＝RENDER_LIGHT_MODE または接続先 prod は 403・#733）\nheavy はローカルバッチ実行中・同じ heavy が実行中なら 409\nheavy は実行中の進捗を JobState へ流す（#545）\nheavy は既定で保存しない（tuning_dry_run）。保存は persist=1 のときだけ（ADR-0072）"]
         AN14["GET /api/batch/activity\nいま走っているローカルバッチ（running）と\n期限切れで残った実行中マーカー（stale）\n分析画面が heavy のボタンを止める帯に使う"]
         AN15["GET /api/plugins/{name}/preflight\nheavy を押す直前の確認材料\n（blocked_reason / writes / writes_impact / last_run_min）"]
@@ -1587,19 +1589,19 @@ graph TB
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス（`heavy`／`hidden`（退役＝`/api/plugins` から除外・ADR-0044）／`ui_order`／`produced_output`／`writes`（画面から実行したときに置き換わる保存済みの表。heavy は宣言必須で、書かないなら `()`。実行前の確認ダイアログに出す・`tests/test_batch_activity.py::TestHeavyDeclaresWrites`）の共通契約）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsbasepy) | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理。`execute_plugin(plugin, raw, db)` が起動の単一入口。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#plugins__init__py) | plugins/*.py |
-| `plugins/gap_analysis.py` | バックエンド | バリュエーション分析（割安度＋AR(1)半減期＋期待総リターン）。`ui_order=220`・`/api/gap-analysis` は後方互換で維持。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsgap_analysispy) | plugins/utils.py |
-| `plugins/recommend.py` | バックエンド | 複合スコアによる銘柄推薦（VIEW 8指標＝`VIEW_METRICS`＋`RUNTIME_METRICS`＝z_momentum/mu）。**μ̂ は opt-in・既定 OFF**（ADR-0030）・`SELECT_COLS` で転送列を限定・`ui_order=110`。**VIEW 由来指標は加重前に断面で winsorize→標準化する**（`fit_view_metric_stats` / `standardize_metric`・#509。VIEW の `z_*` は winsorize 未通過で外れ値1社に sd を支配され、重み 1.0 の実効影響力が列間で最大73倍違っていた。`RUNTIME_METRICS` は算出側で標準化済み＝対象外、`results[].detail` は生値のまま）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsrecommendpy) | plugins/utils.py, database.py |
-| `plugins/sell_ranking.py` | バックエンド | 売り候補ランキング。保有を売り専用の予測 S2（`sell_quantile_scores.q20`）の昇順に並べ、下位 1/5 を `SELL`（手法は 1 つだけ・ADR-0071・並びのキーは ADR-0076）。S2 が使えない回（表が空・日付が M-6 と違う・Render の断面）は保有全体を M-6 の μ̂ で並べて理由を返す。`depends_on=["macro_enet"]`・`ui_order=510`。転送列は `SELL_SELECT_COLS`（表示8列）、週次は 400日下限＋500社チャンク＋3列（#482・トレンドは参考表示）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginssell_rankingpy) | database.py, plugins.macro_enet, index_event_notes |
-| `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score 前処理）。予測値を `regression_results` へ保存・`heavy=True`・`ui_order=210`。`_load_records` は `sector_load_fields(features)` の列だけを引き、`issued_shares` は `companies` と `COALESCE`（#482・#462 経路の温存）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginssector_olspy) | plugins/utils.py |
-| `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原式）＋グレアム NCAV。`ui_order=120`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsnet_cash_analysispy) | database.py |
+| `plugins/gap_analysis.py` | バックエンド | バリュエーション分析（割安度＋AR(1)半減期＋期待総リターン）。`/api/gap-analysis` は後方互換で維持。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsgap_analysispy) | plugins/utils.py |
+| `plugins/recommend.py` | バックエンド | 複合スコアによる銘柄推薦（VIEW 8指標＝`VIEW_METRICS`＋`RUNTIME_METRICS`＝z_momentum/mu）。**μ̂ は opt-in・既定 OFF**（ADR-0030）・`SELECT_COLS` で転送列を限定。**VIEW 由来指標は加重前に断面で winsorize→標準化する**（`fit_view_metric_stats` / `standardize_metric`・#509。VIEW の `z_*` は winsorize 未通過で外れ値1社に sd を支配され、重み 1.0 の実効影響力が列間で最大73倍違っていた。`RUNTIME_METRICS` は算出側で標準化済み＝対象外、`results[].detail` は生値のまま）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsrecommendpy) | plugins/utils.py, database.py |
+| `plugins/sell_ranking.py` | バックエンド | 売り候補ランキング。保有を売り専用の予測 S2（`sell_quantile_scores.q20`）の昇順に並べ、下位 1/5 を `SELL`（手法は 1 つだけ・ADR-0071・並びのキーは ADR-0076）。S2 が使えない回（表が空・日付が M-6 と違う・Render の断面）は保有全体を M-6 の μ̂ で並べて理由を返す。`depends_on=["macro_enet"]`。転送列は `SELL_SELECT_COLS`（表示8列）、週次は 400日下限＋500社チャンク＋3列（#482・トレンドは参考表示）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginssell_rankingpy) | database.py, plugins.macro_enet, index_event_notes |
+| `plugins/sector_ols.py` | バックエンド | 業種別OLS回帰分析（次元整合・winsorize+z-score 前処理）。予測値を `regression_results` へ保存・`heavy=True`。`_load_records` は `sector_load_fields(features)` の列だけを引き、`issued_shares` は `companies` と `COALESCE`（#482・#462 経路の温存）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginssector_olspy) | plugins/utils.py |
+| `plugins/net_cash_analysis.py` | バックエンド | ネットキャッシュ分析（清原式）＋グレアム NCAV。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsnet_cash_analysispy) | database.py |
 | `plugins/macro_snapshots.py` | バックエンド | M-1/M-2 共有スナップショット構築基盤（ADR-0003 §3）。`_MACRO_MAP`／`FIN_BASE_OPTIONS`／`FIN_LOAD_FIELDS`（`load_data` が financial_metrics VIEW から引く36列＝消費列だけ・#459）／`build_snapshots`／`oof_backtest`／`shared_snapshot_cache()` を集約（プラグインではない）。`load_weekly_prices_chunked` は **`weekly_price_cache` 経由の差分ロード**（#480・ADR-0036）で、SQL の所有権はここに残す（差分条件 `week_start >= :since` は既存の500社チャンクの**中**に足す）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_snapshotspy) | plugins/utils.py, weekly_price_cache.py |
 | `plugins/tuning.py` | バックエンド | M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007）。呼び出し元は CLI（`hyperparameter_search.py`）のみ（プラグインではない）。定期実行ではローカルの月次バッチ（`scripts/run_monthly.py` / `run_monthly_m1.py`）と日中枠（`scripts/run_daytime.py` の `tune:*`）がこの CLI を叩く。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginstuningpy) | plugins/utils.py, plugins/__init__.py, database.py |
-| `plugins/macro_risk_return.py` | バックエンド | **M-1** マクロ×リスク-リターン推奨（財務OLS+BIC選択+Walk-forward CV。μ 側のマクロ・交差項は**既定 OFF**・#615）。producer＝共有 `macro_beta`・`heavy=True`・`ui_order=330`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_risk_returnpy) | plugins/utils.py, macro_snapshots.py |
-| `plugins/macro_gbdt.py` | バックエンド | **M-2** マクロ×財務 勾配ブースティング（ADR-0003/0004/0020）。producer＝`macro_gbdt_scores`（μ̂＋`r1_prime`）・`heavy=True`・`ui_order=340`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdtpy) | plugins/utils.py, macro_snapshots.py, xgboost, shap |
-| `plugins/macro_dlm.py` | バックエンド | **M-3** ベイズ状態空間モデル（時変マクロβ DLM・週次・財務不使用）。producer＝`macro_dlm_scores`（`r1_prime` なし＝R3 ゲート無効）・`heavy=True`・`ui_order=360`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_dlmpy) | numpy, scipy, plugins/utils.py |
-| `plugins/macro_ensemble.py` | バックエンド | **M-4** 兄弟μ̂スタッキング（ADR-0015・基底 M-1+M-2+M-6 を `BASE_MODELS` 定数駆動・二段ウォークフォワード NNLS）。**退役＝`hidden=True`**（#570/ADR-0044・統合が M-6 単体を上回らない。サイドバーと `mu_source` から除外・実行経路と比較行は残す）。producer＝`macro_ensemble_scores`・`heavy=True`・`ui_order=370`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_ensemblepy) | plugins/macro_snapshots.py, plugins/macro_gbdt.py, plugins/macro_risk_return.py, scipy, xgboost |
-| `plugins/macro_gbdt_rank.py` | バックエンド | **M-5** マクロ×財務 ランク学習（ADR-0017・M-2 を継承し4フックのみ override）。**退役＝`hidden=True`**（#570/ADR-0044・実測で M-2 に有意劣後＝数値は ADR-0017 の実測節。サイドバーから除外・実行経路と比較行は残す）。**producer なし＝OOF 比較専用**・`heavy=True`・`ui_order=380`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdt_rankpy) | plugins/macro_gbdt.py, plugins/utils.py, xgboost, shap |
-| `plugins/macro_enet.py` | バックエンド | **M-6** マクロ×財務 正則化線形（ElasticNet・ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格）。producer＝`macro_enet_scores`（売りの画面の参考表示と、S2 が使えない回の並び）・`heavy=True`・`ui_order=390`。同じパネルで売り専用の予測 S2（下側20%点の分位回帰）も解いて `sell_quantile_scores` へ保存する（#1202・**売りの並びの既定のキー**・ADR-0076）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_enetpy) | plugins/model_candidates.py, plugins/macro_snapshots.py, plugins/utils.py, scikit-learn |
+| `plugins/macro_risk_return.py` | バックエンド | **M-1** マクロ×リスク-リターン推奨（財務OLS+BIC選択+Walk-forward CV。μ 側のマクロ・交差項は**既定 OFF**・#615）。producer＝共有 `macro_beta`・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_risk_returnpy) | plugins/utils.py, macro_snapshots.py |
+| `plugins/macro_gbdt.py` | バックエンド | **M-2** マクロ×財務 勾配ブースティング（ADR-0003/0004/0020）。producer＝`macro_gbdt_scores`（μ̂＋`r1_prime`）・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdtpy) | plugins/utils.py, macro_snapshots.py, xgboost, shap |
+| `plugins/macro_dlm.py` | バックエンド | **M-3** ベイズ状態空間モデル（時変マクロβ DLM・週次・財務不使用）。producer＝`macro_dlm_scores`（`r1_prime` なし＝R3 ゲート無効）・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_dlmpy) | numpy, scipy, plugins/utils.py |
+| `plugins/macro_ensemble.py` | バックエンド | **M-4** 兄弟μ̂スタッキング（ADR-0015・基底 M-1+M-2+M-6 を `BASE_MODELS` 定数駆動・二段ウォークフォワード NNLS）。**退役＝`hidden=True`**（#570/ADR-0044・統合が M-6 単体を上回らない。サイドバーと `mu_source` から除外・実行経路と比較行は残す）。producer＝`macro_ensemble_scores`・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_ensemblepy) | plugins/macro_snapshots.py, plugins/macro_gbdt.py, plugins/macro_risk_return.py, scipy, xgboost |
+| `plugins/macro_gbdt_rank.py` | バックエンド | **M-5** マクロ×財務 ランク学習（ADR-0017・M-2 を継承し4フックのみ override）。**退役＝`hidden=True`**（#570/ADR-0044・実測で M-2 に有意劣後＝数値は ADR-0017 の実測節。サイドバーから除外・実行経路と比較行は残す）。**producer なし＝OOF 比較専用**・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdt_rankpy) | plugins/macro_gbdt.py, plugins/utils.py, xgboost, shap |
+| `plugins/macro_enet.py` | バックエンド | **M-6** マクロ×財務 正則化線形（ElasticNet・ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格）。producer＝`macro_enet_scores`（売りの画面の参考表示と、S2 が使えない回の並び）・`heavy=True`。同じパネルで売り専用の予測 S2（下側20%点の分位回帰）も解いて `sell_quantile_scores` へ保存する（#1202・**売りの並びの既定のキー**・ADR-0076）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_enetpy) | plugins/model_candidates.py, plugins/macro_snapshots.py, plugins/utils.py, scikit-learn |
 | `plugins/model_candidates.py` | バックエンド | **兄弟モデル候補メニュー（探索枠・ADR-0021）**。`walk_forward_cv_monthly(fit_predict=…)` へ注入する候補ファクトリ集約。**プラグインではない**（レジストリ非登録・API 非公開）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmodel_candidatespy) | plugins/utils.py, recommend_factor_premia.py, scikit-learn, (lightgbm/catboost 任意) |
 | `plugins/utils.py` | バックエンド | `coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv_monthly()`・`get_macro_features()` 等の共通ユーティリティ。ベクトル化後も旧実装とビット単位で同一値。`get_macro_features` は `macro_data` を3列指定で引く（`_preload_macro_impl` と同一・#482）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsutilspy) | — |
 | `plugins/progress.py` | バックエンド | heavy な分析の実行進捗を画面へ流す唯一の経路（#545・#593 で `SPECIAL_ANALYSES` の heavy 特例へも拡張）。**`PROGRESS_COVERAGE` は `AnalysisPlugin` だけでなく heavy 特例エントリ（`model_comparison`）も対象**で、`tests/test_plugin_progress.py` が両方を実体と照合する（`own` の名乗りは `progress.emit(` の実在まで確かめる）。`emit()` / `progress_sink()`（ContextVar・`asyncio.to_thread` を跨いで伝播）＋ `PROGRESS_COVERAGE`（heavy ごとの `common`/`own`/`exempt: 理由`）。**sink 未設定なら完全な no-op** ＝月次バッチ・`/api/recommend` 経路は素通り。進捗は必ず「ステップ名」を持ち、数えられる場面では「処理済み/全体」も持つ（**heartbeat は生存を示すが進行を示さない**・#504）。表と実体の照合は `tests/test_plugin_progress.py`。**画面からの取消（#849）も同じ経路**で、`emit` が送った後に取消を見て止める協調型。保存は `persisting()` で包み、中では取消を受け付けない（sector_ols は業種ごとに commit するので途中で止めると新旧が混ざる）。`writes` を持つ heavy が包んでいることは `tests/test_analysis_cancel.py` が照合する（詳細は PLUGIN_REFERENCE.md） | — |
@@ -1610,9 +1612,9 @@ graph TB
 | `dashboard.html` | フロントエンド | トップページ・全体サマリー（`/`）。「よく使う」の先頭に朝の推奨（`/morning`）への導線。**「自動収集」カードは静的な予定表を持たず**、`/api/stats` の `batch`（足跡）から `common.js::renderSchedule` が描く（#563・収集画面と同じ関数・#1212）——以前は「GitHub Actions で毎日 03:00 JST」を緑ドット付きで固定表示しており、#503 で cron が止まった後もトップページが嘘をつき続けていた（しかも 03:00 は GHA 時代ですら誤りで、実際の cron は 17:17 JST）。**名目の起動時刻も書かない**——実起動は最大 +1h41m ずれる（#551） | api.py |
 | `morning.html` / `static/js/morning.js` | フロントエンド | 朝の推奨（`/morning`・Issue #423 子3）。`GET /api/morning` を1本叩くだけで、**学習も再計算もしない**。判定と鮮度の下に**今日の売買候補**（#1228）を置く——実際の売買は M-6・M-2 の上位を買い、保有の下位 1/5 を売る（ADR-0070）ので、`/api/plugins/{macro_enet,macro_gbdt}/saved?limit=10`（今買える社の μ̂ の上位 10 社・基準日つき）と `/api/portfolio/sell-candidates`（売買の記録の保有の売り判定）を読んで 3 枚に並べる。両方の上位に入る社に「両方」、保有に「保有中」の印。**μ̂ を買い推奨ランキングの点数へ混ぜない**（並べるだけ・混ぜるなら昇格ゲート＝ADR-0030）。3 本は独立に読み（1 本の失敗で他を消さない）、プリセット・件数を選び直しても読み直さない。M-6 の μ̂ が古いときはその一覧の基準日を注意色にする（総合判定は買い推奨ランキングの元データだけを見るまま）。配線は `tests/test_morning_page.py::TestTradeCandidates` が照合する。総合判定バナー（fresh 緑／warn 黄／alert 赤＋理由リスト＋該当ワークフローへのリンク。赤まで効くのはランキングの元データ＝夜間バッチ・株価・乖離率だけで、スコアに入っていない μ̂・マクロは黄が上限・`routers/morning.py::_overall_verdict`）＋鮮度5カード（**夜間バッチの足跡** / 株価 as-of p50 / 乖離率 computed_at / μ̂ snapshot_date / マクロ critical 系列）。鮮度は `<details>` で畳め、要約1行（各項目の ✓ / ! / ×）を常に出す。**768px 以下では畳んで始める**（開いたままだとカード5枚でランキングが4画面下へ押し出される）。ランキングは 480px 以下で1社1枚のカード（名前・スコア・乖離率・株価 as-of）になる。乖離率は `gap_ratio` が保存時点で % なのでそのまま出す（×100 していた間は分析画面の 100 倍に見えていた）。**バッチのカードは先頭**——下流（株価・スコア）の古さはバッチが走らなかった結果でしかないため（#561）。正常時も「いつ走ったか」を必ず出す（異常時だけ出す設計では沈黙が読めず、**健全なのに「止まっているのでは」と疑われる**）。リンク先は停止済みの GitHub Actions ではなく `docs/DEPLOYMENT.md`＋買い推奨ランキング表。**赤でもランキングは隠さない**（隠すと別経路で古い値を見に行くだけなので、出した上で「この結果で発注しないでください」を明示する） | api.py, routers/morning.py |
 | `collection.html` | フロントエンド | 収集管理・スクリーニング・DBブラウザ（`/collection`）。「財務データ収集」タブの先頭に、ホームと同じ「自動収集」の表（`/api/stats` の `batch`・`common.js::renderSchedule`）を置き、遅れた行があれば復旧手順（`batch.url`）へのリンクを出す。「スマート収集」は財務データがあるとき畳み、1画面目の主ボタンは1つ（#1212）。**タブとスクリーニングの条件は URL に載せる**（`?tab=`・`?per=` など。朝の推奨は `?preset=&n=`、企業詳細は `?tab=`）。読み書きは `common.js` の `urlStateGet` / `urlStateSet` の1か所で、`replaceState` だけを使い履歴を積まない。URL の値は一覧・選択肢・数値として確かめ、外れたら既定で開く。企業名のリンクは全画面で新しいタブに開く（#1213）。業種プルダウンは `/api/industries`、BS/PL/CF 再分類ビューの企業は検索欄で絞って選ぶ（全社のプルダウンは `/api/companies` の上限 500 を超えるため作らない・#803） | api.py |
-| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）から目的別5カテゴリ（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で動的生成（`buildSidebar`）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。バリュエーション分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）。リスク-リターン散布図は M-2 と M-6 が共通ビュー `_riskReturnView(cfg)`（タブごとの状態・λ/横軸/R3/件数の再実行なし再描画・行クリックは `data-click` 委譲＝インライン onclick は CSP で遮断される）を共有し、M-1・M-3 は個別実装のまま（#807。M-3 の行クリックも `data-click` 委譲へ移した・#811）。CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。バリュエーション分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止。買い推奨タブには**株価 as-of バー**（`#price-freshness-bar`・#416）を常設 — `/api/stats` の p50/p05 と齢（営業日）を表示し、5営業日超で黄・10営業日超で赤＋「この結果で発注しないでください」。赤のときは実行前に `confirm()` で確認（**実行はブロックしない**＝z_momentum を外した分析など正当な用途を殺さない）。結果テーブルとCSVに銘柄別「株価日」列。**heavy のタブは「読む場所」が既定**（ADR-0072）: 開くと `/api/plugins/{name}/saved` の保存済みの結果（M-2/M-3/M-6 は μ̂ の上位・業種別OLS は計算時刻と社数）を先頭に出し、設定フォームは `<details class="rerun">`「設定を変えて再計算」へ移す（保存済みがあれば閉じる）。再計算は既定で保存せず、実行ボタンの直前の「結果を保存する」（`writes_impact` を併記）を選んだときだけ `?persist=1` | api.py, Chart.js (CDN) |
+| `analysis.html` | フロントエンド | 分析ハブ（`/analysis`）。左サイドバーを `/api/plugins` のメタ（category/ui_order）からよく使う順の6カテゴリ（将来リターンを予測/保有を見直す/銘柄を探す/割安度を測る/比較用のモデル/戦略を検証・番号は振らない）で動的生成（`buildSidebar`）。先頭（＝既定タブ）は本番のモデルで、`/api/plugins` の `production`（`routers/analysis.PRODUCTION_MODELS`＝朝の買い候補∪売り判定の出所・`test_analysis_meta.py` が照合）に「本番」の札を付ける。名前に記号を足さない（表記は CONTEXT.md「画面の表記」）。売り候補ランキング（`#tab-sell_ranking`・保有銘柄の売り時）は静的タブ＋保有入力 textarea（localStorage 記憶）。バリュエーション分析に横断分布（理論vs実績の散布図・乖離率ヒストグラム）を Chart.js で表示。スクリーニングは特例エントリとして `/collection` へリンク。動的タブの結果描画は `RESULT_RENDERERS`（plugin名→描画関数の登録制・未登録は汎用フォールバック）。リスク-リターン散布図は M-2 と M-6 が共通ビュー `_riskReturnView(cfg)`（タブごとの状態・λ/横軸/R3/件数の再実行なし再描画・行クリックは `data-click` 委譲＝インライン onclick は CSP で遮断される）を共有し、M-1・M-3 は個別実装のまま（#807。M-3 の行クリックも `data-click` 委譲へ移した・#811）。CSV出力は単一の `exportCSV(name)` ディスパッチャ（`CSV_EXPORTERS` 登録制）に統一。バリュエーション分析タブに**モデル鮮度バー**（`#model-freshness-bar`）を常設 — `/api/model/status` から computed_at/staleness_days を取得して表示し、OLSロック演出を廃止。買い推奨タブには**株価 as-of バー**（`#price-freshness-bar`・#416）を常設 — `/api/stats` の p50/p05 と齢（営業日）を表示し、5営業日超で黄・10営業日超で赤＋「この結果で発注しないでください」。赤のときは実行前に `confirm()` で確認（**実行はブロックしない**＝z_momentum を外した分析など正当な用途を殺さない）。結果テーブルとCSVに銘柄別「株価日」列。**heavy のタブは「読む場所」が既定**（ADR-0072）: 開くと `/api/plugins/{name}/saved` の保存済みの結果（M-2/M-3/M-6 は μ̂ の上位・業種別OLS は計算時刻と社数）を先頭に出し、設定フォームは `<details class="rerun">`「設定を変えて再計算」へ移す（保存済みがあれば閉じる）。再計算は既定で保存せず、実行ボタンの直前の「結果を保存する」（`writes_impact` を併記）を選んだときだけ `?persist=1` | api.py, Chart.js (CDN) |
 | `login.html` | フロントエンド | 認証ログイン画面（`/login`） | api.py |
-| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。全モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示（節の顔ぶれは `MODELS.md` の章と1対1で対応する・#712。節の数をここへ書き写さない＝増減しても失敗として現れない）。冒頭に**分析の3層モデル**（一次分析／双対／メタ検証・`#layers`）の枠組みを置き、本文は `guide.html` と揃えた**目的別5カテゴリ**（①銘柄を探す/②割安度/③リターン予測/④検証/⑤保有を見直す）で `cat-header` グルーピング。各モデルは `#mN` でディープリンク可能（番号表示は廃止しアンカーIDのみ維持）。旧「総合リターン予測」(`#m1`) はバリュエーション分析へ統合し削除（ADR-0001）。 | — |
+| `models.html` | フロントエンド | モデル解説・参考文献ページ（`/models`）。全モデルの数式・パラメータ・DOIリンクをインラインHTMLで表示（節の顔ぶれは `MODELS.md` の章と1対1で対応する・#712。節の数をここへ書き写さない＝増減しても失敗として現れない）。冒頭に**分析の3層モデル**（一次分析／双対／メタ検証・`#layers`）の枠組みを置き、本文は `guide.html` と揃えた**目的別5カテゴリ**（銘柄を探す/割安度を測る/将来リターンを予測/戦略を検証/保有を見直す・学ぶ順。サイドバーと名前はそろえるが番号は振らない）で `cat-header` グルーピング。各モデルは `#mN` でディープリンク可能（番号表示は廃止しアンカーIDのみ維持）。旧「総合リターン予測」(`#m1`) はバリュエーション分析へ統合し削除（ADR-0001）。 | — |
 | `guide.html` | フロントエンド | 初心者向け「やさしい解説」ページ（`/guide`・ログイン前でも読める）。読者は「投資の基本は知っているが統計とこのアプリは初めて」の人で、数式を使わない。**第1部 はじめに**（できること・最初に見る順番・使う前の注意）／**第2部 画面の歩き方**（`#screen-<画面>`）／**第3部 分析手法**（節の id はプラグイン名。ひとことで言うと／何が分かる／どう使う／注意点、末尾から技術版 `/models#mN` へ。退役モデルは末尾の「退役したモデル」）／**第4部 用語集**（`#term-<slug>`）／もっと詳しく（`/models` と GitHub 上の M1 副読本・MODELS・README）。入口は gnav・ホームの「はじめての方へ」・各画面ヘッダーの「この画面の見方」・分析画面の「❓ やさしい解説」・朝の推奨の「表の見方」・ログイン画面。**`/guide#<id>` のリンク先の実在と、全プラグインに節があることは `tests/test_guide_links.py` が照合する**（節の id をここへ書き写さない）。TOC 追従は `models.js` を再利用（目次が指す見出しだけを見て、光った項目を目次の枠内へ寄せる） | — |
 | `db.html` | フロントエンド | DBビューア（`/db`）。4テーブルのスキーマ・プレビュー・統計サマリー・ER 風リレーション・企業ドリルダウン・CSV エクスポート。 | api.py |
 | `company.html` | フロントエンド | 企業詳細（`/company`・`/company/{edinet_code}`）。個別企業の業績・財務(BS)・CF・per-share/配当・バリュエーション（理論時価総額乖離）・日次株価・業種内Zスコアレーダー・清原式ネットキャッシュ・同業比較を Chart.js の時系列グラフで可視化。企業名・証券コード検索付き。財務(BS)タブはバフェットコード型で各年「左＝資産（借方）／右＝負債・純資産（貸方）」を並列表示し、粒度（粗/中/細）切替で内訳の細かさを変更できる（どの粒度でも資産バー＝負債純資産バー＝総資産になるよう補正）。業績(PL)タブは売上高を費用・利益に分解した積み上げ棒（最上部＝純利益）を粒度（粗/中/細）切替で表示（合計＝売上高、信頼性の低い stored gross_profit は不使用）。CFタブも粒度（粗＝フリー+財務／中＝営業/投資/財務／細＝営業/設備投資/その他投資/財務）切替に対応し、CFデータ未収集の企業には明示メッセージを表示。同業比較タブは選択企業を必ず表示し業種内時価総額順位を併記（並べるのは上場中の社だけ。廃止社は業種が付いていても古い財務のまま順位に混ざるため・#797。並べ替え・順位・母数は `/api/peers` がサーバー側で業種の全件に対して決める＝件数で切ってから画面で並べると、300社を超える業種で上位の社が漏れ母数も小さく出た・#801。廃止社のページでは順位を出さない）。**相互リンク**：理論時価総額/乖離率チャート→`/analysis?tab=gap`・Zスコアチャート→`/analysis?tab=recommend`・ネットキャッシュチャート→`/analysis?tab=net_cash`（逆方向のバリュエーション分析表→`/company/{code}` は既存） | api.py, Chart.js (CDN) |

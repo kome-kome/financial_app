@@ -16,26 +16,28 @@
 
 ## 索引
 
-| ファイル | モデル | heavy | producer（永続化先） | ui_order |
-|---|---|---|---|---|
-| [`plugins/base.py`](#pluginsbasepy) | — | — | — | — |
-| [`plugins/__init__.py`](#plugins__init__py) | — | — | — | — |
-| [`plugins/utils.py`](#pluginsutilspy) | — | — | — | — |
-| [`plugins/progress.py`](#pluginsprogresspy) | — | — | — | — |
-| [`plugins/recommend.py`](#pluginsrecommendpy) | — | | — | 110 |
-| [`plugins/net_cash_analysis.py`](#pluginsnet_cash_analysispy) | — | | — | 120 |
-| [`plugins/sector_ols.py`](#pluginssector_olspy) | — | ✅ | `regression_results` | 210 |
-| [`plugins/gap_analysis.py`](#pluginsgap_analysispy) | — | | — | 220 |
-| [`plugins/macro_risk_return.py`](#pluginsmacro_risk_returnpy) | M-1 | ✅ | `macro_beta`（共有） | 330 |
-| [`plugins/macro_gbdt.py`](#pluginsmacro_gbdtpy) | M-2 | ✅ | `macro_gbdt_scores` | 340 |
-| [`plugins/macro_dlm.py`](#pluginsmacro_dlmpy) | M-3 | ✅ | `macro_dlm_scores` | 360 |
-| [`plugins/macro_ensemble.py`](#pluginsmacro_ensemblepy) | M-4 **（退役）** | ✅ | `macro_ensemble_scores` | 370 |
-| [`plugins/macro_gbdt_rank.py`](#pluginsmacro_gbdt_rankpy) | M-5 **（退役）** | ✅ | **なし**（OOF 比較専用） | 380 |
-| [`plugins/macro_enet.py`](#pluginsmacro_enetpy) | M-6 | ✅ | `macro_enet_scores`・`sell_quantile_scores`（S2・#1202） | 390 |
-| [`plugins/sell_ranking.py`](#pluginssell_rankingpy) | — | | — | 510 |
-| [`plugins/macro_snapshots.py`](#pluginsmacro_snapshotspy) | 共有基盤 | — | — | — |
-| [`plugins/tuning.py`](#pluginstuningpy) | 共有基盤 | — | — | — |
-| [`plugins/model_candidates.py`](#pluginsmodel_candidatespy) | 探索枠 | — | — | — |
+| ファイル | モデル | heavy | producer（永続化先） |
+|---|---|---|---|
+| [`plugins/base.py`](#pluginsbasepy) | — | — | — |
+| [`plugins/__init__.py`](#plugins__init__py) | — | — | — |
+| [`plugins/utils.py`](#pluginsutilspy) | — | — | — |
+| [`plugins/progress.py`](#pluginsprogresspy) | — | — | — |
+| [`plugins/recommend.py`](#pluginsrecommendpy) | — | | — |
+| [`plugins/net_cash_analysis.py`](#pluginsnet_cash_analysispy) | — | | — |
+| [`plugins/sector_ols.py`](#pluginssector_olspy) | — | ✅ | `regression_results` |
+| [`plugins/gap_analysis.py`](#pluginsgap_analysispy) | — | | — |
+| [`plugins/macro_risk_return.py`](#pluginsmacro_risk_returnpy) | M-1 | ✅ | `macro_beta`（共有） |
+| [`plugins/macro_gbdt.py`](#pluginsmacro_gbdtpy) | M-2 | ✅ | `macro_gbdt_scores` |
+| [`plugins/macro_dlm.py`](#pluginsmacro_dlmpy) | M-3 | ✅ | `macro_dlm_scores` |
+| [`plugins/macro_ensemble.py`](#pluginsmacro_ensemblepy) | M-4 **（退役）** | ✅ | `macro_ensemble_scores` |
+| [`plugins/macro_gbdt_rank.py`](#pluginsmacro_gbdt_rankpy) | M-5 **（退役）** | ✅ | **なし**（OOF 比較専用） |
+| [`plugins/macro_enet.py`](#pluginsmacro_enetpy) | M-6 | ✅ | `macro_enet_scores`・`sell_quantile_scores`（S2・#1202） |
+| [`plugins/sell_ranking.py`](#pluginssell_rankingpy) | — | | — |
+| [`plugins/macro_snapshots.py`](#pluginsmacro_snapshotspy) | 共有基盤 | — | — |
+| [`plugins/tuning.py`](#pluginstuningpy) | 共有基盤 | — | — |
+| [`plugins/model_candidates.py`](#pluginsmodel_candidatespy) | 探索枠 | — | — |
+
+サイドバーでの位置（`category`・`ui_order`）は各プラグインのクラス属性、「本番」の札は `routers/analysis.PRODUCTION_MODELS` が正本（ここへは書き写さない）。
 
 `heavy=True` は Render 軽量モードで 403（ローカル / GitHub Actions 実行に限定）。**heavy を追加したら `nightly_scores.HEAVY_AUTOMATION` への自動実行登録が必須**（ADR-0031・未登録は CI が落とす）。
 
@@ -183,7 +185,7 @@ M-1/M-2/M-3 共有ハイパーパラメータ自動探索エンジン（ADR-0007
 
 ## `plugins/macro_risk_return.py`
 
-**M-1 マクロ×リスク-リターン推奨**（財務 OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV。マクロ特徴量と交差項は `use_macro` で足せるが**既定 OFF**・#615。マクロ起因リスク `r_macro` は横軸として残る）。**全社 raw を返却し JS 後処理**。`heavy=True`・`ui_order=330`。
+**M-1 マクロ×リスク-リターン推奨**（財務 OLS+`LassoLarsIC(BIC)`選択+OLS再フィット+Walk-forward CV。マクロ特徴量と交差項は `use_macro` で足せるが**既定 OFF**・#615。マクロ起因リスク `r_macro` は横軸として残る）。**全社 raw を返却し JS 後処理**。`heavy=True`。
 
 共有ロジックは `macro_snapshots.py` に移管（ADR-0003）。**`oof_backtest` 結線済み（#272）**・`tuning_search_space()`（**軸なし・1件**。#265 で 72件 → #604 でモメンタム2軸を外して 12件 → #615 で `use_macro` を外して 6件 → #791 で `max_features` を外して 1件。`use_momentum` と `use_macro` は `base_params` で False、`max_features` は本番既定 20 に固定する。探索は `plugin_tuned_params`（watchdog の足跡・分析画面の初期値）を毎月書くために1候補で残る・ADR-0049 の 2026-10-03 追記。**M-1 の μ̂ はここでは作らない**——execute は何も保存せず（`writes = ()`）、μ̂ は macro_beta 推論バッチの結果から復元するので、月次の M-1 は `--persist-scores` を渡さない・#1179）。**`min_coverage` は軸にしない**（#596・ADR-0049）——到達行の充足率は常に 1.0（`use_macro=ON` なら `macro_nan_ok=False` でマクロ欠損の断面が充足率チェックの手前で破棄され、既定の OFF ではそもそも NaN 源が無い・#615）（実測: 0.0〜1.0 のどの値でもサンプル総数 181,862 で不変／2026-09-02 の完走ログ288件でも72群すべて群内不変）。軸を足しても失敗として現れないので、**288件のうち216件が同一結果の再計算だった**。`params_schema()` には残す（M-2 では実際に効く）。探索中（`shared_snapshot_cache()`）は異なる `max_features` 候補で BIC 選択結果（`selected_names`）が偶然一致した場合、後続の `walk_forward_cv_monthly()` を再実行せず使い回す（`cv_by_selected_features`・Issue #304。真の重複排除＝近似ではない）。
 
@@ -193,7 +195,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_gbdt.py`
 
-**M-2 マクロ×財務 勾配ブースティング**（ADR-0003 / ADR-0004 / #234）。XGBoost が交互作用を自動学習。同一 fold で OLS ベースライン比較・SHAP グローバル+per-stock 全社添付。`heavy=True`・`ui_order=340`。
+**M-2 マクロ×財務 勾配ブースティング**（ADR-0003 / ADR-0004 / #234）。XGBoost が交互作用を自動学習。同一 fold で OLS ベースライン比較・SHAP グローバル+per-stock 全社添付。`heavy=True`。
 
 - **書類で「無い」と確かめた財務の空欄を 0 で埋めてから `build_snapshots` へ渡す**（`macro_snapshots.apply_fin_fill`・#983・M-6 と共有）。無配の `div_yield` と R&D の無い社の `rd_intensity` だけで、株価・売上の空欄の行は埋めない。本番の切り替えは定数 `macro_snapshots.FIN_FILL`。共有キャッシュの中では同じ写しを返す（`build_snapshots` の id の鍵を外さない）。埋めた行数は結果の `fin_filled_rows`。理論と根拠は [MODELS.md](MODELS.md) §11.3.2。
 - **特徴量の `per` を益利回り E/P へ差し替えてから `build_snapshots` へ渡す**（同じ `apply_fin_fill` の中で 0 埋めの後・定数 `macro_snapshots.FIN_EARNINGS_YIELD`・#950・M-6 と共有）。値は `load_earnings_yields`（`financial_metrics.earnings_yield`）、差し替えは `swap_per_for_earnings_yield`（`scripts/momentum_gate` と共有）。列の名前は `per` のままで向きは逆。E/P の無い行は per も空欄、E/P を 1 行も読めなければ `ValueError`。テストは conftest の `fin_earnings_yield_off` が既定で OFF にし、`tests/test_fin_fill_production.py` だけが ON にして確かめる。理論と根拠は [MODELS.md](MODELS.md) §11.3.3。
@@ -208,7 +210,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_dlm.py`
 
-**M-3 ベイズ状態空間モデル（時変マクロβ DLM）**。`heavy=True`・`ui_order=360`。
+**M-3 ベイズ状態空間モデル（時変マクロβ DLM）**。`heavy=True`。
 
 銘柄ごとに週次リターンを主要マクロの週次変化へ回帰し、係数（α/β）が時間変動する動的線形モデルを自前の割引係数 DLM（West & Harrison 型・numpy）で逐次ベイズ推定。観測分散は Normal-Gamma 共役で学習し α/β の信用区間を解析的に出力。最新フィルタ α_T を年率化して µ̂ ランキング、β 経路＋1期先予測診断（校正/RMSE/カバレッジ）を返す。
 
@@ -221,7 +223,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_ensemble.py`
 
-**M-4 兄弟μ̂スタッキング・アンサンブル**（#367・ADR-0015、#397 で M-6 を基底追加）。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=370`（M-3 の後・#378）。
+**M-4 兄弟μ̂スタッキング・アンサンブル**（#367・ADR-0015、#397 で M-6 を基底追加）。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）。
 
 - **退役の根拠**: 統合は M-6 単体を rank-IC でも売り側 spread でも上回らない（数値は [ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)・元の測定は ADR-0015）のに、実行コストは基底 M-1+M-2+M-6 の合算。ADR-0015 本文の「上回らなければ単体で十分」判定に該当する。サイドバーと `mu_source`（`sell_ranking` / `recommend` / `templates/analysis.html` の静的 select）から外したが、**プラグイン・テスト・`COMPARISON_MODELS` の M-4 行は残す**。基底構成を変えたら `scripts/ensemble_base_bakeoff.py` か `python -m scripts.model_comparison_run` で測り直す。
 
@@ -234,7 +236,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_gbdt_rank.py`
 
-**M-5 マクロ×財務 ランク学習**（learning-to-rank・#362・ADR-0017）。M-2 の rank-IC 整合版。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）・`ui_order=380`。
+**M-5 マクロ×財務 ランク学習**（learning-to-rank・#362・ADR-0017）。M-2 の rank-IC 整合版。`heavy=True`・`hidden=True`（**退役**・#570/ADR-0044）。
 
 - **退役の根拠（2026-08-30 実測・ADR-0017 の実測節）**: rank-IC で M-2(MSE) に有意に劣後し（数値は [ADR-0017](adr/0017-m5-learning-to-rank.md) の実測節）、ADR-0017 の「上回らなければ MSE で十分」に該当。弱いのは下位分位（最下位分位リターンと売り側 spread）。**ただし early_stopping 不使用の固定木数で正則化が M-2 と非対称**なので「learning-to-rank が無効」ではなく「この実装では下回った」と読む（再挑戦は group 付き eval_set を組んでから）。producer が無いため下流の切断は不要で、サイドバーから外しただけ。
 
@@ -246,7 +248,7 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 
 ## `plugins/macro_enet.py`
 
-**M-6 マクロ×財務 正則化線形（ElasticNet・#372・ADR-0021）**。`heavy=True`・`ui_order=390`。
+**M-6 マクロ×財務 正則化線形（ElasticNet・#372・ADR-0021）**。`heavy=True`。
 
 候補メニューの bake-off で M-2(XGBoost) を **honest OOF rank-IC で有意に上回った**（8候補中で唯一 Bonferroni α/8 を通過・数値は [ADR-0021](adr/0021-sibling-model-candidate-menu.md)）ため正式兄弟へ昇格。
 

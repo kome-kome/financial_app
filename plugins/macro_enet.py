@@ -159,7 +159,7 @@ def _final_training_rows(samples_by_ym: dict, inner_cv: str) -> tuple[list, list
 
 class MacroEnetPlugin(AnalysisPlugin):
     name = "macro_enet"
-    label = "M-6: マクロ×財務 正則化線形（ElasticNet）"
+    label = "正則化線形（M-6）"
     description = (
         "M-2 と同一データ・同一 fold で、L1+L2 正則化した線形モデル（ElasticNet）を学習します。"
         "金利カーブや信用スプレッドのようなグループ共線性に強く、符号付き係数がそのまま読めます。"
@@ -173,8 +173,8 @@ class MacroEnetPlugin(AnalysisPlugin):
     writes_impact = ("売り候補ランキングの μ̂（期待リターン）と、μ̂ を使うおすすめ銘柄。朝の推奨の μ̂ の鮮度表示も動きます。"
                      "売り専用の候補 S2 の予測（今の売りの並びでは使っていません）も置き換わります。"
                      "次の夜間バッチまでこの設定の値に置き換わります")
-    category = "③ 将来リターンを予測"
-    ui_order = 390                       # M-5=380 の後（M-1→M-2→M-3→M-4→M-5→M-6 順）
+    category = "将来リターンを予測"     # 本番（routers/analysis.PRODUCTION_MODELS）はここ
+    ui_order = 110                       # サイドバーの先頭＝/analysis の既定タブ
 
     def params_schema(self) -> dict:
         return {

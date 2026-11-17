@@ -1,9 +1,9 @@
 """分析メタ（category / ui_order）とサイドバーIA（/api/plugins）のテスト。
 
-PR1（目的別IA再設計の土台）:
   - 各プラグインの to_meta() が category（非空 str）と ui_order（int）を持つ
   - /api/plugins が「プラグイン + 特例エントリ(screen/backtest)」を ui_order 昇順で返す
-  - category のグルーピング順が投資フロー順4分類になる
+  - category のグルーピング順が「よく使うものが上」の6分類になる（本番のモデル→保有を見直す→…）
+  - 「本番」の札（production）が運用（朝の買い候補・売り判定の出所）と一致する
 """
 import os
 import sys
@@ -23,13 +23,16 @@ from routers.analysis import SPECIAL_ANALYSES  # noqa: E402
 
 client = TestClient(api.app)
 
-# 投資フロー順の期待カテゴリ並び（ui_order 帯: 100/200/300/400/500）
+# サイドバーのカテゴリの並び（ui_order 帯: 100/200/…/600）。よく使うものが上に来る順で、
+# 先頭は実際の売買に使うモデル（＝/analysis を開いたときの既定タブ）。番号は振らない
+# （M-1 などのモデル番号と、番号の体系が2つ並ぶため）。
 EXPECTED_CATEGORY_ORDER = [
-    "① 銘柄を探す",
-    "② 割安度を測る",
-    "③ 将来リターンを予測",
-    "④ 戦略を検証",
-    "⑤ 保有を見直す",
+    "将来リターンを予測",
+    "保有を見直す",
+    "銘柄を探す",
+    "割安度を測る",
+    "比較用のモデル",
+    "戦略を検証",
 ]
 
 
@@ -59,9 +62,17 @@ class TestPluginsEndpoint:
     def test_includes_special_entries(self):
         metas = {m["name"]: m for m in client.get("/api/plugins").json()["plugins"]}
         assert "screen" in metas and "backtest" in metas
-        # screen は別ページへのリンク（href あり）、backtest は専用タブ（href なし）
-        assert metas["screen"].get("href") == "/collection"
+        # screen は別ページへのリンク（href あり）、backtest は専用タブ（href なし）。
+        # screen は収集画面のスクリーニングのタブへ直接着く（無いと収集のタブ＝「今すぐ実行」の前に着く）
+        assert metas["screen"].get("href") == "/collection?tab=screen"
         assert "href" not in metas["backtest"]
+
+    def test_screen_link_targets_a_real_collection_tab(self):
+        """`?tab=screen` を収集画面が知っていること（一覧に無い値は黙って既定のタブで開く・#1213）。"""
+        import re
+        src = open(os.path.join(_ROOT, "static", "js", "collection.js"), encoding="utf-8").read()
+        tabs = re.search(r"const _TABS = \[([^\]]*)\]", src)
+        assert tabs and "'screen'" in tabs.group(1)
 
     def test_category_grouping_order(self):
         metas = client.get("/api/plugins").json()["plugins"]
@@ -71,6 +82,170 @@ class TestPluginsEndpoint:
             if cat not in seen:
                 seen.append(cat)
         assert seen == EXPECTED_CATEGORY_ORDER
+
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class TestSidebarProductionBadge:
+    """サイドバーの「本番」の札（`/api/plugins` の `production`）。
+
+    札は `routers.analysis.PRODUCTION_MODELS` から付くが、運用の定義は別の2か所にある:
+    朝の買い候補（morning.js の `CAND_MODELS`・ADR-0070）と売り判定の出所
+    （`sell_ranking.MU_SOURCE`・ADR-0071）。手で書き写した集合なので、ずれたら札が嘘になる。
+    運用を変えたら札とカテゴリも直すよう、ここで両方を照合する。
+    """
+
+    @staticmethod
+    def _morning_candidate_models() -> set[str]:
+        import re
+        src = open(os.path.join(_ROOT, "static", "js", "morning.js"), encoding="utf-8").read()
+        block = re.search(r"const CAND_MODELS = \[(.*?)\];", src, re.S)
+        assert block, "morning.js の CAND_MODELS が見つからない（照合が空振りしている）"
+        names = set(re.findall(r"name:\s*'([a-z_]+)'", block.group(1)))
+        assert names, "CAND_MODELS からモデル名を読めない"
+        return names
+
+    def test_production_models_are_the_ones_used_for_trading(self):
+        from plugins.sell_ranking import MU_SOURCE
+        from routers.analysis import PRODUCTION_MODELS
+        expected = self._morning_candidate_models() | {MU_SOURCE}
+        assert set(PRODUCTION_MODELS) == expected, (
+            f"本番の札 {sorted(PRODUCTION_MODELS)} が運用 {sorted(expected)}（朝の買い候補＋売り判定）と違う")
+
+    def test_api_marks_only_production_models(self):
+        from routers.analysis import PRODUCTION_MODELS
+        metas = client.get("/api/plugins").json()["plugins"]
+        assert all(isinstance(m.get("production"), bool) for m in metas)
+        marked = {m["name"] for m in metas if m["production"]}
+        assert marked == set(PRODUCTION_MODELS)
+
+    def test_production_models_lead_and_the_rest_are_for_comparison(self):
+        """本番は「将来リターンを予測」、比較ファミリーの残りは「比較用のモデル」。
+
+        運用を変えて札だけ動かすと、本番のモデルが「比較用」の見出しの下に残る（逆も）。
+        """
+        from model_comparison import COMPARISON_MODELS
+        from plugins import get_plugin
+        from routers.analysis import PRODUCTION_MODELS
+        for name, _ in COMPARISON_MODELS:
+            want = "将来リターンを予測" if name in PRODUCTION_MODELS else "比較用のモデル"
+            assert get_plugin(name).category == want, f"{name} のカテゴリが {want} でない"
+
+    def test_production_model_opens_first(self):
+        """/analysis の既定タブは ui_order 最小（analysis.js の initPlugins）＝本番の先頭。"""
+        from routers.analysis import PRODUCTION_MODELS
+        metas = client.get("/api/plugins").json()["plugins"]
+        first_tab = next(m for m in metas if not m.get("href"))
+        assert first_tab["name"] in PRODUCTION_MODELS
+
+
+class TestSidebarLabels:
+    """サイドバーの名前（CONTEXT.md「画面の表記」）。記号で飾らず、同じモデルを同じ名前で呼ぶ。"""
+
+    DECORATIONS = ("★", "¥", "◆", "↗", "×")
+    CIRCLED = ("①", "②", "③", "④", "⑤")
+
+    def test_labels_and_categories_carry_no_decorative_symbols(self):
+        for m in client.get("/api/plugins").json()["plugins"]:
+            bad = [s for s in self.DECORATIONS if s in m["label"]]
+            assert not bad, f"{m['name']} の名前に記号 {bad}"
+            assert not any(c in m["category"] for c in self.CIRCLED), f"{m['category']} に番号"
+
+    def test_mu_source_option_labels_match_plugin_labels(self):
+        """おすすめ銘柄の「期待リターンの出所」の選択肢は、サイドバーと同じ名前で呼ぶ。"""
+        from plugins import get_plugin
+        opts = get_plugin("recommend").params_schema()["mu_source"]["options"]
+        for o in opts:
+            if o["value"]:
+                assert o["label"] == get_plugin(o["value"]).label, (
+                    f"{o['value']} の選択肢名 {o['label']!r} がサイドバーの名前と違う")
+
+    def test_sidebar_builder_adds_no_icons_and_shows_the_badge(self):
+        src = open(os.path.join(_ROOT, "static", "js", "analysis.js"), encoding="utf-8").read()
+        body = src[src.index("function buildSidebar("):]
+        body = body[:body.index("\n}\n")]
+        assert "PLUGIN_ICON" not in src, "名前の前に記号を付ける表が残っている"
+        assert "↗" not in body
+        assert "p.production" in body and "本番" in body
+
+
+class TestRerunWrapsTheForm:
+    """保存済みの結果の下の「設定を変えて再計算」が、設定フォームを包むこと。
+
+    `_wrapRerun`（analysis.js）はタブ直下の要素を CSS セレクタで1つ選んで折りたたむ。
+    M-1 の設定カードは `.grid2` の中にあり、以前のセレクタ（タブ直下の `.card`）では
+    非表示の結果カード（`#mrr-chart-card`）を包んで、開いても中身が空だった。
+    ここでは同じ規則を Python で再現し、静的な重いタブごとに選ばれる要素が実行ボタンを含むことを照合する。
+    """
+
+    SELECTOR = ":scope > .grid2, :scope > .card:not([id^=\"saved-\"]):not(.hidden)"
+    STATIC_HEAVY_TABS = ("macro_risk_return", "macro_gbdt", "macro_dlm", "model_comparison")
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+            "source", "track", "wbr"}
+
+    def _tree(self):
+        from html.parser import HTMLParser
+
+        root = {"tag": "#root", "attrs": {}, "children": []}
+        stack = [root]
+        void = self.VOID
+
+        class P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                node = {"tag": tag, "attrs": dict(attrs), "children": []}
+                stack[-1]["children"].append(node)
+                if tag not in void:
+                    stack.append(node)
+
+            def handle_startendtag(self, tag, attrs):
+                stack[-1]["children"].append({"tag": tag, "attrs": dict(attrs), "children": []})
+
+            def handle_endtag(self, tag):
+                for i in range(len(stack) - 1, 0, -1):
+                    if stack[i]["tag"] == tag:
+                        del stack[i:]
+                        return
+
+        P().feed(open(os.path.join(_ROOT, "templates", "analysis.html"), encoding="utf-8").read())
+        return root
+
+    @staticmethod
+    def _walk(node):
+        yield node
+        for c in node["children"]:
+            yield from TestRerunWrapsTheForm._walk(c)
+
+    @staticmethod
+    def _classes(node):
+        return (node["attrs"].get("class") or "").split()
+
+    def _picked(self, tab):
+        for c in tab["children"]:
+            cls = self._classes(c)
+            if "grid2" in cls:
+                return c
+            if ("card" in cls and "hidden" not in cls
+                    and not (c["attrs"].get("id") or "").startswith("saved-")):
+                return c
+        return None
+
+    def test_js_uses_the_rule_reproduced_here(self):
+        src = open(os.path.join(_ROOT, "static", "js", "analysis.js"), encoding="utf-8").read()
+        body = src[src.index("function _wrapRerun("):]
+        body = body[:body.index("\n}\n")]
+        assert f"tab.querySelector('{self.SELECTOR}')" in body, "セレクタが変わったらここの再現も直す"
+
+    @pytest.mark.parametrize("tab_id", STATIC_HEAVY_TABS)
+    def test_picked_block_holds_the_run_button(self, tab_id):
+        tree = self._tree()
+        tab = next((n for n in self._walk(tree) if n["attrs"].get("id") == f"tab-{tab_id}"), None)
+        assert tab is not None, f"tab-{tab_id} が analysis.html に無い"
+        picked = self._picked(tab)
+        assert picked is not None, f"tab-{tab_id} で折りたたむ要素が見つからない"
+        buttons = [n for n in self._walk(picked)
+                   if n["tag"] == "button" and "btn-primary" in self._classes(n)]
+        assert buttons, f"tab-{tab_id} で折りたたむ要素に実行ボタンが無い（中身の空の折りたたみになる）"
 
 
 class TestHiddenPlugins:

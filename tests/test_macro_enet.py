@@ -4,7 +4,7 @@
 ElasticNet 線形モデル。
 
 テスト観点:
-  1. meta   : 登録・ui_order=390・未実行時は producer 無し（graceful-degrade）
+  1. meta   : 登録・サイドバー先頭（ui_order=110）・未実行時は producer 無し（graceful-degrade）
   2. coerce : l1_ratio の membership 検証・macro_pca_components の bounds 検証
   3. fold   : M-2 と同一の walk-forward 設定（min_train_months=6 / step=3 / embargo=12）で回す
   3.5 config: 探索設定（l1_ratios / n_alphas / cv_splits / max_iter）が候補実装の単一ソース（#452）
@@ -71,13 +71,14 @@ class TestPluginMeta:
 
     def test_name_label(self):
         assert plugin.name == "macro_enet"
-        assert plugin.label.startswith("M-6")
+        assert plugin.label.endswith("（M-6）")   # 画面の表記は「手法名（M 番号）」（CONTEXT.md）
 
-    def test_ui_order_after_m5(self):
-        assert plugin.ui_order == 390
+    def test_ui_order_is_first_in_sidebar(self):
+        # 本番のモデルを先頭に置く＝/analysis を開いたときの既定タブ
+        assert plugin.ui_order == 110
 
     def test_category_and_heavy(self):
-        assert plugin.category == "③ 将来リターンを予測"
+        assert plugin.category == "将来リターンを予測"
         assert plugin.heavy is True
 
     def test_producer_absent_before_run(self, db):

@@ -4,7 +4,7 @@ M-2（macro_gbdt）の rank-IC 整合版。学習目的を MSE→learning-to-ran
 差し替えた兄弟モデル。execute() 本体は M-2 から継承し、4フックのみ override する。
 
 テスト観点:
-  1. meta   : 登録・ui_order=380・producer を持たない（produced_output=False / read=空）
+  1. meta   : 登録・ui_order=540・producer を持たない（produced_output=False / read=空）
   2. coerce : objective select の membership 検証・M-2 スキーマ継承
   3. labels : _prep_rank_labels（pairwise 素通し / ndcg 非負グレード・上限クリップ）
   4. cv     : walk_forward_cv_monthly(pass_train_groups=True) が 3 引数コールバックで XGBRanker を
@@ -53,13 +53,13 @@ class TestPluginMeta:
 
     def test_name_label(self):
         assert plugin.name == "macro_gbdt_rank"
-        assert plugin.label.startswith("M-5")
+        assert plugin.label.endswith("（M-5）")   # 画面の表記は「手法名（M 番号）」（CONTEXT.md）
 
     def test_ui_order_after_m4(self):
-        assert plugin.ui_order == 380
+        assert plugin.ui_order == 540
 
     def test_category(self):
-        assert plugin.category == "③ 将来リターンを予測"
+        assert plugin.category == "比較用のモデル"
 
     def test_heavy(self):
         assert plugin.heavy is True

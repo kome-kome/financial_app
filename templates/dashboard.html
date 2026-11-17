@@ -188,7 +188,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
         夜間バッチが書き込んだ結果を使うページ。モデルの学習はしませんが、推奨の並べ替えは開くたびに計算するので、表示まで数秒かかります。
       </div>
       <ul class="feature-list">
-        <li>買い推奨ランキング（永続化済みスコア）</li>
+        <li>おすすめ銘柄ランキング（永続化済みスコア）</li>
         <li>株価 / 乖離率 / μ̂ / マクロの鮮度を必ず表示</li>
         <li>古いときは「発注しない」を明示し、該当ワークフローへ誘導</li>
       </ul>
@@ -210,10 +210,10 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
         収集した財務データを使って回帰分析・バリュエーション分析・スコアリングを行います。
       </div>
       <ul class="feature-list">
-        <li>★ おすすめ銘柄スコアリング・売り候補ランキング</li>
-        <li>バリュエーション分析（割安度＋平均回帰＋期待総リターン）</li>
+        <li>おすすめ銘柄・売り候補ランキング</li>
+        <li>バリュエーション分析（乖離率＋平均回帰＋期待総リターン）</li>
         <li>業種別OLS（理論時価総額の算出）</li>
-        <li>将来リターンの予測（M-1〜M-3・M-6）</li>
+        <li>将来リターンの予測（本番の M-6・M-2、比較用の M-1・M-3）</li>
       </ul>
       <a href="/analysis" class="nav-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>

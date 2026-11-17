@@ -17,7 +17,7 @@ M-1（macro_risk_return, OLS 線形）・M-2（macro_gbdt, XGBoost 非線形）�
 オンライン学習し、予測分布は Student-t になる → α・β の信用区間が解析的に得られる。
 
 出力:
-    µ̂ = 年率化した最新フィルタ α_T（= α_T × 52）。M-1/M-2 と同じ µ̂ ランキングに載せられる。
+    μ̂ = 年率化した最新フィルタ α_T（= α_T × 52）。M-1/M-2 と同じ μ̂ ランキングに載せられる。
     β 経路 = 各週の状態の β 成分と信用区間（時変マクロ感応度の可視化）。
     検証 = DLM 内蔵の1期先予測診断（標準化予測誤差・予測RMSE・95%信用区間カバレッジ）。
 
@@ -350,7 +350,7 @@ def _r(x: float, nd: int = 6) -> float | None:
 
 
 def _r_macro_of(X: list, beta_T: list, k: int) -> float | None:
-    """系統的マクロリスク R_macro（年率・表示の副産物で、画面の U = µ̂ − λR の横軸）。
+    """系統的マクロリスク R_macro（年率・表示の副産物で、画面の U = μ̂ − λR の横軸）。
 
     := sqrt(βᵀ cov(Δm) β)。β は最終週の推定値、cov は全期間の説明変数から取る。価格行動系特徴量
     （末尾 len(price_features) 列）は銘柄固有の遅行特徴量であり「マクロリスク」ではないため、
@@ -371,11 +371,11 @@ def _r_macro_of(X: list, beta_T: list, k: int) -> float | None:
 
 class MacroDlmPlugin(AnalysisPlugin):
     name = "macro_dlm"
-    label = "M-3: ベイズ状態空間（時変マクロβ）"
+    label = "ベイズ状態空間（M-3）"
     description = (
         "銘柄ごとに週次リターンを主要マクロの週次変化へ回帰し、係数（α/β）が時間変動する"
         "動的線形モデル（DLM）をカルマン型逐次ベイズ更新で推定します。最新の潜在アルファ α を"
-        "期待リターン µ̂ とし、マクロ感応度 β の時系列と信用区間を可視化。M-1（線形）・M-2（非線形）"
+        "期待リターン μ̂ とし、マクロ感応度 β の時系列と信用区間を可視化。M-1（線形）・M-2（非線形）"
         "が静的係数なのに対し、本モデルは係数の時間変化そのものを捉えます。"
         "【注意】株価週次履歴とマクロデータの蓄積が必要です。"
     )
@@ -384,8 +384,8 @@ class MacroDlmPlugin(AnalysisPlugin):
     writes = ("macro_dlm_scores",)
     writes_impact = ("おすすめ銘柄で μ̂ の出所に M-3 を選んだときの値。"
                      "次に月次バッチが本番の設定で書き直すまで、この設定の値に置き換わります")
-    category = "③ 将来リターンを予測"
-    ui_order = 360                       # macro_gbdt(340) の次
+    category = "比較用のモデル"
+    ui_order = 520
 
     def params_schema(self) -> dict:
         return {
@@ -441,7 +441,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "type": "number",
                 "dtype": "int",
                 "label": "上位表示数",
-                "description": "µ̂（年率化アルファ）上位 N 銘柄をランキング・経路チャートで返す。",
+                "description": "μ̂（年率化アルファ）上位 N 銘柄をランキング・経路チャートで返す。",
                 "default": 50, "min": 1, "max": 500,
             },
             "alpha_ar1": {
@@ -449,7 +449,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "label": "AR(1) アルファ（平均回帰）",
                 "description": (
                     "α をランダムウォークではなく AR(1) として推定します。"
-                    "µ̂ = φ·α_T × 52 に縮小され、より保守的な期待リターン推定になります。"
+                    "μ̂ = φ·α_T × 52 に縮小され、より保守的な期待リターン推定になります。"
                     "φ は下の「α の AR(1) 係数」スライダーで指定。"
                 ),
                 "default": False,
@@ -470,7 +470,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                 "dtype": "float",
                 "label": "リスク回避度 λ",
                 "description": (
-                    "U = µ̂ − λ × R_macro。λ=0 でリターン最大化、λ大でマクロリスク重視。"
+                    "U = μ̂ − λ × R_macro。λ=0 でリターン最大化、λ大でマクロリスク重視。"
                     "スライダー操作は再計算なしで即時反映（クライアント後処理）。"
                 ),
                 "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.1,
@@ -734,7 +734,7 @@ class MacroDlmPlugin(AnalysisPlugin):
 
             alpha_w = float(m_path[-1, 0])
             alpha_sd = float(sd_path[-1, 0])
-            # AR(1) 時は µ̂ = φ·α_T（1期先予測値を 0 へ縮小した保守的推定）
+            # AR(1) 時は μ̂ = φ·α_T（1期先予測値を 0 へ縮小した保守的推定）
             mu = phi * alpha_w * WEEKS_PER_YEAR
             mu_lo = phi * (alpha_w - tq * alpha_sd) * WEEKS_PER_YEAR
             mu_hi = phi * (alpha_w + tq * alpha_sd) * WEEKS_PER_YEAR
@@ -805,7 +805,7 @@ class MacroDlmPlugin(AnalysisPlugin):
         oof_bt = _oof_backtest(oof_residuals, n_quantiles=5,
                                meta_by_ym=oof_meta, rebalance_per_year=12)
 
-        # ── 画面の並びの採点（#1042・ADR-0069）: 同じ OOF を画面の既定の λ で U = µ̂ − λR_macro の順に
+        # ── 画面の並びの採点（#1042・ADR-0069）: 同じ OOF を画面の既定の λ で U = μ̂ − λR_macro の順に
         # 採点し直す（参考）。R_macro は最終週の β を全期間に当てた社ごとの定数で、過去の月の時点では
         # 作れない＝未来情報込みの上限（#709 と同じ扱い・time_reproducible=False）。
         oof_display = None

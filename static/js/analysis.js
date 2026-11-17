@@ -134,7 +134,6 @@ const PLUGIN_TAB_MAP = {
   'macro_dlm':          'macro_dlm',
 };
 // サイドバー項目の先頭につける目印（視認性のため。強調は active 状態で表現）
-const PLUGIN_ICON = { 'recommend': '★ ', 'gap_analysis': '◆ ', 'net_cash_analysis': '¥ ' };
 let _allTabs   = [];        // タブを持つ分析の tabId 一覧（initPlugins が構築）
 let _pluginMeta = {};
 // 閲覧専用の環境（writes_blocked・#733）。true なら heavy はローカル実行に限定（UIで無効化＋案内）
@@ -333,7 +332,7 @@ const WEIGHT_LABELS = {
   'z_cf_ratio':     ['CF余力',               0.8],
   'z_equity_ratio': ['財務安全性',            0.5],
   'z_eps':          ['EPS（1株利益）',        0.0],
-  'gap_ratio':      ['割安度（回帰分析後）',  0.5],
+  'gap_ratio':      ['乖離率（業種別OLS）',  0.5],
   'z_de_ratio':     ['D/Eレシオ低さ',         0.0],
   'z_momentum':     ['価格モメンタム（12-1ヶ月）', 0.5],
   // μ̂ は既定 0（＝使わない）。重みを付けるときは下のフィルター欄で「μ̂ の出所」を選ぶ
@@ -471,7 +470,7 @@ async function runRecommend() {
 
 function exportRecommendCSV() {
   if (!recResults.length) return;
-  const header = '順位,証券コード,企業名,業種,スコア,ROE%,営業利益率%,売上成長率%,割安度%,時価総額(百万円),株価日';
+  const header = '順位,証券コード,企業名,業種,スコア,ROE%,営業利益率%,売上成長率%,乖離率%,時価総額(百万円),株価日';
   const rows = recResults.map(r =>
     [r.rank, r.sec_code, r.company_name, r.industry, r.score,
      r.roe, r.op_margin, r.rev_growth, r.gap_ratio, r.market_cap,
@@ -1490,7 +1489,11 @@ function _wrapRerun(tabId, d) {
   if (!tab) return null;
   const done = tab.querySelector(':scope > details.rerun');
   if (done) return done;
-  const formCard = tab.querySelector(':scope > .card:not([id^="saved-"])');
+  // 折りたたむのは設定フォームを含むブロック＝タブ直下の .grid2（M-1 は設定と CV の詳細を
+  // 2 段組にしている）か、非表示でない .card（保存済みカード以外）のうち最初の 1 つ。
+  // 非表示の結果カード（M-1 の #mrr-chart-card）を包むと、開いても中身が空になる。
+  // 照合: tests/test_analysis_meta.py::TestRerunWrapsTheForm
+  const formCard = tab.querySelector(':scope > .grid2, :scope > .card:not([id^="saved-"]):not(.hidden)');
   if (!formCard) return null;
   const det = document.createElement('details');
   det.className = 'rerun';
@@ -1534,7 +1537,9 @@ function _savedDiagHTML(name, g) {
 }
 
 function _savedHTML(d, tabId) {
-  const title = `<h2 class="section-title">${esc(d.label)} — 保存済みの結果</h2>`;
+  const title = d.kind === 'none'
+    ? `<h2 class="section-title">${esc(d.label)}（結果は保存しません）</h2>`
+    : `<h2 class="section-title">${esc(d.label)} — 保存済みの結果</h2>`;
   const by = d.updated_by ? `${esc(d.updated_by)}が更新します` : '';
   if (d.kind === 'none') {
     return title + `<div class="info-box">この分析は結果を保存しません（画面に表示するだけ）。`
@@ -1712,7 +1717,7 @@ async function initPlugins() {
     if (!PLUGIN_TAB_MAP[plugin.name]) _createDynamicTab(plugin, tabId);
   }
   buildSidebar(plugins);
-  // URL ?tab= 指定があれば優先、なければ ui_order 最小（「① 銘柄を探す」先頭）を表示
+  // URL ?tab= 指定があれば優先、なければ ui_order 最小（サイドバー先頭＝本番の M-6）を表示
   const startTab = (_urlTab && _allTabs.includes(_urlTab)) ? _urlTab : _allTabs[0];
   if (startTab) showTab(startTab);
   // バリュエーション分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
@@ -1745,6 +1750,8 @@ async function initPlugins() {
 
 // /api/plugins のメタを category でグルーピングし、ui_order 昇順でサイドバーを生成する。
 // href を持つエントリ（スクリーニング等）は別ページへのリンクとして描画する。
+// 名前に記号を足さない（★ ¥ ◆ ↗ は意味なく一部にだけ付いていた）。実際の売買に使うモデル
+// （サーバーの PRODUCTION_MODELS → meta.production）にだけ「本番」の札を付ける。
 function buildSidebar(plugins) {
   const side = document.getElementById('analysis-sidebar');
   if (!side) return;
@@ -1761,11 +1768,11 @@ function buildSidebar(plugins) {
     html += `<div class="sidebar-cat">${esc(cat)}</div>`;
     for (const p of byCat[cat]) {
       if (p.href) {
-        html += `<a class="sidebar-item" href="${esc(p.href)}">${esc(p.label)}<span class="sidebar-ext">↗</span></a>`;
+        html += `<a class="sidebar-item" href="${esc(p.href)}">${esc(p.label)}</a>`;
       } else {
         const tabId = PLUGIN_TAB_MAP[p.name] || p.name;
-        const icon = PLUGIN_ICON[p.name] || '';
-        html += `<button type="button" class="sidebar-item" data-tab="${esc(tabId)}" data-click="showTab" data-arg="${esc(tabId)}">${esc(icon + p.label)}</button>`;
+        const badge = p.production ? ' <span class="tag tag-blue">本番</span>' : '';
+        html += `<button type="button" class="sidebar-item" data-tab="${esc(tabId)}" data-click="showTab" data-arg="${esc(tabId)}">${esc(p.label)}${badge}</button>`;
       }
     }
   }
@@ -1775,10 +1782,10 @@ function buildSidebar(plugins) {
 // /api/plugins 取得失敗時のフォールバック（静的タブを持つ分析のみ・カテゴリ付き）
 function _fallbackPlugins() {
   return [
-    {name:'recommend',         label:'おすすめ銘柄',       category:'① 銘柄を探す',       ui_order:110, depends_on:[],            params_schema:{}},
-    {name:'net_cash_analysis', label:'ネットキャッシュ分析', category:'① 銘柄を探す',       ui_order:120, depends_on:[],            params_schema:{}},
-    {name:'gap_analysis',      label:'バリュエーション分析', category:'② 割安度を測る',     ui_order:220, depends_on:['sector_ols'], params_schema:{}},
-    {name:'backtest',          label:'バックテスト',        category:'④ 戦略を検証',       ui_order:410, depends_on:[],            params_schema:{}},
+    {name:'recommend',         label:'おすすめ銘柄',       category:'銘柄を探す',   ui_order:310, depends_on:[],            params_schema:{}},
+    {name:'net_cash_analysis', label:'ネットキャッシュ分析', category:'銘柄を探す',   ui_order:320, depends_on:[],            params_schema:{}},
+    {name:'gap_analysis',      label:'バリュエーション分析', category:'割安度を測る', ui_order:410, depends_on:['sector_ols'], params_schema:{}},
+    {name:'backtest',          label:'バックテスト',        category:'戦略を検証',   ui_order:620, depends_on:[],            params_schema:{}},
   ];
 }
 
@@ -2224,7 +2231,7 @@ function renderSectorOls(data) {
   return html + _renderGenericResult(data);
 }
 
-// マクロ×リスク-リターン専用レンダラ: CV指標 + バブルチャート + ランキング表
+// 線形回帰（M-1）専用レンダラ: CV指標 + バブルチャート + ランキング表
 // M-1 リスク-リターン可視化。サーバーは全社の raw 値（mu_raw/r1/r2/r3）を返し、
 // 効用 U・パレート・並べ替え・top_n は λ／リスク軸に依存する後処理として
 // クライアント側で算出する（軸切替・λ調整は再計算なしで即時反映）。
@@ -3051,7 +3058,7 @@ function _rrViewForParam(id) {
 document.addEventListener('input',  (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
 document.addEventListener('change', (e) => { const w = e.target && e.target.id && _rrViewForParam(e.target.id); if (w) _rrScheduleRepaint(w); });
 
-// ── M-2 マクロ×財務 勾配ブースティング レンダラ ─────────────────────────────
+// ── 勾配ブースティング（M-2）レンダラ ─────────────────────────────────────
 // λ の既定は 0（#1112 で 1.0 から変更・ADR-0069 の 2026-11-06）・横軸の既定は R2（#816 で R_macro から変更・ADR-0050 の 2026-10-06 追記）。
 // #814 で λ=0.1/0.3/1.0 × R2/R_macro と μ̂ だけの並びを旧既定（R_macro・λ=1.0）を分母に測り、
 // 旧既定は7条件で rank-IC が最も低く（−0.048）、R2 の λ=0.3/1.0 は旧既定より両指標で有意に良かった。
@@ -3183,7 +3190,7 @@ function _mgShapHTML(item) {
     ${_rrSignedBarsHTML(entries, v => `${v >= 0 ? '+' : ''}${v.toFixed(3)}`)}`;
 }
 
-// ── M-6 マクロ×財務 正則化線形（ElasticNet）レンダラ（#807）──────────────────
+// ── 正則化線形（M-6・ElasticNet）レンダラ（#807）─────────────────────────
 // 縦軸は相対 μ̂（今買える社の μ̂ 中央値との差・CONTEXT.md）。M-6 は順位だけが OOF で検証済みで、
 // μ̂ の水準は検証の外にある（今買える社の平均 −0.225・M-2 は +0.040）。λ の既定は 0
 // （表は μ̂ の順）。λ>0 の並びは #808 で λ=0.1/0.3/1.0 を測った（ADR-0050 の 2026-10-05 追記）:
@@ -3302,10 +3309,10 @@ function _enetBreakdownHTML(item, data) {
       : '<span style="color:var(--text-muted);font-size:11px">（寄与する列なし）</span>'}`;
 }
 
-// ── M-3 ベイズ状態空間（時変マクロβ DLM）専用レンダラ ───────────────────────
-// サーバーは µ̂ 上位 N 銘柄の最新 α/β・信用区間・α/β 経路・1期先診断を返す。
+// ── ベイズ状態空間（M-3・DLM）専用レンダラ ─────────────────────────────
+// サーバーは μ̂ 上位 N 銘柄の最新 α/β・信用区間・α/β 経路・1期先診断を返す。
 // 行クリックで銘柄を選択し、α または各 β の時系列（信用区間バンド）を Chart.js で描く。
-// λ スライダー操作で効用 U=µ̂−λR_macro・Pareto 判定をクライアント側で即時再計算。
+// λ スライダー操作で効用 U=μ̂−λR_macro・Pareto 判定をクライアント側で即時再計算。
 let _dlmData = null, _dlmChart = null, _dlmBubbleChart = null;
 let _dlmSel = null, _dlmSeries = 'alpha', _dlmPaintTimer = null;
 
@@ -3331,7 +3338,7 @@ function _dlmReadUtilityParams() {
   return { lambda, topN };
 }
 
-// U = µ̂ − λ × R_macro を全銘柄について計算し、Pareto 判定して U 降順に返す。
+// U = μ̂ − λ × R_macro を全銘柄について計算し、Pareto 判定して U 降順に返す。
 // _mrrParetoSet / _mrrAntiParetoSet は mu_raw を y 軸に使うため、mu_raw エイリアスを追加。
 function _dlmRecompute() {
   const { lambda, topN } = _dlmReadUtilityParams();
@@ -3348,7 +3355,7 @@ function _dlmRecompute() {
   return { lambda, topN, all: items, top: items.slice(0, topN) };
 }
 
-// µ̂ × R_macro バブルチャート（効率的フロンティア付き）。
+// μ̂ × R_macro バブルチャート（効率的フロンティア付き）。
 function _dlmPaintBubbleChart(v) {
   const canvas = document.getElementById('chart-dlm-bubble');
   if (!canvas || !window.Chart) return;
@@ -3398,7 +3405,7 @@ function _dlmPaintBubbleChart(v) {
           if (!p) return '';
           return [
             `${esc(p.company_name || p.edinet_code)} (${esc(p.sec_code || '')})`,
-            `µ̂=${(p.mu * 100).toFixed(1)}%  R_macro=${p.r_macro != null ? (p.r_macro * 100).toFixed(2) + '%' : '-'}  U=${p._u != null ? p._u.toFixed(3) : '-'}`,
+            `μ̂=${(p.mu * 100).toFixed(1)}%  R_macro=${p.r_macro != null ? (p.r_macro * 100).toFixed(2) + '%' : '-'}  U=${p._u != null ? p._u.toFixed(3) : '-'}`,
             ctx.raw._clip ? '▲ 軸範囲外（チャート端に境界表示）' : '',
             p._pareto ? '★ 効率的フロンティア（買い）' : p._anti_pareto ? '▼ 非効率的フロンティア（売り）' : '',
           ].filter(Boolean);
@@ -3406,7 +3413,7 @@ function _dlmPaintBubbleChart(v) {
       },
       scales: {
         x: { type: useLogX ? 'logarithmic' : 'linear', title: { display: true, text: 'R_macro マクロ起因リスク（年率化）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(xRange.min != null ? { min: xRange.min, max: xRange.max } : {}) },
-        y: { title: { display: true, text: 'µ̂ 期待リターン（年率化アルファ）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(yRange.min != null ? { min: yRange.min, max: yRange.max } : {}) },
+        y: { title: { display: true, text: 'μ̂ 期待リターン（年率化アルファ）', color: cssVar('--text-secondary'), font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: cssVar('--text-muted') }, ...(yRange.min != null ? { min: yRange.min, max: yRange.max } : {}) },
       }
     }
   });
@@ -3547,7 +3554,7 @@ function _dlmTableHTML(data, v) {
     </div>
     ${makeChartContainer('chart-dlm', 320)}
     <div style="overflow-x:auto"><table>
-      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" tabindex="0" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">µ̂(年率)</span></th><th>R_macro</th><th>U=µ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
+      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" tabindex="0" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">μ̂(年率)</span></th><th>R_macro</th><th>U=μ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>`;
 }

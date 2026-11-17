@@ -181,20 +181,20 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <a href="#screen-db">DB ビューア</a>
     <div class="toc-section-title">第3部 分析手法</div>
     <a href="#methods">この部の読み方</a>
-    <div class="toc-group">① 銘柄を探す</div>
+    <div class="toc-group">銘柄を探す</div>
     <a href="#recommend">おすすめ銘柄</a>
     <a href="#net_cash_analysis">ネットキャッシュ分析</a>
-    <div class="toc-group">② 割安度を測る</div>
+    <div class="toc-group">割安度を測る</div>
     <a href="#sector_ols">業種別OLS</a>
     <a href="#gap_analysis">バリュエーション分析</a>
-    <div class="toc-group">③ 将来リターンを予測</div>
-    <a href="#macro_risk_return">マクロ×リスク-リターン（M-1）</a>
+    <div class="toc-group">将来リターンを予測</div>
+    <a href="#macro_risk_return">線形回帰（M-1）</a>
     <a href="#macro_gbdt">勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（M-3）</a>
-    <a href="#macro_enet">正則化線形 ElasticNet（M-6）</a>
-    <div class="toc-group">④ 戦略を検証</div>
+    <a href="#macro_enet">正則化線形（M-6）</a>
+    <div class="toc-group">戦略を検証</div>
     <a href="#backtest">バックテスト</a>
-    <div class="toc-group">⑤ 保有を見直す</div>
+    <div class="toc-group">保有を見直す</div>
     <a href="#sell_ranking">売り候補ランキング</a>
     <div class="toc-group">共通の考え方・退役</div>
     <a href="#zscore">Zスコアって何？</a>
@@ -294,7 +294,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     </tbody>
   </table>
   <div class="info-box">それぞれの表の題の下に<strong>基準日</strong>が出ます。M-6 は毎晩、M-2 は平日の日中に更新されるので、日付がずれることがあります。M-6 の基準日が古いときは色が変わります。一番上の判定が見ているのは、下の「買い推奨ランキング」（財務指標の点数）の元データです。売買候補を使うときは、基準日も確かめてください。</div>
-  <p>さらに下の<strong>買い推奨ランキング</strong>は、財務指標の点数で並べた別の一覧です。期待リターンは点数に入っていません。表の列は次の意味です。左上の「プリセット」で、どの観点を重視して並べるかを切り替えられます（迷ったらバランス型）。</p>
+  <p>さらに下の<strong>おすすめ銘柄ランキング</strong>は、財務指標の点数で並べた別の一覧です。期待リターンは点数に入っていません。表の列は次の意味です。左上の「プリセット」で、どの観点を重視して並べるかを切り替えられます（迷ったらバランス型）。</p>
   <table>
     <thead><tr><th>列</th><th>意味</th></tr></thead>
     <tbody>
@@ -332,7 +332,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 <div class="model-section" id="screen-analysis">
   <h2>分析</h2>
   <h3>📊 何が分かる？</h3>
-  <p>このアプリの分析手法を、条件を変えながら自分で実行できる画面です。左のメニューは目的別に「① 銘柄を探す／② 割安度を測る／③ 将来リターンを予測／④ 戦略を検証／⑤ 保有を見直す」に分かれています。</p>
+  <p>このアプリの分析手法を、条件を変えながら自分で実行できる画面です。左のメニューは、よく使うものが上に来るように並んでいます。上から「将来リターンを予測」「保有を見直す」「銘柄を探す」「割安度を測る」「比較用のモデル」「戦略を検証」です。実際の売買（<a href="#screen-morning">朝の推奨</a>の買い候補と売り候補）に使うモデルには「本番」の札が付いていて、画面を開くと最初にその先頭のモデルが出ます。</p>
   <h3>👀 どこを見る？</h3>
   <ul>
     <li>各分析の見出しの右にある「❓ やさしい解説」を押すと、このページの<a href="#methods">第3部</a>の対応する節が開きます。</li>
@@ -376,7 +376,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
 <!-- ① おすすめ銘柄 ───────────────────────────── -->
 <div class="model-section" id="recommend">
-  <h2>おすすめ銘柄 <span class="model-tag">① 銘柄を探す</span></h2>
+  <h2>おすすめ銘柄 <span class="model-tag">銘柄を探す</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -398,12 +398,12 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">「バランス型」など4つのプリセットは<strong>あなたの好みの設定</strong>で、決め方に数学的な正解はありません。「統計的最適化」プリセットのみ、過去データから統計的に計算した重みを使います。いずれも「この設定が儲かる」とは限らないので、<a href="#backtest">バックテスト</a>で過去の成績を確かめるのがおすすめです。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：Zスコア重み付けスコアリング</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m6">モデル解説：おすすめ銘柄（Zスコア重み付け）</a></div>
 </div>
 
 <!-- ① ネットキャッシュ分析 ───────────────────── -->
 <div class="model-section" id="net_cash_analysis">
-  <h2>ネットキャッシュ分析 <span class="model-tag">① 銘柄を探す</span></h2>
+  <h2>ネットキャッシュ分析 <span class="model-tag">銘柄を探す</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -436,7 +436,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
 <!-- ② 業種別OLS ─────────────────────────── -->
 <div class="model-section" id="sector_ols">
-  <h2>業種別OLS <span class="model-tag">② 割安度を測る</span></h2>
+  <h2>業種別OLS <span class="model-tag">割安度を測る</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -457,12 +457,12 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="warn-box">仲間の会社が少なすぎる業種（既定では5社未満）は計算されません。また理論株価はあくまで「業種内の平均的な値ごろ」であり、<strong>正解の株価ではありません</strong>。</div>
   <div class="warn-box">使う財務項目が1つでも空欄の会社は計算対象から外れます。ただし「<strong>データが無い</strong>」と「<strong>そもそも存在しない</strong>」は別物です。銀行に「売上総利益」は存在しませんし、無配の会社は配当欄が空になります。これらは空欄でも計算から外さず、業種ごとに使う項目を変えたり、無配は配当0円として扱ったりしています。業種によって使った項目が違う場合は、業種別サマリー表の「業種内で除外した説明変数」に出ます。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説：業種別OLS回帰</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m2">モデル解説：業種別OLS</a></div>
 </div>
 
 <!-- ② バリュエーション分析 ──────────────────────── -->
 <div class="model-section" id="gap_analysis">
-  <h2>バリュエーション分析 <span class="model-tag">② 割安度を測る</span></h2>
+  <h2>バリュエーション分析 <span class="model-tag">割安度を測る</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -491,9 +491,9 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="more">→ もっと詳しく：<a href="/models#m3">モデル解説：バリュエーション分析</a></div>
 </div>
 
-<!-- ③ マクロ×リスク-リターン ─────────────────── -->
+<!-- 線形回帰（M-1） ─────────────────── -->
 <div class="model-section" id="macro_risk_return">
-  <h2>マクロ×リスク-リターン推奨（M-1） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>線形回帰（M-1） <span class="model-tag">将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -513,16 +513,16 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">最も高度な分析で、当てはまりの精度（<span class="term" tabindex="0" data-tip="交差検証（CV）：学習に使わなかったデータで成績を測る方法。R²：式が実際のばらつきをどれだけ説明できたかの割合（0〜1）。">CVのR²</span>）は高くありません。表示される要因の効き具合は「<strong>向き（株高/株安）と大小の目安</strong>」として読み、効果を過大に信じないでください。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：マクロ×リスク-リターン推奨</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
+  <div class="more">→ もっと詳しく：<a href="/models#m9">モデル解説：線形回帰（M-1）</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
-<!-- ③ マクロ×財務 勾配ブースティング（M-2）─────── -->
+<!-- 勾配ブースティング（M-2）─────── -->
 <div class="model-section" id="macro_gbdt">
-  <h2>マクロ×財務 勾配ブースティング（M-2） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>勾配ブースティング（M-2） <span class="model-tag">将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
-    マクロ×リスク-リターン（M-1）が「<strong>1本の直線の物差し</strong>」で測る兄なら、これは「<strong>経験から場合分けを自分で覚える弟</strong>」です。「金利が高いときだけ割安株が効く」のような<strong>条件つきのクセ</strong>（数字の組み合わせで効き方が変わる関係）を、<span class="term" tabindex="0" data-tip="弱い決定木を少しずつ継ぎ足して、前の木の間違いを次の木が補っていく学習法。複雑な関係を自動で捉えられる。">勾配ブースティング</span>という「たくさんの小さな木の合議」が、人が指定しなくても勝手に学びます。M-1 と<strong>同じデータ・同じ目標（約1年先のリターン）</strong>を使うので、<strong>どちらがよく当たるかを見比べられる</strong>のがいちばんの狙いです。
+    線形回帰（M-1）が「<strong>1本の直線の物差し</strong>」で測る兄なら、これは「<strong>経験から場合分けを自分で覚える弟</strong>」です。「金利が高いときだけ割安株が効く」のような<strong>条件つきのクセ</strong>（数字の組み合わせで効き方が変わる関係）を、<span class="term" tabindex="0" data-tip="弱い決定木を少しずつ継ぎ足して、前の木の間違いを次の木が補っていく学習法。複雑な関係を自動で捉えられる。">勾配ブースティング</span>という「たくさんの小さな木の合議」が、人が指定しなくても勝手に学びます。M-1 と<strong>同じデータ・同じ目標（約1年先のリターン）</strong>を使うので、<strong>どちらがよく当たるかを見比べられる</strong>のがいちばんの狙いです。
   </div>
 
   <h3>📊 何が分かる？</h3>
@@ -540,12 +540,12 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">株価データは「効くサインが弱くノイズが多い」ため、木のモデルは<strong>過去に当てはめすぎる（<a href="#term-overfit">過学習</a>）</strong>になりがちです。そのため既定では強めのブレーキ（正則化）をかけています。当てはまりの精度（R²）は高くないので、結果は<strong>順位の目安</strong>として読み、当たる確率とは思わないでください。M-1 のような「予測の確からしさの幅（信頼区間）」は持ちません。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：M-2 マクロ×財務 勾配ブースティング</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
+  <div class="more">→ もっと詳しく：<a href="/models#m11">モデル解説：勾配ブースティング（M-2）</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
-<!-- ③ ベイズ状態空間（時変マクロβ DLM）─────────── -->
+<!-- ベイズ状態空間（M-3）─────────── -->
 <div class="model-section" id="macro_dlm">
-  <h2>ベイズ状態空間（時変マクロβ・M-3） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>ベイズ状態空間（M-3） <span class="model-tag">将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -553,7 +553,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   </div>
 
   <h3>📊 何が分かる？</h3>
-  <p>期待リターン µ̂ の高い順に銘柄が並び、各銘柄の<strong>マクロ感応度（<span class="term" tabindex="0" data-tip="マクロ（為替・金利など）が動いたとき、その会社の株価がどれだけ反応するかの強さ。">β</span>）が時間とともにどう変化したか</strong>を、<span class="term" tabindex="0" data-tip="推定値がどれくらい確からしいかの幅。狭いほど自信がある推定。">信用区間</span>つきの折れ線グラフで確認できます。「円安に強くなってきた」「金利上昇に弱くなった」といった<strong>移り変わり</strong>が見えます。</p>
+  <p>期待リターン μ̂ の高い順に銘柄が並び、各銘柄の<strong>マクロ感応度（<span class="term" tabindex="0" data-tip="マクロ（為替・金利など）が動いたとき、その会社の株価がどれだけ反応するかの強さ。">β</span>）が時間とともにどう変化したか</strong>を、<span class="term" tabindex="0" data-tip="推定値がどれくらい確からしいかの幅。狭いほど自信がある推定。">信用区間</span>つきの折れ線グラフで確認できます。「円安に強くなってきた」「金利上昇に弱くなった」といった<strong>移り変わり</strong>が見えます。</p>
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
@@ -563,14 +563,14 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="info-box">δ（係数がどれだけ速く動くか）を 1 に近づけると変化はゆっくり、小さくすると敏感に動きます。下に出る「校正」「カバレッジ」は、予測の不確実さの見積もりが妥当かどうかの自己チェックです。</div>
 
   <h3>⚠ 注意点・落とし穴</h3>
-  <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。µ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いので、手元のパソコンで開いた画面で実行してください。</div>
+  <div class="warn-box">β は「マクロが動いたときの反応の強さ」であって、<strong>マクロ自体の先読みではありません</strong>（未来の為替や金利は分かりません）。μ̂ は「世の中で説明できない持ち味」を頼りにした推定値なので、参考程度に。週次で約2年以上の株価履歴がある銘柄だけが対象です。計算が重いので、手元のパソコンで開いた画面で実行してください。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m12">モデル解説：M-3 ベイズ状態空間モデル</a>（予備知識なしで読める副読本は<a href="#further">もっと詳しく</a>から）</div>
 </div>
 
-<!-- M-6 マクロ×財務 正則化線形（ElasticNet） ────── -->
+<!-- 正則化線形（M-6） ────── -->
 <div class="model-section" id="macro_enet">
-  <h2>正則化線形 ElasticNet（M-6） <span class="model-tag">③ 将来リターンを予測</span></h2>
+  <h2>正則化線形（M-6） <span class="model-tag">将来リターンを予測</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -582,7 +582,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
   <h3>🛠 どう使う？</h3>
   <ul class="steps">
-    <li>モデル比較ビューで、ほかの M 系モデルと並べて実績（順位の当たり具合＝<a href="#term-rank-ic">rank-IC</a>）を見比べます。</li>
+    <li>分析画面の「モデル比較」で、ほかの M 系モデルと並べて実績（順位の当たり具合＝<a href="#term-rank-ic">rank-IC</a>）を見比べます。</li>
     <li>一度実行しておくと、<a href="#sell_ranking">売り候補ランキング</a>が持ち株を並べられるようになります。売り専用の予測（下振れの見込み）も、このモデルの実行が一緒に作ります（夜間バッチでも毎晩更新されます）。</li>
   </ul>
   <div class="warn-box"><strong>「モメンタム特徴量を使用」は ON にしても成績は良くなりません（初期設定 OFF のままで大丈夫です）。</strong>実際に試したところ当たり具合は改善せず、<strong>このモデルの長所である「銘柄の入れ替わりの少なさ」（＝売買コストへの強さ）が損なわれました</strong>。ON にすると数字が良く見えることがありますが、それは株価の履歴が短い銘柄が計算対象から外れるためで、条件を揃えると差は消えます（<a href="#term-common-domain">共通域</a>）。</div>
@@ -590,12 +590,12 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <h3>⚠ 注意点・落とし穴</h3>
   <div class="warn-box">売り候補ランキングは <strong>M-6 の期待リターンだけ</strong>を使います。「売り候補として当たっていたか」だけを測る指標（市場平均より、いちばん期待リターンが低いグループがどれだけ下回ったか）で、M-6 がほかのモデルより良かったためです。ほかのモデルに切り替える選択肢はありません。</div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m16">モデル解説：M-6 マクロ×財務 正則化線形（ElasticNet）</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m16">モデル解説：正則化線形（M-6）</a></div>
 </div>
 
 <!-- ④ バックテスト ──────────────────────────── -->
 <div class="model-section" id="backtest">
-  <h2>バックテスト <span class="model-tag">④ 戦略を検証</span></h2>
+  <h2>バックテスト <span class="model-tag">戦略を検証</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -622,7 +622,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
 <!-- ⑤ 売り候補ランキング ───────────────────────── -->
 <div class="model-section" id="sell_ranking">
-  <h2>売り候補ランキング <span class="model-tag">⑤ 保有を見直す</span></h2>
+  <h2>売り候補ランキング <span class="model-tag">保有を見直す</span></h2>
 
   <h3>🟢 ひとことで言うと</h3>
   <div class="analogy">
@@ -686,7 +686,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
 
 <!-- M-4 兄弟μ̂スタッキング・アンサンブル ─────────── -->
 <div class="model-section" id="macro_ensemble">
-  <h2>兄弟モデルの合わせ技（M-4） <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+  <h2>スタッキング（M-4） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
 
   <div class="warn-box"><strong>退役しました</strong>：分析ページの一覧には出てきません。実際に混ぜて測ってみたところ、<strong>M-6（正則化した線形）1本と成績が変わらなかった</strong>ためです（統計的にも「違いがあるとは言えない」判定）。一方で計算は3モデル分かかります。「混ぜても単独最良を超えないなら単独で十分」というのは、このモデルを作るときにあらかじめ決めておいた判定基準で、それに素直に従った形です。</div>
 
@@ -701,9 +701,9 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="more">→ もっと詳しく：<a href="/models#m13">モデル解説：M-4 兄弟μ̂スタッキング・アンサンブル</a></div>
 </div>
 
-<!-- M-5 マクロ×財務 ランク学習 ─────────────────── -->
+<!-- ランク学習（M-5） ─────────────────── -->
 <div class="model-section" id="macro_gbdt_rank">
-  <h2>ランク学習版 勾配ブースティング（M-5） <span class="model-tag">③ 将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+  <h2>ランク学習（M-5） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
 
   <div class="warn-box"><strong>退役しました</strong>：分析ページの一覧には出てきません。同じデータ・同じ条件で測った結果、<strong>順位の当たり具合（<a href="#term-rank-ic">rank-IC</a>）が元の M-2 のおよそ半分</strong>にとどまったためです。とくに弱かったのは<strong>「下がりそうな銘柄を下位に置く」ほう</strong>でした。ねらい（「順位で使うなら順位で学習させたほうがいい」）自体は筋が通っていましたが、<strong>実データがそうならないと答えた</strong>ということです。ただし学習の打ち切り条件が M-2 と揃っていない実装上の差もあるため、「ランク学習という考え方がダメ」ではなく「この作りでは届かなかった」と理解してください。</div>
 
@@ -712,7 +712,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     M-2 は「リターンの<strong>値そのもの</strong>の当てっこ」として学習しますが、実際に使うときに大事なのは<strong>順位が合っているか</strong>です。この分析は M-2 と同じデータ・同じ条件を使いながら、学習の段階から<strong>順位を直接当てにいく</strong>ように作り替えた、いわば<strong>双子モデル</strong>です。
   </div>
 
-  <div class="more">→ もっと詳しく：<a href="/models#m14">モデル解説：M-5 マクロ×財務 ランク学習</a></div>
+  <div class="more">→ もっと詳しく：<a href="/models#m14">モデル解説：ランク学習（M-5）</a></div>
 </div>
 
 <!-- ═════════════ 第4部 用語集 ═════════════ -->
@@ -813,9 +813,9 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <thead><tr><th>読むもの</th><th>内容</th></tr></thead>
     <tbody>
       <tr><td><a href="/models">モデル解説（技術版）</a></td><td>各分析の数式・前提・パラメータ・参考論文。このアプリの中で読めます。</td></tr>
-      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M1_MACRO_MODEL_GUIDE.md" target="_blank" rel="noopener">M-1 の副読本</a></td><td>マクロ×リスク-リターン推奨（M-1）の考え方を、金融・統計の予備知識なしで読めるように書いた解説です。</td></tr>
-      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M2_MACRO_GBDT_GUIDE.md" target="_blank" rel="noopener">M-2 の副読本</a></td><td>マクロ×財務 勾配ブースティング（M-2）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
-      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M3_STATE_SPACE_GUIDE.md" target="_blank" rel="noopener">M-3 の副読本</a></td><td>ベイズ状態空間（時変マクロβ・M-3）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M1_MACRO_MODEL_GUIDE.md" target="_blank" rel="noopener">M-1 の副読本</a></td><td>線形回帰（M-1）の考え方を、金融・統計の予備知識なしで読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M2_MACRO_GBDT_GUIDE.md" target="_blank" rel="noopener">M-2 の副読本</a></td><td>勾配ブースティング（M-2）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
+      <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/M3_STATE_SPACE_GUIDE.md" target="_blank" rel="noopener">M-3 の副読本</a></td><td>ベイズ状態空間（M-3）の考え方を、統計・機械学習が初めての人にも読めるように書いた解説です。</td></tr>
       <tr><td><a href="https://github.com/kome-kome/financial_app/blob/main/docs/MODELS.md" target="_blank" rel="noopener">MODELS.md</a></td><td>分析モデルの説明の正本です。モデル解説（技術版）はこの文書を画面向けにしたものです。</td></tr>
       <tr><td><a href="https://github.com/kome-kome/financial_app#readme" target="_blank" rel="noopener">README</a></td><td>アプリの全体像と、目的別にどの文書を読めばよいかの案内です。</td></tr>
     </tbody>

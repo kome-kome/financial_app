@@ -60,7 +60,6 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .sidebar-item{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;font-size:13px;color:var(--text-secondary);background:none;border:none;border-radius:6px;cursor:pointer;text-decoration:none;transition:background .15s,color .15s}
 .sidebar-item:hover{background:var(--border-subtle);color:var(--text)}
 .sidebar-item.active{background:var(--accent-deep-bg);color:var(--accent-soft-text);font-weight:600}
-.sidebar-ext{font-size:11px;color:var(--text-muted);margin-left:4px}
 .layout .container{flex:1;min-width:0;max-width:none;margin:0}
 .container{padding:20px;max-width:1400px;margin:0 auto}
 .card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
@@ -169,7 +168,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .co-link{color:var(--accent-text);text-decoration:none}
 .co-link:hover{text-decoration:underline}
-/* モデル鮮度バー（② 割安度カテゴリ内に常設） */
+/* モデル鮮度バー（「割安度を測る」のタブ内に常設） */
 .freshness-bar{padding:8px 14px;background:var(--bg-sunken);border:1px solid var(--border-subtle);border-radius:6px;font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .freshness-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
 .freshness-fresh{background:var(--val-up-bg);color:var(--val-up-text)}
@@ -237,7 +236,6 @@ details.rerun[open]>summary{margin-bottom:8px}
     <span style="color:var(--text-muted)">株価データ:</span>
     <span id="status-price-text" style="color:var(--text-secondary)">確認中...</span>
   </div>
-  <a href="/collection" style="color:var(--accent-text);font-size:12px;text-decoration:none;margin-left:auto">← データ収集ページへ</a>
 </div>
 
 <div class="layout">
@@ -258,7 +256,7 @@ details.rerun[open]>summary{margin-bottom:8px}
   <!-- 利用可能状態: 業種別OLS 実行済み（DBに予測値あり）の時に表示 -->
   <div id="gap-ready" style="display:none">
   <div class="card">
-    <h2 class="section-title">バリュエーション分析（割安度・平均回帰・期待総リターン）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
+    <h2 class="section-title">バリュエーション分析（乖離率・平均回帰・期待総リターン）<a class="co-link" href="/guide#gap_analysis" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:12px">
       乖離率 = (予測時価総額 − 実際時価総額) / 実際時価総額 × 100<br>
       <span class="gap-positive">正値（緑）</span>: 予測 &gt; 実際 → モデル上は割安の可能性
@@ -336,7 +334,7 @@ details.rerun[open]>summary{margin-bottom:8px}
     <div class="info-box" style="margin-bottom:14px">
       プリセットを選ぶか、下のスライダーで各指標の重要度を自分でカスタマイズできます。
       <!-- 業種別OLS の結果が無いときだけ出す（夜間が毎晩作るので、常に出すと誤った案内になる・#1177） -->
-      <span id="rec-gap-hint" class="hidden"><br>★ 業種別OLS を先に実行すると「割安度」指標が使えるようになります。</span>
+      <span id="rec-gap-hint" class="hidden"><br>★ 業種別OLS を先に実行すると「乖離率」指標が使えるようになります。</span>
     </div>
     <div class="flex" style="margin-bottom:16px">
       <button class="btn btn-secondary" data-click="applyPreset" data-arg="バランス型">⚖ バランス型</button>
@@ -370,7 +368,7 @@ details.rerun[open]>summary{margin-bottom:8px}
           <tr>
             <th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
             <th>スコア</th><th>ROE%</th><th>営業利益率%</th>
-            <th>売上成長率%</th><th>割安度%</th><th>時価総額</th><th>株価日</th>
+            <th>売上成長率%</th><th>乖離率%</th><th>時価総額</th><th>株価日</th>
           </tr>
         </thead>
         <tbody id="rec-tbody"></tbody>
@@ -750,7 +748,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 <div id="tab-model_comparison" class="hidden">
   <div class="card">
     <div class="flex-between" style="margin-bottom:12px">
-      <h2 class="section-title" style="margin-bottom:0">モデル比較（OOF）— 将来リターン予測モデルの横並び</h2>
+      <h2 class="section-title" style="margin-bottom:0">モデル比較 — 将来リターン予測モデルの横並び</h2>
       <a class="co-link" href="/models#model-comparison" target="_blank" rel="noopener" style="font-size:12px;font-weight:400">❓ モデル解説</a>
     </div>
     <div class="info-box" style="margin-bottom:14px">
@@ -787,11 +785,11 @@ details.rerun[open]>summary{margin-bottom:8px}
   </div>
 </div>
 
-<!-- マクロ×リスク-リターン推奨（M-1） -->
+<!-- 線形回帰（M-1） -->
 <div id="tab-macro_risk_return" class="hidden">
   <div class="grid2">
     <div class="card">
-      <h2 class="section-title">マクロ×リスク-リターン設定<a class="co-link" href="/guide#macro_risk_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
+      <h2 class="section-title">線形回帰（M-1）の設定<a class="co-link" href="/guide#macro_risk_return" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
       <div class="info-box" style="margin-bottom:14px">
         財務指標 × マクロ要因の交差項 OLS（前進 BIC）で1年先リターンを推定し、<br>
         R2（実現ボラ）・R1（予測不確実性）・R3（セクター×サイズ別のモデル信頼性）を<br>
@@ -808,7 +806,7 @@ details.rerun[open]>summary{margin-bottom:8px}
           <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
           <polyline points="17 6 23 6 23 12"/>
         </svg>
-        リスク-リターン分析を実行
+        線形回帰（M-1）を実行
       </button>
       <!-- 実行中の進捗（#545）。静的タブは _createDynamicTab を通らないので DOM をここに置く。
            id 規約は動的タブと同一（dynprogress-{tabId}）＝ analysis.js の配線を共有する。 -->
@@ -876,7 +874,7 @@ details.rerun[open]>summary{margin-bottom:8px}
 
 <div id="tab-macro_gbdt" class="hidden">
   <div class="card">
-    <h2 class="section-title">M-2: マクロ×財務 勾配ブースティング設定<a class="co-link" href="/guide#macro_gbdt" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
+    <h2 class="section-title">勾配ブースティング（M-2）の設定<a class="co-link" href="/guide#macro_gbdt" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       財務指標 × マクロ要因を <b>勾配ブースティング木（XGBoost）</b>で学習し、1年先リターンの非線形推定を行います。<br>
       同一特徴量の OLS ベースラインと Walk-Forward CV で比較し、特徴量寄与は mean|SHAP|（大きさのみ）で提示します。<br>
@@ -892,7 +890,7 @@ details.rerun[open]>summary{margin-bottom:8px}
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
         <polyline points="17 6 23 6 23 12"/>
       </svg>
-      勾配ブースティング分析を実行
+      勾配ブースティング（M-2）を実行
     </button>
     <!-- 実行中の進捗（#545・静的タブ。id 規約は動的タブと同一） -->
     <div id="dynprogress-macro_gbdt" class="hidden progress-wrap">
@@ -913,11 +911,11 @@ details.rerun[open]>summary{margin-bottom:8px}
 
 <div id="tab-macro_dlm" class="hidden">
   <div class="card">
-    <h2 class="section-title">M-3: ベイズ状態空間（時変マクロβ DLM）設定<a class="co-link" href="/guide#macro_dlm" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
+    <h2 class="section-title">ベイズ状態空間（M-3）の設定<a class="co-link" href="/guide#macro_dlm" target="_blank" rel="noopener" style="float:right;font-size:12px;font-weight:400">❓ やさしい解説</a></h2>
     <div class="info-box" style="margin-bottom:14px">
       銘柄ごとに<b>週次リターン</b>を主要マクロの<b>週次変化</b>へ回帰し、係数（α/β）が時間変動する <b>動的線形モデル（DLM）</b> をカルマン型逐次ベイズ更新で推定します。<br>
-      最新の潜在アルファ α を期待リターン µ̂ とし、マクロ感応度 β の時系列と<b>信用区間</b>を可視化します（M-1/M-2 が静的係数なのに対し、係数の時間変化そのものを捉えます）。<br>
-      <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。µ̂ はモデルの推定値で、投資判断の参考値です。</span>
+      最新の潜在アルファ α を期待リターン μ̂ とし、マクロ感応度 β の時系列と<b>信用区間</b>を可視化します（M-1/M-2 が静的係数なのに対し、係数の時間変化そのものを捉えます）。<br>
+      <span style="color:var(--status-warn);font-size:11px">⚠ 計算が重いためローカル環境で実行してください（Render 環境では無効）。μ̂ はモデルの推定値で、投資判断の参考値です。</span>
     </div>
     <div id="params-form-macro_dlm"></div>
     <div id="tuned-badge-macro_dlm" style="margin:8px 0"></div>
@@ -928,7 +926,7 @@ details.rerun[open]>summary{margin-bottom:8px}
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
       </svg>
-      ベイズ状態空間分析を実行
+      ベイズ状態空間（M-3）を実行
     </button>
     <!-- 実行中の進捗（#545・静的タブ。id 規約は動的タブと同一） -->
     <div id="dynprogress-macro_dlm" class="hidden progress-wrap">
