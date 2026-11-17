@@ -45,7 +45,7 @@ def test_script_calls_the_portfolio_endpoints():
 
 
 def test_portfolio_loads_when_the_tab_opens():
-    show_tab = JS[JS.index("function showTab(t)"):JS.index("// ── 保存済みの結果")]
+    show_tab = JS[JS.index("function showTab("):JS.index("// ── 保存済みの結果")]
     assert "loadPortfolioOnce()" in show_tab
 
 
