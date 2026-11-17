@@ -222,6 +222,28 @@ class TestScreenWiring:
         assert "_oofTopKHTML({top_k: g.top_k, top_decile_rank_ic: g.top_decile_rank_ic}" in helper
         assert "innerHTML" not in helper   # 文字列は esc() を通して組み立てる（呼び出し側が入れる）
 
+    def test_m3_saved_table_has_its_own_heading_and_scale_note(self, js):
+        """M-3 の保存済みの μ̂ は α×52 で尺度が違う。見出しを別にし、表の上に注記を出す（#1262）。"""
+        consts = js[js.index("const MU_HEAD = {"):js.index("// プラグインシステム")]
+        assert "label: 'μ̂（1年先）'" in consts
+        assert "label: '年率化アルファ（α×52）'" in consts
+        assert "const MU_HEAD_BY_PLUGIN = {macro_dlm: MU_HEAD.dlm};" in consts
+        body = js[js.index("function _savedHTML("):js.index("async function _loadSaved(")]
+        assert "const head = muHead(d.name);" in body
+        assert "head === MU_HEAD.dlm" in body and "+ scaleNote" in body
+        assert "${muHeadCell(head," in body
+        assert "μ̂（1年先）</th>" not in body   # 見出しを書き込まず定数から引く
+
+    def test_result_tables_read_the_same_heading(self, js):
+        """実行後の表の期待リターンの列名を MU_HEAD にそろえる（μ_raw / μ / μ̂(年率) の揺れを戻さない・#1262）。"""
+        code = "\n".join(line for line in js.splitlines() if not line.lstrip().startswith("//"))
+        for old in ("μ_raw", ">μ</span>", "μ̂(年率)", "μ_shrunk"):
+            assert old not in code, old
+        assert code.count("muHeadCell(MU_HEAD.forecast,") == 3   # M-1・M-2・M-6
+        assert code.count("muHeadCell(MU_HEAD.dlm,") == 1        # M-3
+        with open(os.path.join(ROOT, "templates", "analysis.html"), encoding="utf-8") as f:
+            assert "μ_raw" not in f.read()
+
     def test_css_exists(self):
         with open(os.path.join(ROOT, "templates", "analysis.html"), encoding="utf-8") as f:
             html = f.read()
