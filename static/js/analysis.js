@@ -1232,7 +1232,7 @@ function _mcProductionHTML(m) {
   const stale = (m.stale_params || []).length
     ? `<div style="font-size:11px;color:var(--text-muted)">探索空間から外れて既定へ戻した設定: ${esc(m.stale_params.join(', '))}</div>`
     : '';
-  return `<div style="margin-bottom:8px;padding:6px 8px;border:1px dashed var(--status-warn-text);border-radius:6px" title="本番は探索で選んだ設定で動いている。その設定は採点と同じ期で選ばれているので、成績は実力より良く出る（選択の楽観）。昇格・退役・▲▼の判定はスキーマ既定の行で行う（ADR-0070）。">
+  return `<div style="margin-bottom:8px;padding:6px 8px;border:1px dashed var(--status-warn-text);border-radius:6px" title="本番は探索で選んだ設定で動いている。その設定は採点と同じ期で選ばれているので、成績は実力より良く出る（選択の楽観）。昇格・退役・▲▼の判定はスキーマ既定の行で行う。">
     <div style="font-size:11px;font-weight:700;color:var(--status-warn-text)">本番の設定（${esc(when)} の探索）・選択の楽観を含む</div>
     <div style="font-size:11px;color:var(--text-muted)">採点と同じ期で選んだ設定なので実力より良く出る。判定（▲▼）には入れない</div>
     ${panel}${stale}
@@ -1269,7 +1269,7 @@ function _mcModelCard(m) {
   const monoSig = monoP != null && monoP < 0.05;
   const metrics = `
     <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px">
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="生rank-IC＝業種ベット（例:素材>ハイテクをWTIで一括に並べる）を含む。業種中立rank-ICは各期・業種内で順位デミーンしてからSpearman＝業種内の真の銘柄選択力（Issue #368）。">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="生rank-IC＝業種ベット（例:素材>ハイテクをWTIで一括に並べる）を含む。業種中立rank-ICは各期・業種内で順位デミーンしてからSpearman＝業種内の真の銘柄選択力。">
         <div style="font-size:11px;color:var(--text-muted)">rank-IC（生 ／ 業種中立）</div>
         <div style="font-size:15px;font-weight:700;color:${(ic.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ic.mean!=null?ic.mean.toFixed(3):'-'}<span style="font-size:11px;color:var(--text-muted)"> ±${ic.std!=null?ic.std.toFixed(3):'-'}</span> <span style="font-size:12px;color:${(inIc.mean||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">／ ${inIc.mean!=null?inIc.mean.toFixed(3):'-'}</span></div>
         <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold${inIc.mean!=null?` ／ 中立 ${inIc.n||0}期`:''}</div>
@@ -1278,11 +1278,11 @@ function _mcModelCard(m) {
         <div style="font-size:11px;color:var(--text-muted)">ロングショート spread（top−bottom）</div>
         <div style="font-size:15px;font-weight:700;color:${(oof.long_short_spread||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${oof.long_short_spread!=null?(oof.long_short_spread*100).toFixed(2)+'%':'-'}</div>
       </div>
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)は予測の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない(Issue #402)。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="売り側spread＝期内全体平均−最低μ̂分位平均。売り候補ランキング(sell_ranking)は予測の下位を売るため、top側の強さに引っ張られるロングショートspreadでは売り判定の質を測れない。大きいほど売り候補が市場平均を下回った＝売りシグナルとして有効。勝率はそれが成立した期の割合。">
         <div style="font-size:11px;color:var(--text-muted)">売り側 spread（全体平均−最低分位）</div>
         <div style="font-size:15px;font-weight:700;color:${(ss||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${ss!=null?(ss*100).toFixed(2)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 勝率 ${ssHit!=null?(ssHit*100).toFixed(0)+'%':'-'}</span></div>
       </div>
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="実効ターンオーバー＝隣接期の上位/下位分位メンバー(銘柄)の入替割合(0=据置,1=総入替)。ブレークイーブンbps＝片道コスト何bpでロングショートspreadが消えるか(gross·50/turnover)。頻度依存が比で相殺され、低回転な安定モデルほど高い＝コスト耐性が強い(Issue #368・Grinold & Kahn)。">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="実効ターンオーバー＝隣接期の上位/下位分位メンバー(銘柄)の入替割合(0=据置,1=総入替)。ブレークイーブンbps＝片道コスト何bpでロングショートspreadが消えるか(gross·50/turnover)。頻度依存が比で相殺され、低回転な安定モデルほど高い＝コスト耐性が強い(Grinold & Kahn)。">
         <div style="font-size:11px;color:var(--text-muted)">ブレークイーブンbps ／ 実効ターンオーバー</div>
         <div style="font-size:15px;font-weight:700;color:${be!=null?cssVar('--val-up-text'):'var(--text-muted)'}">${be!=null?be.toFixed(0)+'bp':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 回転 ${to!=null?(to*100).toFixed(0)+'%':'-'}</span></div>
       </div>
@@ -1295,7 +1295,7 @@ function _mcModelCard(m) {
         <div style="font-size:15px;font-weight:700;color:${(monoSp||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${monoSp!=null?monoSp.toFixed(2):'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ 隣接 ${monoRate!=null?(monoRate*100).toFixed(0)+'%':'-'}</span></div>
         <div style="font-size:11px;color:${monoSig?cssVar('--val-up-text'):'var(--text-muted)'}">p=${monoP!=null?monoP.toFixed(3):'-'}${monoSig?' ✓有意':''}</div>
       </div>
-      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="コンフォーマル予測区間の被覆率（Issue #365）。無リークwalk-forward: 各期をそれより過去の残差で較正した区間の実測被覆率。名目τ(既定90%)に近いほど区間較正が良い。追加学習ゼロ。">
+      <div style="padding:6px 8px;background:var(--bg-panel,var(--bg-sunken));border-radius:6px" title="コンフォーマル予測区間の被覆率。無リークwalk-forward: 各期をそれより過去の残差で較正した区間の実測被覆率。名目τ(既定90%)に近いほど区間較正が良い。追加学習ゼロ。">
         <div style="font-size:11px;color:var(--text-muted)">区間被覆率（実測 ／ 名目τ）</div>
         <div style="font-size:15px;font-weight:700;color:${(() => { const c=oof.interval_coverage, t=oof.interval_tau; if(c==null||t==null) return 'var(--text-muted)'; return Math.abs(c-t)<=0.05?cssVar('--val-up-text'):cssVar('--val-down-text'); })()}">${oof.interval_coverage!=null?(oof.interval_coverage*100).toFixed(0)+'%':'-'}<span style="font-size:11px;color:var(--text-muted)"> ／ ${oof.interval_tau!=null?(oof.interval_tau*100).toFixed(0)+'%':'-'}</span></div>
         <div style="font-size:11px;color:var(--text-muted)">${oof.n_interval_calib||0} 標本較正</div>
@@ -1349,7 +1349,7 @@ function _oofTopKHTML(oof, title) {
       <td style="padding:2px 6px;text-align:right;color:var(--text-muted)">${r.n_periods}期</td></tr>`;
   }).join('');
   const dic = (oof || {}).top_decile_rank_ic || {};
-  return `<div style="margin-top:10px" title="上位K社超過リターン＝上位K社の実現リターン平均 − 期内全社平均。実現順位＝上位K社が全社の中で何%の位置に着地したかの平均（50% がでたらめ・外れ値に引っ張られない）。precision@K＝そのうち期内平均を上回った社の割合。lift＝precision ÷ 全社で平均を上回った社の割合（1倍がでたらめ）。NDCG@K＝上位ほど重く採点し理想の並びで割った値（1 が満点）。判定には使わない（ADR-0069）。">
+  return `<div style="margin-top:10px" title="上位K社超過リターン＝上位K社の実現リターン平均 − 期内全社平均。実現順位＝上位K社が全社の中で何%の位置に着地したかの平均（50% がでたらめ・外れ値に引っ張られない）。precision@K＝そのうち期内平均を上回った社の割合。lift＝precision ÷ 全社で平均を上回った社の割合（1倍がでたらめ）。NDCG@K＝上位ほど重く採点し理想の並びで割った値（1 が満点）。判定には使わない。">
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${esc(title)}（参考・判定には使わない）</div>
     <div style="overflow-x:auto">
     <table style="width:100%;font-size:11px;border-collapse:collapse">
@@ -1380,7 +1380,7 @@ function _mcDisplayOrderingHTML(d) {
   const upper = o.time_reproducible === false
     ? '<div style="font-size:11px;color:var(--status-warn-text)">未来情報込みの上限（R_macro は最新の β を過去の全ての月に当てている）</div>'
     : '';
-  return `<div style="margin-top:10px;padding:6px 8px;border:1px dashed var(--border-muted);border-radius:6px" title="画面が既定で出す並び（U = μ̂ − λR・R は画面と同じ生の値）で同じ OOF を採点し直した値。利用者が上から買う並びの成績で、判定には使わない（ADR-0069）。">
+  return `<div style="margin-top:10px;padding:6px 8px;border:1px dashed var(--border-muted);border-radius:6px" title="画面が既定で出す並び（U = μ̂ − λR・R は画面と同じ生の値）で同じ OOF を採点し直した値。利用者が上から買う並びの成績で、判定には使わない。">
     <div style="font-size:11px;color:var(--text-muted)">画面の並びの採点（参考・U = μ̂ − ${Number.isFinite(lam) ? lam.toFixed(1) : '-'}×${axis}）</div>
     <div style="font-size:13px;font-weight:700">rank-IC ${ic.mean!=null?ic.mean.toFixed(3):'-'} ／ 売り側 spread ${ss!=null?(ss*100).toFixed(2)+'%':'-'}</div>
     <div style="font-size:11px;color:var(--text-muted)">${ic.n||0} fold ／ R が取れず除外 ${o.n_dropped_rows||0} 行</div>
@@ -1457,7 +1457,7 @@ function _renderModelComparison(data) {
   document.getElementById('mc-grid').innerHTML = models.map(_mcModelCard).join('');
   // 本番の設定の行は ▲▼ の組に入っていない（#1115）。表だけ見て「本番の M-2 の判定」と読まれないよう添える
   const prod = models.some(m => m.variant === 'production' && m.available)
-    ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">本番の設定の行（選択の楽観を含む）はこの表に入れていない。判定はスキーマ既定の行どうしで行う（ADR-0070）。</div>'
+    ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">本番の設定の行（選択の楽観を含む）はこの表に入れていない。判定はスキーマ既定の行どうしで行う。</div>'
     : '';
   document.getElementById('mc-matrix').innerHTML = _mcMatrixHTML(data.significance_matrix) + prod;
 }
@@ -2764,12 +2764,12 @@ function _mrrLambdaNoteHTML(v) {
   if (!(v.lambda > 0)) return '';
   const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
   if (v.axis === 'r_macro') {
-    return `<div style="${warn}">R_macro で並べると、λ=1.0 では順位とその後のリターンの相関（rank-IC）がほぼ 0（+0.015）まで落ち、R2 の並び（既定）より rank-IC・売り側の成績とも有意に劣りました（#815）。過去の月にも 2026年に推定した β を当てた、未来情報を含む上限での結果です。</div>`;
+    return `<div style="${warn}">R_macro で並べると、λ=1.0 では順位とその後のリターンの相関（rank-IC）がほぼ 0（+0.015）まで落ち、R2 の並び（既定）より rank-IC・売り側の成績とも有意に劣りました。過去の月にも 2026年に推定した β を当てた、未来情報を含む上限での結果です。</div>`;
   }
   if (v.lambda !== _MRR_RISK_MEASURED_LAMBDA) {
-    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ=${_MRR_RISK_MEASURED_LAMBDA.toFixed(1)} だけ・#815・#1040）。既定は λ=0（μ の順）です。</div>`;
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ=${_MRR_RISK_MEASURED_LAMBDA.toFixed(1)} だけ）。既定は λ=0（μ の順）です。</div>`;
   }
-  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが（#815）、上位10社の超過リターンは μ の順より有意に悪くなりました（−21.6%・#1040）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
+  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが、上位10社の超過リターンは μ の順より有意に悪くなりました（−21.6%）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
 }
 
 function _mrrTableHTML(v) {
@@ -3103,12 +3103,12 @@ function _mgLambdaNoteHTML(v) {
   if (!(v.lambda > 0)) return '';
   const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
   if (v.lambda > _MG_RISK_MEASURED_MAX) {
-    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ≤${_MG_RISK_MEASURED_MAX.toFixed(1)}・#814）。</div>`;
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ − λR の順）は成績を測っていません（測ったのは λ≤${_MG_RISK_MEASURED_MAX.toFixed(1)}）。</div>`;
   }
   if (v.axis === 'r_macro') {
-    return `<div style="${warn}">R_macro で並べると、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど成績が下がり、λ=1.0 では順位とその後のリターンの相関（rank-IC）が負で、μ だけの並びより売り側の成績が有意に劣りました。このため既定の横軸は R2 にしています（#814・#816）。</div>`;
+    return `<div style="${warn}">R_macro で並べると、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど成績が下がり、λ=1.0 では順位とその後のリターンの相関（rank-IC）が負で、μ だけの並びより売り側の成績が有意に劣りました。このため既定の横軸は R2 にしています。</div>`;
   }
-  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが（#814・#816）、本番の設定の上位10社の超過リターンは μ の順より有意に悪くなりました（−20.9%・#1112）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
+  return `<div style="${warn}">R2・λ=1.0 の並びは、全体の順位では μ だけの並び（λ=0・既定）と有意な差がありませんでしたが、本番の設定の上位10社の超過リターンは μ の順より有意に悪くなりました（−20.9%）。リスクを引くぶん上位は低ボラ寄りになります。</div>`;
 }
 
 const _mgView = _riskReturnView({
@@ -3235,12 +3235,12 @@ function _enetLambdaNoteHTML(v) {
   const warn = 'margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)';
   const back = 'λ=0 なら μ̂ の順（OOF で検証済み）です。';
   if (v.lambda > _ENET_RISK_MEASURED_MAX) {
-    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ̂ − λR の順）は成績を測っていません（#808 で測ったのは λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）。${back}</div>`;
+    return `<div style="${warn}">λ=${v.lambda} の並び（U = μ̂ − λR の順）は成績を測っていません（測ったのは λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）。${back}</div>`;
   }
   if (v.axis === 'r_macro') {
-    return `<div style="${warn}">R_macro で λ>0 の並びは、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど μ̂ だけの並びより成績が悪く、λ=1.0 では売り側の成績が有意に劣後しました（#808）。${back}</div>`;
+    return `<div style="${warn}">R_macro で λ>0 の並びは、測った範囲（λ=0.1 / 0.3 / 1.0）では λ を上げるほど μ̂ だけの並びより成績が悪く、λ=1.0 では売り側の成績が有意に劣後しました。${back}</div>`;
   }
-  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で λ>0 の並びは、測った範囲（λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）で μ̂ だけの並びと有意な差がありませんでした（劣後も優位も検出されず・#808）。</div>`;
+  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">R2 で λ>0 の並びは、測った範囲（λ≤${_ENET_RISK_MEASURED_MAX.toFixed(1)}）で μ̂ だけの並びと有意な差がありませんでした（劣後も優位も検出されず）。</div>`;
 }
 
 const _enetView = _riskReturnView({

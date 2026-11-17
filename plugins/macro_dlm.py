@@ -406,7 +406,7 @@ class MacroDlmPlugin(AnalysisPlugin):
                                "（週次実現ボラ・出来高z-score・52週高値乖離・4週リバーサル）。"
                                "マクロ・ファクター（同時点変化＝エクスポージャー）とは別軸。"
                                "既定は全選択（本番データのOOF比較で rank_ic/long_short_spread/"
-                               "hit_rate 全て改善を確認済み・Issue #317）。px_high52dev の"
+                               "hit_rate 全て改善を確認済み）。px_high52dev の"  # #317
                                "52週warmupにより対象企業数はわずかに減る。",
             },
             "state_discount": {

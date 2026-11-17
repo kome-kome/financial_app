@@ -198,6 +198,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <a href="#macro_enet">正則化線形（M-6）</a>
     <div class="toc-group">戦略を検証</div>
     <a href="#backtest">バックテスト</a>
+    <a href="#model_comparison">モデル比較</a>
     <div class="toc-group">保有を見直す</div>
     <a href="#sell_ranking">売り候補ランキング</a>
     <div class="toc-group">共通の考え方・退役</div>
@@ -622,6 +623,31 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="warn-box">過去がよくても未来を保証しません。基準日より後に上場をやめた会社も含めて測りますが、<strong>データベースに入っていない会社</strong>は対象にならないため（＝<span class="term" tabindex="0" data-tip="生き残った会社だけを見て『成績が良い』と錯覚すること。失敗して消えた会社が集計から抜け落ちるために起きる。">生存バイアス</span>が少し残る）、結果は実際より良く見えることがあります。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m7">モデル解説：バックテスト</a></div>
+</div>
+
+<!-- モデル比較 ───────────────────────── -->
+<div class="model-section" id="model_comparison">
+  <h2>モデル比較 <span class="model-tag">戦略を検証</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    将来リターンを予測するモデル（M-1・M-2・M-3・M-6 など）の<strong>どれの予想がよく当たっていたか</strong>を、同じ物差しで並べる<strong>成績表</strong>です。天気予報の会社を、過去の予報と実際の天気の答え合わせで比べるのに似ています。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>各モデルが「上がりそう」と順位を付けた会社が、実際にその順に上がったか（順位がどれだけ合ったか）を、モデルごとに並べて見られます。採点に使うのは、<strong>そのモデルが学習に使っていない期間だけ</strong>です。覚えた答えで採点すると、どのモデルも実力より良く見えてしまうからです。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>「全モデルを実行して比較」を押します。全部のモデルを最初から計算し直すので時間がかかり、このパソコンの上でだけ動きます。</li>
+    <li>結果のカードで、順位の当たり具合が高いモデルほど予想が当たっていたことを示します。差が小さいときは「たまたま」の範囲かもしれません。</li>
+  </ul>
+  <div class="info-box"><strong>バックテストとの違い:</strong> バックテストは「その作戦で上位の会社を買っていたら儲かったか」を見ます。モデル比較は「モデルの予想の順位が当たっていたか」を、モデルどうしで比べます。</div>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box">ここで成績が良くても、これからも当たるとは限りません。退役したモデルも、比べる基準として表に残っています。</div>
+
+  <div class="more">→ もっと詳しく：<a href="/models#model-comparison">モデル解説：モデル比較の統計的な扱い</a></div>
 </div>
 
 <!-- ⑤ 売り候補ランキング ───────────────────────── -->

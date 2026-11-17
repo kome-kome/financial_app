@@ -205,7 +205,7 @@ function _errDetail(e) {
     el.textContent = `⛁ ${info.db_label} — 2026-08-07 の断面`;
     el.title = '正本のローカル DB ではなく Supabase を参照しています。'
              + 'Supabase は 2026-08-07 で更新を止めた閲覧用の断面で、'
-             + 'それ以降の収集結果と夜間バッチのスコアは含まれません（#503・ADR-0038）。';
+             + 'それ以降の収集結果と夜間バッチのスコアは含まれません。';   // #503・ADR-0038
     Object.assign(el.style, {
       position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
       padding: '6px 12px', borderRadius: '999px',
