@@ -254,7 +254,7 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 
 ## `scripts/model_comparison_run.py`
 
-**モデル比較（OOF）の CLI 入口**（`python -m scripts.model_comparison_run`）。UI の「モデル比較（OOF）」と同一手続きで `model_comparison.run_comparison()` を呼ぶだけで、測る手続きを持たない（再実装すると本番と別物を測る・ADR-0041 と同型）。`--models` で部分集合、`--json` で保存。`tuning_objective_only()` と `tuning_dry_run()` の中で回すので本番の `macro_*_scores` を上書きしない
+**モデル比較（OOF）の CLI 入口**（`python -m scripts.model_comparison_run`）。UI の「モデル比較」と同一手続きで `model_comparison.run_comparison()` を呼ぶだけで、測る手続きを持たない（再実装すると本番と別物を測る・ADR-0041 と同型）。`--models` で部分集合、`--json` で保存。`tuning_objective_only()` と `tuning_dry_run()` の中で回すので本番の `macro_*_scores` を上書きしない
 
 種別: 検証 ／ 依存先: model_comparison, model_stats
 

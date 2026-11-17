@@ -224,12 +224,12 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
   </details>
 
   <!-- 今日の売買候補（#1228）。実際の売買は M-6・M-2 の上位を買い、保有の下位を売る（ADR-0070）。
-       下の買い推奨ランキング（財務指標の点数）へ μ̂ を混ぜるのではなく、並べて見せるだけ -->
+       下のおすすめ銘柄ランキング（財務指標の点数）へ μ̂ を混ぜるのではなく、並べて見せるだけ -->
   <div class="section-title">今日の売買候補</div>
   <p class="cand-lead">
     実際の売買に使う一覧です。買いは M-6 と M-2 の<strong>期待リターン（今後 52 週の見込み）の上位 10 社</strong>、
     売りは売買の記録にある保有を、売り専用の予測（下振れの見込み＝今後 52 週のリターンの下側 20% 点）の低い順に並べた<strong>下から 1/5</strong> です。
-    下の買い推奨ランキング（財務指標の点数）とは別の並びで、点数には混ぜていません。
+    下のおすすめ銘柄ランキング（財務指標の点数）とは別の並びで、点数には混ぜていません。
   </p>
   <div class="cand-grid" id="cand-grid">
     <section class="cand-card" aria-labelledby="cand-enet-title">
@@ -259,7 +259,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
     </section>
   </div>
 
-  <div class="section-title">買い推奨ランキング</div>
+  <div class="section-title">おすすめ銘柄ランキング</div>
   <div class="controls">
     <label class="muted" for="mor-preset">プリセット</label>
     <select id="mor-preset" data-change="reload">

@@ -83,7 +83,7 @@ def _pareto_frontier(
 
 class MacroRiskReturnPlugin(AnalysisPlugin):
     name = "macro_risk_return"
-    label = "M-1: マクロ×リスク-リターン推奨"
+    label = "線形回帰（M-1）"
     description = (
         "財務比率を LassoLarsIC(BIC) で選択し、"
         "各銘柄を期待リターン（縦軸）×リスク（横軸）の散布図に配置して推奨集合を選びます。"
@@ -94,8 +94,8 @@ class MacroRiskReturnPlugin(AnalysisPlugin):
     depends_on: list[str] = []
     heavy: bool = True
     writes = ()   # 推論結果は画面に返すだけで保存しない
-    category = "③ 将来リターンを予測"
-    ui_order = 330
+    category = "比較用のモデル"
+    ui_order = 510
 
     def params_schema(self) -> dict:
         return {

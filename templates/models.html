@@ -144,22 +144,22 @@ td code{background:var(--bg-sunken);border:1px solid var(--border-subtle);paddin
     <div class="toc-section-title">基礎</div>
     <a href="#common">共通事項（外れ値・次元整合・OLS）</a>
     <a href="#layers">分析の3層モデル</a>
-    <div class="toc-section-title">① 銘柄を探す（一次分析）</div>
-    <a href="#m6">Zスコア重み付けスコアリング（おすすめ）</a>
+    <div class="toc-section-title">銘柄を探す（一次分析）</div>
+    <a href="#m6">おすすめ銘柄（Zスコア重み付け）</a>
     <a href="#m8">ネットキャッシュ分析（清原達郎式）</a>
-    <div class="toc-section-title">② 割安度を測る（一次分析）</div>
-    <a href="#m2">業種別OLS回帰</a>
+    <div class="toc-section-title">割安度を測る（一次分析）</div>
+    <a href="#m2">業種別OLS</a>
     <a href="#m3">バリュエーション分析</a>
-    <div class="toc-section-title">③ 将来リターンを予測（一次分析）</div>
-    <a href="#m9">マクロ×リスク-リターン推奨</a>
-    <a href="#m11">M-2: マクロ×財務 勾配ブースティング</a>
-    <a href="#m12">M-3: ベイズ状態空間（時変マクロβ）</a>
-    <a href="#m13">M-4: 兄弟μ̂スタッキング（退役）</a>
-    <a href="#m14">M-5: マクロ×財務 ランク学習（退役）</a>
-    <a href="#m16">M-6: マクロ×財務 正則化線形（ElasticNet）</a>
-    <div class="toc-section-title">④ 戦略を検証（メタ検証）</div>
+    <div class="toc-section-title">将来リターンを予測（一次分析）</div>
+    <a href="#m9">線形回帰（M-1）</a>
+    <a href="#m11">勾配ブースティング（M-2）</a>
+    <a href="#m12">ベイズ状態空間（M-3）</a>
+    <a href="#m13">スタッキング（M-4・退役）</a>
+    <a href="#m14">ランク学習（M-5・退役）</a>
+    <a href="#m16">正則化線形（M-6）</a>
+    <div class="toc-section-title">戦略を検証（メタ検証）</div>
     <a href="#m7">バックテスト</a>
-    <div class="toc-section-title">⑤ 保有を見直す（双対分析）</div>
+    <div class="toc-section-title">保有を見直す（双対分析）</div>
     <a href="#m10">売り候補ランキング</a>
     <div class="toc-section-title">共通の計算手法</div>
     <a href="#m5">横断的Zスコア正規化</a>
@@ -225,22 +225,22 @@ HC3 SE:          不均一分散に対応したロバスト標準誤差</div>
   <div class="table-scroll"><table>
     <thead><tr><th>層</th><th>入力 → 出力</th><th>該当カテゴリ</th></tr></thead>
     <tbody>
-      <tr><td><strong>一次分析</strong></td><td>個別銘柄 → 銘柄ごとのシグナル（スコア／割安度／リターン予測）。利用者が直接アクションする。</td><td>① 銘柄を探す ／ ② 割安度を測る ／ ③ 将来リターンを予測</td></tr>
-      <tr><td><strong>双対分析</strong></td><td>一次分析を逆観点で<strong>保有銘柄</strong>へ向け直す → 売り判断。対象ユニバースと意思決定が反転する。</td><td>⑤ 保有を見直す</td></tr>
-      <tr><td><strong>メタ検証</strong></td><td>一次分析そのもの → 実績有効性の品質指標（銘柄選択ではない）。</td><td>④ 戦略を検証（＋各モデル内蔵の WF-CV）</td></tr>
+      <tr><td><strong>一次分析</strong></td><td>個別銘柄 → 銘柄ごとのシグナル（スコア／割安度／リターン予測）。利用者が直接アクションする。</td><td>銘柄を探す ／ 割安度を測る ／ 将来リターンを予測</td></tr>
+      <tr><td><strong>双対分析</strong></td><td>一次分析を逆観点で<strong>保有銘柄</strong>へ向け直す → 売り判断。対象ユニバースと意思決定が反転する。</td><td>保有を見直す</td></tr>
+      <tr><td><strong>メタ検証</strong></td><td>一次分析そのもの → 実績有効性の品質指標（銘柄選択ではない）。</td><td>戦略を検証（＋各モデル内蔵の WF-CV）</td></tr>
     </tbody>
   </table></div>
   <div class="info-box"><strong>バリュエーション集約（ADR-0001）:</strong> 旧「総合リターン予測」の独自プールOLSは「業種別OLS」と二重化していたため廃止し、OLSエンジンを業種別OLS1本へ集約。期待総リターン（乖離＋配当利回り）ランキングは「バリュエーション分析」へ吸収した。</div>
 </div>
 
 <div class="cat-header">
-  <span class="cat-name">① 銘柄を探す</span>
+  <span class="cat-name">銘柄を探す</span>
   <span class="layer-tag">一次分析・スクリーニング</span>
 </div>
 <p class="cat-desc">個別銘柄から買い候補のシグナル（複合スコア・割安比率）を出す。</p>
 
 <div class="model-section" id="m6">
-  <h2>Zスコア重み付けスコアリング <span class="model-tag">おすすめ銘柄</span></h2>
+  <h2>おすすめ銘柄（Zスコア重み付け）</h2>
   <span class="file-tag">plugins/recommend.py</span>
 
   <p>各指標の Zスコアを重み付け線形結合してスコアを計算し、企業をランキングする。</p>
@@ -420,13 +420,13 @@ VIEW の BS 3 列と market_cap → compute_net_cash / compute_nc_ratio
 </div>
 
 <div class="cat-header">
-  <span class="cat-name">② 割安度を測る</span>
+  <span class="cat-name">割安度を測る</span>
   <span class="layer-tag">一次分析・バリュエーション</span>
 </div>
 <p class="cat-desc">業種内OLSの乖離（gap_ratio）を共通の起点に、割安度・平均回帰タイミング・期待総リターンを出す。</p>
 
 <div class="model-section" id="m2">
-  <h2>業種別OLS回帰</h2>
+  <h2>業種別OLS</h2>
   <span class="file-tag">plugins/sector_ols.py</span>
 
   <p>業種ごとに独立して OLS 回帰を実行し、Ohlson モデル拡張型で<strong>株価（円/株）</strong>を推定する。業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。</p>
@@ -518,10 +518,10 @@ predicted_market_cap = ŷ_pred / stock_price × market_cap   <span class="sym">[
 </div>
 
 <div class="model-section" id="m3">
-  <h2>バリュエーション分析 <span class="model-tag">割安度＋平均回帰＋期待総リターン</span></h2>
+  <h2>バリュエーション分析 <span class="model-tag">乖離率＋平均回帰＋期待総リターン</span></h2>
   <span class="file-tag">plugins/gap_analysis.py（内部 slug・/api/gap-analysis は後方互換で維持）</span>
 
-  <p>業種別OLS（②割安度を測る）が推定した理論値と実際値の乖離率（割安度）を起点に、平均回帰タイミング（半減期）と期待総リターン（乖離＋配当利回り）を一括で出すバリュエーション系のハブ。各銘柄の年次 gap_ratio 履歴に対して <code>statsmodels</code> の AR(1) モデルを MLE 推定して半減期を計算する（履歴 8 観測未満はヒューリスティックにフォールバック）。旧「総合リターン予測」プラグインの独自 OLS は廃止し、本モデルへ統合した（ADR-0001）。</p>
+  <p>業種別OLS（割安度を測る）が推定した理論値と実際値の乖離率（割安度）を起点に、平均回帰タイミング（半減期）と期待総リターン（乖離＋配当利回り）を一括で出すバリュエーション系のハブ。各銘柄の年次 gap_ratio 履歴に対して <code>statsmodels</code> の AR(1) モデルを MLE 推定して半減期を計算する（履歴 8 観測未満はヒューリスティックにフォールバック）。旧「総合リターン予測」プラグインの独自 OLS は廃止し、本モデルへ統合した（ADR-0001）。</p>
 
   <h3>期待総リターンと implied 倍率（旧 total_return 吸収）</h3>
   <div class="formula-block"><span class="comment"># gap_ratio[%] と配当利回り[%] は同次元 → 加算可能</span>
@@ -582,13 +582,13 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="cat-header">
-  <span class="cat-name">③ 将来リターンを予測</span>
+  <span class="cat-name">将来リターンを予測</span>
   <span class="layer-tag">一次分析・リターン予測</span>
 </div>
 <p class="cat-desc">将来リターンそのものを推定する。ウォークフォワードCVで自己検証を内蔵する。</p>
 
 <div class="model-section" id="m9">
-  <h2>マクロ×リスク-リターン推奨</h2>
+  <h2>線形回帰（M-1）</h2>
   <p>財務指標の OLS で1年先リターンを推定し、リスク-リターン平面の効率的フロンティア（Pareto 最優解）を提示するモデル。マクロ要因とその交差項は <code>use_macro</code> で足せるが<strong>既定は OFF</strong>（#615＝共通域の実測で rank-IC を有意に下げたため）。<strong>マクロ起因リスク R_macro は横軸として選べるまま残る</strong>ので、モデルからマクロが消えたわけではない。</p>
 
   <h3>説明変数</h3>
@@ -641,9 +641,9 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m11">
-  <h2>M-2: マクロ×財務 勾配ブースティング <span class="model-tag">将来リターンを予測</span></h2>
+  <h2>勾配ブースティング（M-2） <span class="model-tag">将来リターンを予測</span></h2>
 
-  <p>M-1（マクロ×リスク-リターン推奨）の<strong>非線形兄弟</strong>。同一のデータと目的変数（52週先対数リターン）を使い、勾配ブースティング決定木（XGBoost）が金利レジーム×バリュー・ボラ局面×収益性などの非線形・高次の交互作用を<strong>自動学習</strong>する。</p>
+  <p>線形回帰（M-1）の<strong>非線形兄弟</strong>。同一のデータと目的変数（52週先対数リターン）を使い、勾配ブースティング決定木（XGBoost）が金利レジーム×バリュー・ボラ局面×収益性などの非線形・高次の交互作用を<strong>自動学習</strong>する。</p>
 
   <p><strong>M-1 との比較が価値の核心。</strong>同一 walk-forward フォールドで XGBoost と素 OLS の mean R²/RMSE を side-by-side で出力し、どちらが有効かをユーザー自身が判断・改善し続けられる。</p>
 
@@ -689,7 +689,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <p>あわせて各銘柄の μ̂ を保存し、<code>macro_gbdt_scores</code> へ永続化する。かつては<strong>売り候補ランキングの「μ の出所」トグルで M-2 を選べた</strong>が、<strong>2026-09 に M-2 は供給者から降ろした（ADR-0052）</strong>——honest OOF rank-IC で M-6 に有意劣後し（ADR-0021）、M-2 固有だったコンフォーマル区間 <code>r1_prime</code> は M-6 も持ち（#396）、M-4 の基底という支えも #570 の退役で弱まったため、残る固有価値は <strong>SHAP による非線形の解釈</strong>と<strong>比較の基準線</strong>の2つになった。M-2 は退役（hidden）ではなく分析タブも モデル比較も従来どおり動き、μ̂ の永続化も 探索の <code>--persist-scores</code> が続ける（2026-11 から月次ではなく日中枠の探索の周回・#1118）（M-4 の基底として読まれるため）。その後、売り候補ランキングは M-6 の μ̂ だけを使う形に絞った（ADR-0071）。設計の記録は ADR-0004 と ADR-0052。</p>
 
   <h3>売り側（ショート側）識別力（#402・全モデル横断）</h3>
-  <p>売り候補ランキングは μ̂ の<strong>下位</strong>を売る。ところが <strong>ロングショート spread（top−bottom）は top 分位の強さに引っ張られる</strong>ため、「買い候補としては強いが売り候補の見分けは弱い」モデルでも大きく出てしまい、売りに使う μ̂ を選ぶ材料にならない。そこで <code>short_side_spread</code>＝<strong>期内全体平均 − 最低 μ̂ 分位平均</strong>（期間平均）を追加した（売り候補ランキングの μ̂ の出所はこの指標で M-6 に決めた）。ロングオンリーの保有者にとっての売りの価値＝「市場平均を下回る銘柄をどれだけ回避できたか」を直接測る指標で、<strong>大きいほど売りシグナルとして有効</strong>。あわせて成立期の割合（売り勝率）と per-fold 系列を返し、候補モデル間の差を定常ブートストラップで検定できる。追加学習・Egress ゼロの純後処理で、<code>oof_backtest</code> を使う全モデルへ自動的に波及する（モデル比較ビューにも表示）。</p>
+  <p>売り候補ランキングは μ̂ の<strong>下位</strong>を売る。ところが <strong>ロングショート spread（top−bottom）は top 分位の強さに引っ張られる</strong>ため、「買い候補としては強いが売り候補の見分けは弱い」モデルでも大きく出てしまい、売りに使う μ̂ を選ぶ材料にならない。そこで <code>short_side_spread</code>＝<strong>期内全体平均 − 最低 μ̂ 分位平均</strong>（期間平均）を追加した（売り候補ランキングの μ̂ の出所はこの指標で M-6 に決めた）。ロングオンリーの保有者にとっての売りの価値＝「市場平均を下回る銘柄をどれだけ回避できたか」を直接測る指標で、<strong>大きいほど売りシグナルとして有効</strong>。あわせて成立期の割合（売り勝率）と per-fold 系列を返し、候補モデル間の差を定常ブートストラップで検定できる。追加学習・Egress ゼロの純後処理で、<code>oof_backtest</code> を使う全モデルへ自動的に波及する（モデル比較にも表示）。</p>
   <p>切替時の実測（2026-07・同一共通域・3,979社・9 fold・OOF 13,539ペア・honest）では <strong>M-6 +0.0656 &gt; M-4 +0.0645 &gt; M-1 +0.0581 &gt; M-2 +0.0511</strong>。注目すべきは <strong>M-2 は rank-IC では M-1 を上回る（0.1419 vs 0.1142）のに売り側では下回る</strong>点——買い側の強さと売り側の識別力は別物であり、売りの既定選定に買い側指標を流用してはいけないことの実証になった。この結果で既定の「μ の出所」を M-2 → M-6 へ切り替えた（ADR-0022）。M-4 の中の M-2 / M-6 を本番と同じ設定にそろえて測り直した 2026-10-30（#1058・51,156 行・19 期）も <strong>M-6 +0.1097 &gt; M-4 +0.1084 &gt; M-1 +0.0968 &gt; M-2 +0.0841</strong>・M-6 − M-2 は p=0.001 で有意と、結論は変わらなかった。</p>
   <p><strong>上位層の売り側spread（#1043・参考）</strong>: 上の指標は<strong>全社の</strong>下位を測るが、実際の売りは<strong>保有の中の下位</strong>から選ぶ。保有はもともと買いの並びの上位から買った銘柄なので、全社の最低分位にはほとんど入らない。そこで「1 つ前の期に買いの並び（画面の並びと同じ U）で上位 20% だった社」だけを母集団にして、その中で売りの並び（μ̂ の低い順）の下位 20% が層の平均をどれだけ下回ったかも測る。層は前の期の並びだけで決まり、比べる売りの条件はすべて同じ層で測る。−R_macro を足した版は、R_macro が今の推定値しかないので<strong>未来情報込みの上限</strong>として別に出す。売りに拒否権は置かない（#1040）。この版は全社でも μ̂ だけより有意に悪かったので、売り候補から −R_macro を外した（#1073）。その後、売り候補ランキングは M-6 の μ̂ の下位 1/5 を売る 1 手法だけにし（ADR-0071）、同じ指標で売り専用の予測 S2 が M-6 の μ̂ を上回ったので、並びのキーを S2 へ切り替えた（ADR-0076）。</p>
   <p><strong>OOF 運用再現（#1045・参考）</strong>: 「画面の上位 K 社を買い、保有の中の下位 k 社を売って入れ替える」運用を、学習に使っていない期間の予測（OOF）だけで 3 か月ごとに繰り返したことにして、年率・最大下落・入替率・売買コスト控除後・全社平均と TOPIX（連動 ETF の値動き・配当なし）に対する超過を出す。全社を同じ金額ずつ持つ全社平均は小型株の比重が大きく、実際には買えない基準なので、TOPIX と並べて読む（#1224）。期間のリターンは 52 週先のラベルを繋がず、月末の週の株価から取る。<strong>過去の経路は 1 本しかなく、運とモデルの良さを区別できないので、判定には使わず参考として読む</strong>（「バックテスト」画面の模擬売買とは別物）。開始月の運の大きさの目安として、3 か月ごとの区切りを 1・2 か月ずらした経路も並べられる（#1167。同じ歴史を別の区切りで切ったもので、独立な標本ではない）。あわせて超過の 95% 信頼区間と、入れ替えで得をしたか（買った社 − 売った社の次の期間のリターン差）も出す。売買代金の大きさで全社を 3 つの帯に分け、保有がどの帯に何割入っていたか・帯ごとにどれだけ超過を稼いだかも出せる（#1224。超過が売買の薄い社に寄っていないかを見るための記述で、判定には使わない）。</p>
@@ -730,7 +730,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m12">
-  <h2>M-3: ベイズ状態空間モデル（時変マクロβ DLM） <span class="model-tag">将来リターンを予測</span></h2>
+  <h2>ベイズ状態空間（M-3） <span class="model-tag">将来リターンを予測</span></h2>
 
   <p>M-1（OLS 線形）・M-2（XGBoost 非線形）の<strong>第3の兄弟</strong>。両者が「ある時点で係数を1つ推定する（<strong>静的係数</strong>）」のに対し、M-3 は<strong>係数そのものが時間とともに変動する</strong>動的線形モデル（DLM）を、<strong>銘柄ごとに独立</strong>なカルマン型逐次ベイズ更新で推定する。マクロ感応度 β の推移と期待リターン α の現在水準を<strong>信用区間つき</strong>で提示する。</p>
 
@@ -748,7 +748,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
     <div><span class="spec-label">ファクター</span> 既定は週次高頻度マクロの全選択肢（FX・株価指数・金利・コモディティ8系列）。市場ファクター（日経225・TOPIX）を含めるため α は固有アルファになる。指数/FX/商品/閲覧数は週次対数リターン、金利・ニューストーンは週次差分。日次の日本10年金利は ^JGB 廃止のため月次 FRED 据置。ニューストーン／関心度5系列（GDELT・Wikipedia 閲覧数）は<strong>選択肢のみ</strong>＝昇格ゲートの実測で有意な改善が無かったため既定 OFF</div>
     <div><span class="spec-label">推定</span> 自前 割引係数 DLM（West &amp; Harrison 型）。割引 δ で状態ノイズを表現し銘柄ごとの最適化が不要</div>
     <div><span class="spec-label">不確実性</span> 観測分散を Normal-Gamma 共役で学習。予測分布は Student-t で α/β の信用区間を解析的に算出</div>
-    <div><span class="spec-label">µ̂</span> 最新フィルタ α<sub>T</sub> を年率化（α<sub>T</sub> × 52）。M-1/M-2 と同じ µ̂ ランキング</div>
+    <div><span class="spec-label">μ̂</span> 最新フィルタ α<sub>T</sub> を年率化（α<sub>T</sub> × 52）。M-1/M-2 と同じ μ̂ ランキング</div>
     <div><span class="spec-label">価格行動系特徴量（既定全選択）</span> 週次実現ボラ・出来高z-score・52週高値乖離・4週リバーサルを銘柄固有の遅行特徴量として追加（本番データのOOF比較で有効性を確認済み）。マクロ列と異なり week (t−1) までの情報のみで計算し、マクロリスク R_macro の計算には含めない</div>
   </div>
 
@@ -756,7 +756,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <p>DLM は各週 y<sub>t</sub> を<strong>観測前</strong>に予測する。標準化予測誤差（バーンイン除外）から、<strong>校正</strong>（標準化誤差²の平均・1 が理想）・<strong>予測 RMSE</strong>・<strong>95% 信用区間カバレッジ</strong>を全銘柄平均で集計する。状態空間モデルに固有の自己診断で、M-1/M-2 の walk-forward CV とは別枠。</p>
 
   <h3>限界</h3>
-  <p>β はマクロ「ショックへの感応度」であり予測子ではない（将来のマクロ変化は未知）。µ̂ はマクロで説明されない持続的ドリフト α に由来する。週次・最低約2年の履歴を要する。初版は API/UI のみで、売り候補ランキング連携は将来対応。</p>
+  <p>β はマクロ「ショックへの感応度」であり予測子ではない（将来のマクロ変化は未知）。μ̂ はマクロで説明されない持続的ドリフト α に由来する。週次・最低約2年の履歴を要する。初版は API/UI のみで、売り候補ランキング連携は将来対応。</p>
 
   <h3>参考文献</h3>
   <div class="ref-list">
@@ -778,15 +778,15 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m13">
-  <h2>M-4: 兄弟μ̂スタッキング・アンサンブル <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+  <h2>スタッキング（M-4） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
   <span class="file-tag">plugins/macro_ensemble.py — POST /api/plugins/macro_ensemble/run</span>
 
-  <div class="warn-box"><strong>退役（2026-08-30・Issue #570）</strong>: 分析ページのサイドバーには表示されません。統合した μ̂ が <strong>M-6 単体を上回らない</strong>（rank-IC の差 +0.0006・p=0.810／売り側 spread も p=0.655＝互角）のに、実行コストは基底 M-1+M-2+M-6 の合算になるためです。これは下の「仮定・限界」に書いた<strong>「統合が単体最良を上回らなければ単体で十分」という判定基準にそのまま該当した</strong>結果で、失敗ではなく<strong>実データが出した答え</strong>です。モデル自体は残してあり、<code>POST /api/plugins/macro_ensemble/run</code> と「モデル比較（OOF）」からは今までどおり使えます（基底の顔ぶれを変えたら測り直す前提）。</div>
+  <div class="warn-box"><strong>退役（2026-08-30・Issue #570）</strong>: 分析ページのサイドバーには表示されません。統合した μ̂ が <strong>M-6 単体を上回らない</strong>（rank-IC の差 +0.0006・p=0.810／売り側 spread も p=0.655＝互角）のに、実行コストは基底 M-1+M-2+M-6 の合算になるためです。これは下の「仮定・限界」に書いた<strong>「統合が単体最良を上回らなければ単体で十分」という判定基準にそのまま該当した</strong>結果で、失敗ではなく<strong>実データが出した答え</strong>です。モデル自体は残してあり、<code>POST /api/plugins/macro_ensemble/run</code> と「モデル比較」からは今までどおり使えます（基底の顔ぶれを変えたら測り直す前提）。</div>
 
   <p>M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 ElasticNet）の<strong>アウト・オブ・サンプル（OOF）予測 μ̂ を統合するメタモデル</strong>（スタッキング）。予測誤差が低相関な基底を、制約付き（非負・和1）の加重合成で相殺でき単体を超えうる。重みは実績から学習されるため<strong>効かない基底は自動的に重み ~0 へ落ちる</strong>＝基底追加の下振れリスクが小さい。<strong>M-3 は除外</strong>（週次専用で目的頻度・母集団が異なる・ADR-0012/0015）、<strong>M-5 も除外</strong>（順位スコアで水準を持たない・ADR-0017）。M-6 は #397 で基底に追加した。</p>
 
   <h3>二段ウォークフォワード（リーク回避の核）</h3>
-  <p>①各基底の構成で snapshot を構築し、purge/embargo（<code>embargo_months=12</code>・ADR-0014）付き walk-forward で per-(月, 銘柄) の OOF 予測を自前再現（M-2 と M-6 はスナップショット構成が同じため共有し、学習器だけ差し替える）。②全基底に共通の (月, 銘柄) の<strong>積集合</strong>をアンサンブル母集団とする（「すべての基底が予測できる銘柄」）。③<strong>月 t に適用する統合重みは t より前の月の共通 OOF だけで学習</strong>（expanding・学習前は等重み 1/n）。基底 μ̂ 自体が embargo 済み OOF のため二段目もリークしない。④統合残差を共有 <code>oof_backtest</code> に通し、M-1/M-2/M-3 と同一指標（rank-IC・ロングショート spread・hit-rate）でモデル比較ビューに並ぶ。<strong>基底が増えると共通域は狭まりうる</strong>ため、優劣は必ず同一共通域に制限した各基底の OOF（画面の「同一共通域での比較」表）と見比べる。</p>
+  <p>①各基底の構成で snapshot を構築し、purge/embargo（<code>embargo_months=12</code>・ADR-0014）付き walk-forward で per-(月, 銘柄) の OOF 予測を自前再現（M-2 と M-6 はスナップショット構成が同じため共有し、学習器だけ差し替える）。②全基底に共通の (月, 銘柄) の<strong>積集合</strong>をアンサンブル母集団とする（「すべての基底が予測できる銘柄」）。③<strong>月 t に適用する統合重みは t より前の月の共通 OOF だけで学習</strong>（expanding・学習前は等重み 1/n）。基底 μ̂ 自体が embargo 済み OOF のため二段目もリークしない。④統合残差を共有 <code>oof_backtest</code> に通し、M-1/M-2/M-3 と同一指標（rank-IC・ロングショート spread・hit-rate）でモデル比較に並ぶ。<strong>基底が増えると共通域は狭まりうる</strong>ため、優劣は必ず同一共通域に制限した各基底の OOF（画面の「同一共通域での比較」表）と見比べる。</p>
 
   <h3>重み最適化</h3>
   <p>既定は<strong>期内平均 Spearman（rank-IC）を最大化するグリッド探索</strong>（<code>rank_ic_grid</code>・基底数 n のシンプレックス格子を走査）。代替として NNLS（非負最小二乗・<code>scipy.optimize.nnls</code>＋和1正規化・和0時は等重みへフォールバック）・等重み（<code>equal</code>）を選択可。rank-IC は期内の順位のみで決まる（シフト/スケール不変）ため切片は持たず、重みの<strong>比</strong>だけが効く。</p>
@@ -811,18 +811,18 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m14">
-  <h2>M-5: マクロ×財務 ランク学習（learning-to-rank） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
+  <h2>ランク学習（M-5） <span class="model-tag">将来リターンを予測</span> <span class="model-tag retired">退役</span></h2>
   <span class="file-tag">plugins/macro_gbdt_rank.py — POST /api/plugins/macro_gbdt_rank/run</span>
 
   <div class="warn-box"><strong>退役（2026-08-30・Issue #570）</strong>: 分析ページのサイドバーには表示されません。同一 fold・同一特徴量で測った結果、<strong>rank-IC 0.0808 に対し M-2（MSE 版）は 0.1578</strong>——差 −0.0771（95%CI [−0.0995, −0.0558]・p=0.001・17期／OOF 25,738ペア）で<strong>有意に下回りました</strong>。学習の目的関数を評価指標へ揃えるという狙いは理屈としては正しかったものの、実データでは効かず、とくに<strong>下位分位（値下がりしそうな銘柄）を下に置けていない</strong>のが弱点でした（最下位分位のリターンが M-2 の 0.0145 に対し 0.0520）。ただし M-5 は早期打ち切り（early stopping）を使わない固定木数で学習しており<strong>正則化の条件が M-2 と揃っていない</strong>ため、「ランク学習が無効」ではなく「<strong>この実装では</strong>下回った」と読むのが正確です。</div>
 
-  <p>M-2（マクロ×財務 勾配ブースティング）の<strong>rank-IC 整合版</strong>。M-2 は<strong>MSE 最小化</strong>で学習する一方、評価・ハイパラ探索・モデル比較はすべて<strong>期内クロスセクションの順位相関（Spearman rank-IC）</strong>で測る。この「学習の目的関数 ≠ 評価指標」のズレ（MSE は外れリターンに引きずられ順位を歪める）を、XGBoost の<strong>learning-to-rank</strong>（<code>rank:pairwise</code> 既定）で解消し、<strong>各月を1つのクエリグループ</strong>として期内順位を直接最適化する。</p>
+  <p>勾配ブースティング（M-2）の<strong>rank-IC 整合版</strong>。M-2 は<strong>MSE 最小化</strong>で学習する一方、評価・ハイパラ探索・モデル比較はすべて<strong>期内クロスセクションの順位相関（Spearman rank-IC）</strong>で測る。この「学習の目的関数 ≠ 評価指標」のズレ（MSE は外れリターンに引きずられ順位を歪める）を、XGBoost の<strong>learning-to-rank</strong>（<code>rank:pairwise</code> 既定）で解消し、<strong>各月を1つのクエリグループ</strong>として期内順位を直接最適化する。</p>
 
   <h3>M-2 との関係（同一土俵での純比較）</h3>
-  <p>MSE 版 M-2 を無改変のベースラインとして残すため<strong>新しい兄弟モデル</strong>として追加した。データ・特徴量・walk-forward の fold は M-2 と完全共有し（実装は M-2 を継承して学習目的だけ差し替え）、モデル比較ビューに M-5 として並ぶことで<strong>MSE と順位学習を同一 fold・同一特徴量で純比較</strong>できる。月をまたいで平坦化される学習データに月境界（クエリグループ）を復元するため、共有 walk-forward 関数に各学習月のサンプル数配列を渡す最小拡張を加えている（既定では従来動作のまま＝M-1〜M-4 に影響なし）。</p>
+  <p>MSE 版 M-2 を無改変のベースラインとして残すため<strong>新しい兄弟モデル</strong>として追加した。データ・特徴量・walk-forward の fold は M-2 と完全共有し（実装は M-2 を継承して学習目的だけ差し替え）、モデル比較に M-5 として並ぶことで<strong>MSE と順位学習を同一 fold・同一特徴量で純比較</strong>できる。月をまたいで平坦化される学習データに月境界（クエリグループ）を復元するため、共有 walk-forward 関数に各学習月のサンプル数配列を渡す最小拡張を加えている（既定では従来動作のまま＝M-1〜M-4 に影響なし）。</p>
 
   <h3>順位スコアの扱い（初版は比較専用）</h3>
-  <p>予測は<strong>順位スコア</strong>でリターンの水準を持たない。よって producer（現在μ̂の永続化）を持たず、売り候補ランキングへの統合は「順位→分位期待リターンの写像」を別途定義するまで見送る。目的関数 <code>rank:ndcg</code> を選ぶ場合はゲイン発散を避けるため期内リターンを分位グレードへ変換して学習する（<code>rank:pairwise</code> は生リターンの順序をそのまま使用）。M-5 の rank-IC が M-2 を上回るかはモデル比較ビューで実測して判断する。</p>
+  <p>予測は<strong>順位スコア</strong>でリターンの水準を持たない。よって producer（現在μ̂の永続化）を持たず、売り候補ランキングへの統合は「順位→分位期待リターンの写像」を別途定義するまで見送る。目的関数 <code>rank:ndcg</code> を選ぶ場合はゲイン発散を避けるため期内リターンを分位グレードへ変換して学習する（<code>rank:pairwise</code> は生リターンの順序をそのまま使用）。M-5 の rank-IC が M-2 を上回るかはモデル比較で実測して判断する。</p>
 
   <div class="refs">
     <h4>参考文献</h4>
@@ -839,7 +839,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="model-section" id="m16">
-  <h2>M-6: マクロ×財務 正則化線形（ElasticNet） <span class="model-tag">将来リターンを予測</span></h2>
+  <h2>正則化線形（M-6） <span class="model-tag">将来リターンを予測</span></h2>
   <span class="file-tag">plugins/macro_enet.py — POST /api/plugins/macro_enet/run</span>
 
   <p>M-2（勾配ブースティング）と<strong>同一データ・同一 fold</strong>で学習する<strong>線形の兄弟</strong>。説明変数を L1（スパース化）と L2（縮小）の両方で正則化する ElasticNet を使う。金利カーブ（米5年/10年/30年）や信用スプレッド、株価指数、コモディティのように<strong>互いに強く相関するグループ</strong>が並ぶ本プロジェクトの特徴量では、素の OLS は打ち消し合う巨大な係数を出しやすい。L2 成分がグループ内で係数を分け合わせ、L1 成分が効かない特徴量をゼロにするため、<strong>符号付きの係数がそのまま読める</strong>解釈性を保ったまま安定する。</p>
@@ -868,7 +868,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
   <p>マクロ 46 系列を<strong>学習期間内の主成分分析</strong>で少数の直交因子へ圧縮する案も同じ土俵で比較したが、5 主成分でマクロ変動の 90.9% を説明しても予測精度は変わらず（2026-07 の実測で 0.1713→0.1714）、木モデルではむしろ悪化した。効果が確認できなかったため本モデルには組み込んでいない。</p>
 
   <h3>売り候補ランキングへの供給（producer）</h3>
-  <p>予測は M-1/M-2 と同じ「52週先リターン」の単位を持つため、現在μ̂と確実性軸（コンフォーマル区間半幅）を <code>macro_enet_scores</code> へ全置換で永続化し、売り候補ランキングが<strong>唯一の μ̂ として使う</strong>（ADR-0071）。#402 で M-2 から切り替えた——売り側 OOF 指標（<code>short_side_spread</code>＝期内全体平均 − 最低 μ̂ 分位平均）が <strong>+0.0656 vs M-2 +0.0511</strong>・差 +0.0145・p=0.001 で有意に優位だったため（2026-10-30 の再測定でも +0.1097 vs +0.0841・p=0.001 で同じ結論・#1058）。モデル比較ビューにも <strong>M-6</strong> として並ぶ。</p>
+  <p>予測は M-1/M-2 と同じ「52週先リターン」の単位を持つため、現在μ̂と確実性軸（コンフォーマル区間半幅）を <code>macro_enet_scores</code> へ全置換で永続化し、売り候補ランキングが<strong>唯一の μ̂ として使う</strong>（ADR-0071）。#402 で M-2 から切り替えた——売り側 OOF 指標（<code>short_side_spread</code>＝期内全体平均 − 最低 μ̂ 分位平均）が <strong>+0.0656 vs M-2 +0.0511</strong>・差 +0.0145・p=0.001 で有意に優位だったため（2026-10-30 の再測定でも +0.1097 vs +0.0841・p=0.001 で同じ結論・#1058）。モデル比較にも <strong>M-6</strong> として並ぶ。</p>
 
   <h3>散布図の縦軸は「相対 μ̂」（水準は検証していない）</h3>
   <p>分析タブでは M-2 と同じリスク-リターン散布図（横軸 R2 実現ボラ／R_macro・効率的/非効率的フロンティア・U = μ̂ − λR・R3 足切り）を出す。ただし<strong>縦軸は μ̂ そのものではなく、今買える社の μ̂ の中央値との差（相対 μ̂）</strong>にしている。OOF の rank-IC が確かめているのは「同じ月の中の順位」だけで、μ̂ が何%という<strong>水準は検証の外</strong>にあるため（今買える社の μ̂ 平均は −0.225 で、M-2 の +0.040 と大きく食い違う）。全社を同じ量だけずらすだけなので、順位・フロンティア・U の並びは μ̂ と変わらず、変わるのは目盛りだけ。実際の μ̂ は表とツールチップに併記する。</p>
@@ -893,7 +893,7 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
 </div>
 
 <div class="cat-header">
-  <span class="cat-name">④ 戦略を検証</span>
+  <span class="cat-name">戦略を検証</span>
   <span class="layer-tag">メタ検証</span>
 </div>
 <p class="cat-desc">一次分析の実績有効性を過去データで事後検証する（分析の分析）。scoring source で各手法を同一土俵に乗せる。</p>
@@ -949,7 +949,7 @@ benchmark    = スコアリング対象企業（最大500社）の平均リタ�
 </div>
 
 <div class="cat-header">
-  <span class="cat-name">⑤ 保有を見直す</span>
+  <span class="cat-name">保有を見直す</span>
   <span class="layer-tag">双対分析</span>
 </div>
 <p class="cat-desc">一次分析を逆観点で保有銘柄へ向け直し、売るべき銘柄と売り時を出す。</p>

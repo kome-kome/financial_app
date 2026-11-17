@@ -1,6 +1,6 @@
 """朝の推奨（/morning）の 1 画面目の約束（#1214）。
 
-主役は買い推奨ランキング。データに問題が無い朝に、鮮度カード 5 枚（「夜間バッチ」は 8 行）が
+主役はおすすめ銘柄ランキング（旧称 買い推奨ランキング）。データに問題が無い朝に、鮮度カード 5 枚（「夜間バッチ」は 8 行）が
 開いたままだと、毎朝スクロールが 1 回要る。読み込み中の枠が注意色だと、毎朝 5〜8 秒
 「注意？」に見える。どちらも**破っても画面は壊れず、失敗として現れない**ので、ここで縛る。
 
@@ -77,7 +77,7 @@ class TestTradeCandidates:
     def test_candidates_sit_above_the_preset_ranking(self):
         """判定・鮮度のすぐ下に置く（2026-11-14 に決定。ランキングの下では送らないと見えない）。"""
         order = [HTML.index(s) for s in (
-            'id="fresh-details"', ">今日の売買候補<", ">買い推奨ランキング<")]
+            'id="fresh-details"', ">今日の売買候補<", ">おすすめ銘柄ランキング<")]
         assert order == sorted(order), order
 
     def test_every_element_the_script_fills_exists(self):

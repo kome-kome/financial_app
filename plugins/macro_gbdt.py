@@ -397,7 +397,7 @@ def _global_interactions(explainer, X_int: np.ndarray, feat_names: list) -> list
 
 class MacroGbdtPlugin(AnalysisPlugin):
     name = "macro_gbdt"
-    label = "M-2: マクロ×財務 勾配ブースティング"
+    label = "勾配ブースティング（M-2）"
     description = (
         "財務比率×マクロ要因を XGBoost（勾配ブースティング決定木）で学習し、"
         "非線形・高次の交互作用を自動捕捉します。M-1（OLS 線形）と同一データで比較可能。"
@@ -408,8 +408,8 @@ class MacroGbdtPlugin(AnalysisPlugin):
     writes = ("macro_gbdt_scores",)
     writes_impact = ("おすすめ銘柄で μ̂ の出所に M-2 を選んだときの値。"
                      "次に日中の探索バッチが本番の設定で書き直すまで、この設定の値に置き換わります")
-    category = "③ 将来リターンを予測"
-    ui_order = 340
+    category = "将来リターンを予測"     # 本番（朝の買い候補が使う・ADR-0070）
+    ui_order = 120
     # 種で結果が動く＝月次探索の確かめ直す段（`plugins.tuning.search(confirm_*)`・#984）の対象。値は既定の種
     tuning_seed_base: int = _RANDOM_STATE
 

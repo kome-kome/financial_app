@@ -857,7 +857,7 @@ IFRS には完全に対応する科目がないため、「非流動その他金
 ## 9. マクロ×リスク-リターン推奨
 
 **プラグイン**: `plugins/macro_risk_return.py` / `MacroRiskReturnPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=330`、`heavy=True`）  
+**カテゴリ**: 比較用のモデル（`heavy=True`）  
 **副読本**: 予備知識ゼロ向けの噛み砕いた解説は [`M1_MACRO_MODEL_GUIDE.md`](M1_MACRO_MODEL_GUIDE.md)（本節はその正式・技術版）
 
 ### 9.1 概要
@@ -1105,7 +1105,7 @@ S2 は、M-6（`macro_enet`・§16）と同じパネル・前処理・内側 CV 
 ## 11. M-2 マクロ×財務 勾配ブースティング（macro_gbdt）
 
 `plugins/macro_gbdt.py` / `MacroGbdtPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=340`、`heavy=True`）  
+**カテゴリ**: 将来リターンを予測（`heavy=True`）  
 **副読本**: 統計・機械学習が初めての人向けの噛み砕いた解説は [`M2_MACRO_GBDT_GUIDE.md`](M2_MACRO_GBDT_GUIDE.md)（本節はその正式・技術版）
 
 ### 11.1 概要
@@ -1500,7 +1500,7 @@ $g^{*}_{t,(p)}$ は gain を降順に並べた理想の並びの $p$ 位（Järv
 ## 12. M-3 ベイズ状態空間モデル（時変マクロβ DLM・macro_dlm）
 
 `plugins/macro_dlm.py` / `MacroDlmPlugin`  
-**カテゴリ**: ③ 将来リターンを予測（`ui_order=360`、`heavy=True`）  
+**カテゴリ**: 比較用のモデル（`heavy=True`）  
 **副読本**: 統計・機械学習が初めての人向けの噛み砕いた解説は [`M3_STATE_SPACE_GUIDE.md`](M3_STATE_SPACE_GUIDE.md)（本節はその正式・技術版）
 
 ### 12.1 概要
@@ -1612,7 +1612,7 @@ DLM のフォワードパスは各週 y_t を**観測前**に予測する。標�
 
 ## 13. M-4 兄弟μ̂スタッキング・アンサンブル（macro_ensemble）
 
-カテゴリ: ③ 将来リターンを予測（`ui_order=370`・`heavy=True`・ローカル実行専用）。Issue #367・ADR-0015。
+カテゴリ: 比較用のモデル（`heavy=True`・ローカル実行専用）。Issue #367・ADR-0015。
 
 > **退役（2026-08-30・#570・[ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)）**:
 > `hidden=True` によりサイドバーと `mu_source` の選択肢から外した。統合が **M-6 単体を
@@ -1657,7 +1657,7 @@ M-1（線形 OLS+BIC）・M-2（非線形 XGBoost）・M-6（正則化線形 Ela
 
 ## 14. M-5 マクロ×財務 ランク学習（learning-to-rank・macro_gbdt_rank）
 
-カテゴリ: ③ 将来リターンを予測（`ui_order=380`・`heavy=True`・ローカル実行専用）。Issue #362・ADR-0017。
+カテゴリ: 比較用のモデル（`heavy=True`・ローカル実行専用）。Issue #362・ADR-0017。
 
 > **退役（2026-08-30・#570・[ADR-0044](adr/0044-retire-underperforming-models-by-hiding.md)）**:
 > ADR-0017 が約束したまま未実施だった実測をようやく取り、**M-2(MSE) に有意に劣後**した
@@ -1807,7 +1807,7 @@ ADR-0021 のときは補正なしの「有意」を出し、α/8 は人が手で
 
 ## 16. M-6 マクロ×財務 正則化線形（ElasticNet・macro_enet）
 
-カテゴリ: ③ 将来リターンを予測（`ui_order=390`・`heavy=True`・ローカル実行専用）。Issue #372・ADR-0021。
+カテゴリ: 将来リターンを予測（`heavy=True`・ローカル実行専用）。Issue #372・ADR-0021。
 
 ### 16.1 概要
 

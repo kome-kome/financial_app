@@ -109,8 +109,8 @@ class GapAnalysisPlugin(AnalysisPlugin):
         "不足する銘柄はヒューリスティック（参考値）にフォールバックします。"
     )
     depends_on = ["sector_ols"]
-    category = "② 割安度を測る"
-    ui_order = 220
+    category = "割安度を測る"
+    ui_order = 410
 
     def params_schema(self) -> dict:
         return {

@@ -371,8 +371,8 @@ class TestPluginMeta:
     def test_identity(self):
         assert plugin.name == "macro_ensemble"
         assert plugin.heavy is True
-        assert plugin.ui_order == 370   # M-3=360 の後（M-1→M-2→M-3→M-4 順・#378）
-        assert plugin.category == "③ 将来リターンを予測"
+        assert plugin.ui_order == 530   # 退役（hidden）。比較用のモデルの並びの中
+        assert plugin.category == "比較用のモデル"
         assert plugin.depends_on == []
 
     def test_to_meta_keys(self):

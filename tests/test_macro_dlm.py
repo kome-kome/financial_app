@@ -51,10 +51,10 @@ class TestPluginMeta:
         assert plugin.heavy is True
 
     def test_category(self):
-        assert plugin.category == "③ 将来リターンを予測"
+        assert plugin.category == "比較用のモデル"
 
     def test_ui_order(self):
-        assert plugin.ui_order == 360
+        assert plugin.ui_order == 520
 
     def test_depends_on_empty(self):
         assert plugin.depends_on == []

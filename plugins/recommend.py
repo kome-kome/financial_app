@@ -24,12 +24,12 @@ RUNTIME_METRICS = ("z_momentum", "mu")
 # 通す実測）を必ず通すこと。
 MU_SOURCE_OPTIONS = [
     {"value": "",                  "label": "使わない（既定）"},
-    {"value": "macro_risk_return", "label": "M-1: マクロ×リスク-リターン（OLS）"},
-    {"value": "macro_dlm",         "label": "M-3: ベイズ状態空間（時変マクロβ DLM）"},
+    {"value": "macro_risk_return", "label": "線形回帰（M-1）"},
+    {"value": "macro_dlm",         "label": "ベイズ状態空間（M-3）"},
     # M-4（macro_ensemble）は退役につき選択肢から除去（ADR-0044・p=0.810 で M-6 単体と互角）。
     # M-2（macro_gbdt）は**退役ではない**が供給者から降ろした（ADR-0052）。画面のタブも
     # COMPARISON_MODELS も残り、SHAP による解釈と比較の基準線として動き続ける。
-    {"value": "macro_enet",        "label": "M-6: マクロ×財務 正則化線形（ElasticNet）"},
+    {"value": "macro_enet",        "label": "正則化線形（M-6）"},
 ]
 
 # 成長重視だけは walk-forward 推定（scripts/preset_weight_walkforward.py）の重みを反映した
@@ -485,8 +485,8 @@ class RecommendPlugin(AnalysisPlugin):
     label = "おすすめ銘柄"
     description = "Zスコア指標を重み付けスコアリングしてランキング表示します"
     depends_on = []
-    category = "① 銘柄を探す"
-    ui_order = 110
+    category = "銘柄を探す"
+    ui_order = 310
 
     def params_schema(self) -> dict:
         return {
