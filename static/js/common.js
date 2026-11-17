@@ -43,6 +43,15 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// トークンの色（#rrggbb）に透明度を付けて返す。グラフの面の塗りを線と同じトークンから作る（#1266）。
+// #rrggbb 以外の値（rgba 等）はそのまま返す。
+function cssVarAlpha(name, alpha) {
+  const v = cssVar(name);
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(v);
+  if (!m) return v;
+  return `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${alpha})`;
+}
+
 function applyThemeIcon() {
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = currentTheme() === 'dark' ? '☀️' : '🌙';
