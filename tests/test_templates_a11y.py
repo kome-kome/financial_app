@@ -314,6 +314,35 @@ def test_analysis_sidebar_marks_the_current_tab():
     assert "removeAttribute('aria-current')" in body, "前のタブの aria-current が残る"
 
 
+def test_analysis_tab_click_reaches_the_content_on_narrow_screens():
+    """狭い幅（サイドバーが本文の上に積まれる）でタブを押したら本文の先頭へ移す。URL で開いた最初の表示では
+    動かさない（#1265）。移さないと押した結果が画面の外に出て、何も起きなかったように見える。"""
+    js = _read(_ANALYSIS_JS)
+    html = _read(_ANALYSIS_HTML)
+    m = re.search(r"const NARROW_LAYOUT_MQ = '([^']+)';", js)
+    assert m, "NARROW_LAYOUT_MQ を拾えない"
+    assert f"@media {m.group(1)}{{" in html, "JS の幅の判定が CSS のサイドバーの積み替えと食い違う"
+    body = js[js.index("function showTab("):]
+    body = body[:body.index("\n}\n")]
+    assert "function showTab(t, initial)" in body
+    assert "initial !== true && window.matchMedia(NARROW_LAYOUT_MQ).matches" in body
+    assert "getElementById('analysis-main')" in body and "scrollIntoView" in body
+    assert "showTab(startTab, true);" in js, "最初の表示でも画面が動く"
+
+
+def test_analysis_sidebar_sticks_on_desktop():
+    """デスクトップ幅ではサイドバーを画面に貼り付け、長いタブの下からでも届くようにする（#1265）。
+    狭い幅（上に積まれる）では貼り付けない（本文を覆う）。中身が画面より長いときはサイドバーの中でスクロールする。"""
+    html = _read(_ANALYSIS_HTML)
+    m = re.search(r"@media \(min-width: 769px\)\{\s*\.sidebar\{([^}]*)\}", html)
+    assert m, "デスクトップ幅の .sidebar の指定を拾えない"
+    for decl in ("position:sticky", "top:0", "max-height:100vh", "overflow-y:auto"):
+        assert decl in m.group(1), decl
+    narrow = html[html.index("@media (max-width: 768px){"):]
+    narrow = narrow[:narrow.index("\n}\n")]
+    assert "sticky" not in narrow
+
+
 def test_analysis_result_rows_have_keyboard_entry_and_company_links():
     """M-2/M-3/M-6 の結果の行: 詳細はボタンで開け、銘柄名は企業詳細へのリンク（M-1 の表と同じ）。"""
     js = _read(_ANALYSIS_JS)

@@ -124,6 +124,10 @@ window.onThemeChange = function(){
 // 期待リターンの列名（#1262・CONTEXT.md「画面の表記」）。保存済みの表と実行後の表が同じ名前を読む。
 // M-1/M-2/M-6 は 52 週先リターンの予測、M-3 は週次の潜在アルファの最新推定を 52 倍した値で、
 // 算出方式が違う（大小を比べられない）ので M-3 だけ記号ごと別の名前にする。
+// サイドバーが本文の上に積まれる幅（templates/analysis.html の `@media (max-width: 768px)` と同じ値）。
+// この幅でタブを押したら本文の先頭へ移す。移さないと押した結果が画面の外に出る（#1265）。
+const NARROW_LAYOUT_MQ = '(max-width: 768px)';
+
 const MU_HEAD = {
   forecast: {label: 'μ̂（1年先）',
              tip: '1年先（52週）の期待リターンの予測（年率の対数リターン・無次元）。10.00% は年率 +10% を意味する。'},
@@ -1461,7 +1465,8 @@ function _renderModelComparison(data) {
 // ── ユーティリティ ───────────────────────────────────────────────────
 function fmt0(n) { return n == null ? '-' : Math.round(n).toLocaleString(); }
 
-function showTab(t) {
+// initial: URL で開いたときの最初の表示（initPlugins）。そのときは画面を動かさない。
+function showTab(t, initial) {
   _allTabs.forEach(x => {
     const el = document.getElementById('tab-' + x);
     if (el) el.classList.toggle('hidden', x !== t);
@@ -1484,6 +1489,10 @@ function showTab(t) {
   }
   _loadSaved(t);
   if (t === 'sell_ranking') loadPortfolioOnce();
+  if (initial !== true && window.matchMedia(NARROW_LAYOUT_MQ).matches) {
+    const main = document.getElementById('analysis-main');
+    if (main) main.scrollIntoView({block: 'start'});
+  }
 }
 
 // ── 保存済みの結果（heavy のタブを開いたら最初に見せる・ADR-0072）──────────────────
@@ -1741,7 +1750,7 @@ async function initPlugins() {
   buildSidebar(plugins);
   // URL ?tab= 指定があれば優先、なければ ui_order 最小（サイドバー先頭＝本番の M-6）を表示
   const startTab = (_urlTab && _allTabs.includes(_urlTab)) ? _urlTab : _allTabs[0];
-  if (startTab) showTab(startTab);
+  if (startTab) showTab(startTab, true);
   // バリュエーション分析タブのロック状態を反映（preflight と initPlugins の競合に備え両方で呼ぶ）
   refreshGapAvailability();
 

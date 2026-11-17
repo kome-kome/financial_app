@@ -73,6 +73,11 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);mi
 .notif-success{background:var(--status-good-bg);color:var(--status-good-text);border-color:var(--status-good)}
 .notif-msg{flex:1;min-width:0}
 .notif-close{background:none;border:none;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
+/* デスクトップ幅ではサイドバーを画面に貼り付ける。設定が縦に長いタブ（M-1 等）の下からでも別のタブへ移れる（#1265）。
+   この画面のヘッダーは貼り付かないので top:0。項目が画面より多いときはサイドバーの中だけでスクロールする */
+@media (min-width: 769px){
+  .sidebar{position:sticky;top:0;max-height:100vh;overflow-y:auto}
+}
 @media (max-width: 768px){
   .container{padding:12px}
   .grid4{grid-template-columns:repeat(2,1fr)}

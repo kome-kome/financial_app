@@ -654,7 +654,7 @@ class TestAnalysisStateSurvivesCompanyDetour:
     def test_show_tab_writes_the_tab_into_the_url(self):
         """入口（`_urlTab`）だけ読んで書かないと、再読込や戻るで初期タブへ戻ってしまう。"""
         import re
-        body = re.search(r"function showTab\(t\) \{(.*?)\n\}", self._src(), re.S)
+        body = re.search(r"function showTab\(t[^)]*\) \{(.*?)\n\}", self._src(), re.S)
         assert body, "showTab が見つからない"
         assert "history.replaceState" in body.group(1)
         assert "'tab'" in body.group(1)
