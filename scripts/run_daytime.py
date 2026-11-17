@@ -528,12 +528,15 @@ JOBS: dict[str, Job] = {
         why="2026 群（TOPIX の移行措置 683 社・8 回の低減）の前向き監視（#1061・#1011）。w_m + 2 の週の終値が"
             "そろった回だけ、圧力窓 CAR の累積 Z_k を O'Brien-Fleming の境界と比べる（未到来の回は検定に入れない）。"
             "初回の実行でマッチ対を .index_lists/derived/ へ凍結し、2 回目以降は読み直す。",
-        # 見積り（stage A と同じく通期行の全年度と週次株価の読み込みが大半）。実走ログで差し替える。
-        measured_min=10.0,
+        # 実測（2026-11-17 の初回・マッチ対の凍結を含む・exit 0）。
+        measured_min=0.4,
         # 初回はマッチ対を凍結する。読み込みの途中に夜間の書き込みが入ると、同じ入力から違う対が出る。
         parallel_sensitive=True,
     ),
     # 同じ監視の新規採用 35 社（記述だけ・事前登録 R9）。初回に対を凍結するので同じく単独で回す。
+    # **積まない**: 2026-11-17 の初回で主の仕様（C1・2026-03-31）のマッチが 0 社＝記述不能（事前登録の追記節
+    # 「前向き監視の結果（m = 1）」）。0 社の対が凍結されたので、積み直しても同じ理由で exit 2 になる。
+    # measured_min は exit 0 の実測が無いので見積りのまま。
     "measure:index-event-monitor-add": Job(
         name="measure_index_event_monitor_add",
         argv=("{python}", "-m", "scripts.measure_index_event", "monitor",
