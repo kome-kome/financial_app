@@ -47,6 +47,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 | 操作色（紫） | `--accent` / `--accent-hover` / `--accent-text` / `--accent-soft-*` / `--accent-deep-bg` | 塗りボタン・現在地の下線・フォーカス枠・業務画面と技術版の見出しとバッジ |
 | 状態色 | `--status-good*` / `--status-bad*` / `--status-warn*` / `--status-info*` | 良い・成功（緑）／悪い・失敗（赤）／注意（琥珀）／情報・コード（青） |
 | 値の騰落 | `--val-up*` / `--val-down*` / `--val-neutral*` | 数値の上げ（青）・下げ（赤）・中立（緑）。グラフと表の数値だけ |
+| グラフの系列色 | `--chart-blue` / `-sky` / `-cyan` / `-teal` / `-indigo` / `-violet` / `-green` / `-amber` / `-yellow` / `-orange` / `-red` / `-pink` / `-slate` | グラフの線・棒と、その注記の色見本の文字だけ。意味を持たない区別の色（意味のある塗りは状態色・騰落色）。両テーマで持ち上げた面に 4.5:1 以上（テストが守る・#1266） |
 | 影 | `--shadow-color` | 浮いた層の影の色（テーマで濃さが変わる） |
 
 ### Primary
@@ -65,7 +66,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 **騰落色は数値だけの規則。** `--val-*` は数値の上げ下げを塗るためのもので、リンク・ボタン・見出しの文字色に流用しない（過去に「やさしい解説」へのリンクが `--val-up` で青くずれた経緯は [ARCHITECTURE.md](docs/ARCHITECTURE.md) のグローバルナビの注記）。
 
-**直書きしない規則。** 色は `var(--…)` で書く。グラフや JS で塗る色も `common.js` の `cssVar('--…')` で描画時に読み、`window.onThemeChange` で塗り直す。JS が組み立てる inline style も `var(--…)` で書く（分析画面の `#c084fc` はライトの白地で約 2.6:1 だった・#1176）。直書きが許されているのは、塗りボタンの上の白文字（`#fff`）と、`:target` の淡い光（`rgba(…, .2)`）だけ。
+**直書きしない規則。** 色は `var(--…)` で書く。グラフや JS で塗る色も `common.js` の `cssVar('--…')` で描画時に読み（半透明の面は `cssVarAlpha('--…', α)`）、`window.onThemeChange` で塗り直す。テンプレートの SVG の `stroke` は `currentColor` にして、台のクラスの `color` で塗る。JS が組み立てる inline style も `var(--…)` で書く（分析画面の `#c084fc` はライトの白地で約 2.6:1 だった・#1176）。直書きが許されているのは、塗りボタンの上の白文字（`#fff`）と、`:target` の淡い光（`rgba(…, .2)`）だけ。
 
 ### テーマの切り替え
 - [static/js/theme-init.js](static/js/theme-init.js) を各テンプレートの `<head>` で**描画より前に**読み、`localStorage` の `theme`、無ければ OS の `prefers-color-scheme` から `<html data-theme>` を決める（読み込み直後に一瞬違う色で描かれるのを防ぐ）。
@@ -215,7 +216,7 @@ description: 暗色基調の業務画面に、操作と技術版は紫・入門�
 
 | テスト | 照合すること |
 |---|---|
-| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開き、右端では左へ開く（`placeTip` は common.js だけ）／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132）／JS の inline style に直書きの色が無い／分析画面のラベルが欄と結ばれ、題が `h2`、本文へのスキップリンク・サイドバーの `aria-current`・結果の行のボタンと企業リンクがある（#1176） |
+| [tests/test_templates_a11y.py](tests/test_templates_a11y.py) | 全画面が両テーマのトークンを持つ／`--text-muted` の対比が4つの面で AA 以上／`outline` を消さない／`:focus-visible` の紫の枠がある／11px の床／`.term`・`.gloss` がキーボードで開き、右端では左へ開く（`placeTip` は common.js だけ）／`showNotif` を呼ぶ画面にトーストの CSS がある／9枚のトークン2ブロックが同一（#1132）／JS の inline style と色の値・テンプレートの属性と style に直書きの色が無い／グラフの系列色が両テーマで 4.5:1 以上（#1266）／分析画面のラベルが欄と結ばれ、題が `h2`、本文へのスキップリンク・サイドバーの `aria-current`・結果の行のボタンと企業リンクがある（#1176） |
 | [tests/test_templates_nav.py](tests/test_templates_nav.py) | 全テンプレートがナビ有り・無しに分類済み／ナビのマークアップが `.active` 以外同一／`.active` は自分だけ／`.gnav*` の CSS がある／リンク先が実在する |
 | [tests/test_guide_links.py](tests/test_guide_links.py) | `/guide#…` のリンクが全部実在する／全プラグインに /guide の節がある／各画面の「この画面の見方」が自分の節を指し、`.help-link` の CSS がある |
 | [tests/test_security_headers.py](tests/test_security_headers.py) | テンプレートと JS が組み立てる HTML にインラインのスクリプト・イベントハンドラが無い／外部の `<script src>` が無い（CSP は `script-src 'self'`、`<style>` のために `style-src` だけ `'unsafe-inline'` を残す） |

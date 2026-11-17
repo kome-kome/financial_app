@@ -246,13 +246,67 @@ def test_js_inline_hex_detector_catches_the_old_form():
     assert not _JS_INLINE_HEX_RE.search("color:var(--accent-text)")
 
 
-def test_analysis_js_has_no_hex_color_values():
-    # 色の表（例: MRR_COEF_COLOR_TOKENS）もトークン名で持つ。cssVar() で描く直前に解決する。
-    # 企業詳細（company.js）のチャートの系列パレットは未移行のため、ここでは分析画面だけを縛る。
-    text = _read(_ANALYSIS_JS)
-    hits = [f"analysis.js:{text.count(chr(10), 0, m.start()) + 1} {m.group(0)}"
+def test_js_has_no_hex_color_values():
+    # 色の表（例: MRR_COEF_COLOR_TOKENS）やグラフの系列色もトークン名で持ち、cssVar() で描く直前に解決する。
+    # 直書きはダーク向けの値のままライトで塗られる（企業詳細のグラフ・#1266）。
+    hits = [f"{_name(p)}:{text.count(chr(10), 0, m.start()) + 1} {m.group(0)}"
+            for p in STATIC_JS
+            for text in [_read(p)]
             for m in _QUOTED_HEX_RE.finditer(text)]
     assert not hits, "\n".join(hits)
+
+
+# テンプレートの色の直書き（トークンの 2 ブロックとコメントの外）。許されるのは塗りボタンの上の白文字だけ（DESIGN.md）
+# 色の値の位置（`:` か `=` の直後）だけを見る。本文の「Issue #513」のような番号は 3 桁の16進と同じ形なので拾わない
+_TEMPLATE_HEX_RE = re.compile(r"""[:=]\s*["']?(#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3}))\b""")
+_ALLOWED_TEMPLATE_HEX = {"#fff"}
+
+
+def _strip_tokens_and_comments(text):
+    text = _ROOT_RE.sub("", text)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+
+def test_templates_have_no_hex_colors_outside_the_tokens():
+    """SVG の stroke/fill・inline style の background/color も var(--…) で書く（#1266）。
+    ダーク向けの値の直書きは、ライトの白地で濃い塊や読めない文字になる。"""
+    hits = []
+    for path in TEMPLATES:
+        text = _strip_tokens_and_comments(_read(path))
+        for m in _TEMPLATE_HEX_RE.finditer(text):
+            if m.group(1).lower() in _ALLOWED_TEMPLATE_HEX:
+                continue
+            before = text[max(0, m.start() - 12):m.start() + 1]
+            if re.search(r'(?:href|id|for|aria-controls|data-[\w-]+)=$', before):   # ページ内リンク等
+                continue
+            line = text[text.rfind("\n", 0, m.start()) + 1:text.find("\n", m.end())]
+            hits.append(f"{_name(path)}: {m.group(1)} {' '.join(line.split())[:100]}")
+    assert not hits, "色は var(--…) のトークンで書く（DESIGN.md）:\n" + "\n".join(hits)
+
+
+def test_template_hex_detector_catches_the_old_form():
+    # 測定器の較正: #1266 で直した形を必ず拾い、トークンの定義とコメントは拾わない
+    old = '<div class="nav-card-icon" style="background:#3f2d0b"><svg stroke="#fcd34d"></svg></div>'
+    assert len(_TEMPLATE_HEX_RE.findall(_strip_tokens_and_comments(old))) == 2
+    assert not _TEMPLATE_HEX_RE.search(_strip_tokens_and_comments(":root{--bg:#0f1117;}/* #888 */<!-- #423 -->"))
+
+
+def test_chart_series_tokens_read_on_cards():
+    """グラフの系列色（--chart-*）は線・棒の色であり、グラフの注記の色見本の文字にも使う。
+    両テーマで持ち上げた面（--bg-elevated＝グラフのカード）に対して AA（4.5:1）以上（#1266）。"""
+    failures, seen = [], 0
+    for path in TEMPLATES:
+        for sel, tokens in _root_blocks(_read(path)).items():
+            for name, value in tokens.items():
+                if not name.startswith("--chart-"):
+                    continue
+                seen += 1
+                ratio = contrast(value, tokens["--bg-elevated"])
+                if ratio < AA_TEXT:
+                    failures.append(f"{_name(path)} {sel} {name} {value}: {ratio:.2f}")
+    assert seen, "--chart-* のトークンを拾えない"
+    assert not failures, "\n".join(failures)
 
 
 # ラベルを照合する画面 → `<label>` を持つファイル（先頭がテンプレート）。収集画面は #1186 で足した

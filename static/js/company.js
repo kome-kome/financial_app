@@ -327,7 +327,7 @@ function plDatasets(recs, level){
   const otherOpEx = r => Math.max(0, rev(r) - cos(r) - sga(r) - op(r));         // 細: その他営業費用
   const nonOpTax  = r => Math.max(0, op(r) - profit(r));                        // 細: 営業外・特別・税金等
 
-  const C = { cos:'#475569', sga:'#f59e0b', other:cssVar('--text-secondary'), nonop:'#fb923c', profit:'#34d399', cost:cssVar('--text-muted') };
+  const C = { cos:cssVar('--chart-slate'), sga:cssVar('--chart-amber'), other:cssVar('--text-secondary'), nonop:cssVar('--chart-orange'), profit:cssVar('--chart-green'), cost:cssVar('--text-muted') };
   const bar = (label, color, fn) =>
     ({ label, backgroundColor:color, stack:'pl', borderRadius:2, data:recs.map(fn) });
 
@@ -419,7 +419,7 @@ function drawPL(){
     warn.textContent = plOverNote(over);
   }
   datasets.push({ label:'営業利益率(%)', type:'line', data:recs.map(r=>r.pl.op_margin), yAxisID:'y1',
-    borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3, order:0 });
+    borderColor:cssVar('--chart-amber'), backgroundColor:cssVar('--chart-amber'), tension:.3, pointRadius:3, order:0 });
 
   charts.perf = new Chart(document.getElementById('chart-perf'), {
     type:'bar',
@@ -439,7 +439,7 @@ function drawPL(){
       scales:{
         x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
         y:{ stacked:true, title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
-        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, ticks:{color:cssVar('--chart-amber')}, grid:{drawOnChartArea:false} },
       }
     })
   });
@@ -450,8 +450,8 @@ function renderMargin(labels, recs){
   charts.margin = new Chart(ctx, {
     type:'line',
     data:{ labels, datasets:[
-      {label:'営業利益率(%)', data:recs.map(r=>r.pl.op_margin), borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
-      {label:'純利益率(%)', data:recs.map(r=>r.pl.net_margin), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3},
+      {label:'営業利益率(%)', data:recs.map(r=>r.pl.op_margin), borderColor:cssVar('--chart-amber'), backgroundColor:cssVar('--chart-amber'), tension:.3, pointRadius:3},
+      {label:'純利益率(%)', data:recs.map(r=>r.pl.net_margin), borderColor:cssVar('--chart-green'), backgroundColor:cssVar('--chart-green'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts()
   });
@@ -495,10 +495,15 @@ function bsDatasets(recs, level){
   const fOth    = r => Math.max(0, liab(r) - fStd(r) - fLtd(r));  // その他負債（細）
 
   const C = {
-    fixed:'#4f46e5', ppe:'#4f46e5', intang:'#7c3aed', invOther:'#6366f1', otherFx:'#334155', // 固定＝藍～紫
-    otherCa:'#3b82f6', cash:'#22d3ee', recv:'#38bdf8', invy:'#0ea5e9', ca:'#3b82f6',          // 流動＝青～シアン
-    equity:'#34d399', otherLi:cssVar('--text-muted'), intDebt:'#f87171',            // 負債純資産
-    stDebt:'#f87171', ltDebt:'#fb923c',
+    // 固定＝藍～紫（投資その他は桃で無形の紫と分ける）
+    fixed:cssVar('--chart-indigo'), ppe:cssVar('--chart-indigo'), intang:cssVar('--chart-violet'),
+    invOther:cssVar('--chart-pink'), otherFx:cssVar('--chart-slate'),
+    // 流動＝青～シアン（細かい内訳の 4 項目が別の色になるよう棚卸は青緑）
+    otherCa:cssVar('--chart-blue'), cash:cssVar('--chart-cyan'), recv:cssVar('--chart-sky'),
+    invy:cssVar('--chart-teal'), ca:cssVar('--chart-blue'),
+    // 負債純資産
+    equity:cssVar('--chart-green'), otherLi:cssVar('--text-muted'), intDebt:cssVar('--chart-red'),
+    stDebt:cssVar('--chart-red'), ltDebt:cssVar('--chart-orange'),
   };
   const bar = (label, color, stack, fn) =>
     ({ label, backgroundColor:color, stack, borderRadius:2, data:recs.map(fn) });
@@ -551,7 +556,7 @@ function drawBS(){
   if (charts.bs){ charts.bs.destroy(); }
   const datasets = bsDatasets(recs, bsGran);
   datasets.push({ label:'自己資本比率(%)', type:'line', data:recs.map(r=>r.bs.equity_ratio),
-    yAxisID:'y1', borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3, order:0 });
+    yAxisID:'y1', borderColor:cssVar('--chart-violet'), backgroundColor:cssVar('--chart-violet'), tension:.3, pointRadius:3, order:0 });
 
   charts.bs = new Chart(document.getElementById('chart-bs'), {
     type:'bar',
@@ -571,7 +576,7 @@ function drawBS(){
       scales:{
         x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
         y:{ stacked:true, title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
-        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, min:0, max:100, ticks:{color:'#a78bfa'}, grid:{drawOnChartArea:false} },
+        y1:{ position:'right', title:{display:true, text:'%', color:cssVar('--text-muted')}, min:0, max:100, ticks:{color:cssVar('--chart-violet')}, grid:{drawOnChartArea:false} },
       }
     })
   });
@@ -594,9 +599,9 @@ function renderPPE(labels, recs){
   charts.ppe = new Chart(canvas, {
     type:'bar',
     data:{ labels, datasets:[
-      bar('建物及び構築物', '#6366f1', bld),
-      bar('機械装置',       '#22d3ee', mac),
-      bar('その他有形固定資産', '#334155', oth),
+      bar('建物及び構築物', cssVar('--chart-indigo'), bld),
+      bar('機械装置',       cssVar('--chart-cyan'), mac),
+      bar('その他有形固定資産', cssVar('--chart-slate'), oth),
     ]},
     options: baseOpts({ scales:{
       x:{ stacked:true, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
@@ -625,9 +630,9 @@ function renderProfitStages(labels, recs){
     data:{ labels, datasets:[
       bar('特別利益',  cssVar('--val-up'), r=>ok(r.pl.extraordinary_income)),
       bar('特別損失',  cssVar('--val-down'), r=>neg(r.pl.extraordinary_loss)),
-      line('営業利益', '#60a5fa', r=>ok(r.pl.operating_profit)),
-      line('経常利益', '#f59e0b', r=>ok(r.pl.ordinary_profit)),
-      line('純利益',   '#34d399', r=>ok(r.pl.net_income)),
+      line('営業利益', cssVar('--chart-sky'), r=>ok(r.pl.operating_profit)),
+      line('経常利益', cssVar('--chart-amber'), r=>ok(r.pl.ordinary_profit)),
+      line('純利益',   cssVar('--chart-green'), r=>ok(r.pl.net_income)),
     ]},
     options: baseOpts({ scales:{
       x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
@@ -648,9 +653,9 @@ function renderRdDep(labels, recs){
   charts.rdDep = new Chart(canvas, {
     type:'bar',
     data:{ labels, datasets:[
-      { label:'研究開発費', backgroundColor:'#f472b6', borderRadius:3, data:recs.map(r=>ok(r.pl.rd_expenses)) },
+      { label:'研究開発費', backgroundColor:cssVar('--chart-pink'), borderRadius:3, data:recs.map(r=>ok(r.pl.rd_expenses)) },
       { label:'減価償却費', backgroundColor:cssVar('--text-secondary'), borderRadius:3, data:recs.map(r=>ok(r.pl.depreciation)) },
-      { label:'EBITDA', type:'line', data:recs.map(r=>ok(r.pl.ebitda)), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3, spanGaps:true },
+      { label:'EBITDA', type:'line', data:recs.map(r=>ok(r.pl.ebitda)), borderColor:cssVar('--chart-green'), backgroundColor:cssVar('--chart-green'), tension:.3, pointRadius:3, spanGaps:true },
     ]},
     options: baseOpts({ scales:{
       x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
@@ -706,16 +711,16 @@ function drawCF(){
   const bar = (label, color, fn) => ({ label, backgroundColor:color, borderRadius:3, data:recs.map(fn) });
   let datasets;
   if (cfGran === 'coarse'){
-    datasets = [ bar('フリーCF（営業+投資）', '#34d399', free), bar('財務CF', '#60a5fa', fin) ];
+    datasets = [ bar('フリーCF（営業+投資）', cssVar('--chart-green'), free), bar('財務CF', cssVar('--chart-blue'), fin) ];
   } else if (cfGran === 'fine'){
-    datasets = [ bar('営業CF', '#34d399', op), bar('設備投資', '#f87171', capexOut),
-                 bar('その他投資CF', '#fbbf24', otherInv), bar('財務CF', '#60a5fa', fin) ];
+    datasets = [ bar('営業CF', cssVar('--chart-green'), op), bar('設備投資', cssVar('--chart-red'), capexOut),
+                 bar('その他投資CF', cssVar('--chart-yellow'), otherInv), bar('財務CF', cssVar('--chart-blue'), fin) ];
   } else {
-    datasets = [ bar('営業CF', '#34d399', op), bar('投資CF', '#f87171', inv), bar('財務CF', '#60a5fa', fin) ];
+    datasets = [ bar('営業CF', cssVar('--chart-green'), op), bar('投資CF', cssVar('--chart-red'), inv), bar('財務CF', cssVar('--chart-blue'), fin) ];
   }
   if (cfGran !== 'coarse'){
     datasets.push({ label:'フリーCF', type:'line', data:recs.map(free), spanGaps:true,
-      borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3 });
+      borderColor:cssVar('--chart-violet'), backgroundColor:cssVar('--chart-violet'), tension:.3, pointRadius:3 });
   }
 
   // データ品質の注記（投資CF・設備投資が未収集なら明示）
@@ -740,15 +745,15 @@ function renderPsh(labels, recs){
   charts.psh = new Chart(document.getElementById('chart-psh'), {
     type:'bar',
     data:{ labels, datasets:[
-      {label:'EPS(円)', data:recs.map(r=>r.pl.eps), backgroundColor:'#34d399', borderRadius:3},
-      {label:'DPS(円)', data:recs.map(r=>r.val.dps), backgroundColor:'#f59e0b', borderRadius:3},
+      {label:'EPS(円)', data:recs.map(r=>r.pl.eps), backgroundColor:cssVar('--chart-green'), borderRadius:3},
+      {label:'DPS(円)', data:recs.map(r=>r.val.dps), backgroundColor:cssVar('--chart-amber'), borderRadius:3},
       {label:'BPS(円)', type:'line', data:recs.map(r=>r.bs.bps), yAxisID:'y1',
-       borderColor:'#60a5fa', backgroundColor:'#60a5fa', tension:.3, pointRadius:3},
+       borderColor:cssVar('--chart-blue'), backgroundColor:cssVar('--chart-blue'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
       x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
       y:{ title:{display:true, text:'EPS・DPS（円）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
-      y1:{ position:'right', title:{display:true, text:'BPS（円）', color:cssVar('--text-muted')}, ticks:{color:'#60a5fa'}, grid:{drawOnChartArea:false} },
+      y1:{ position:'right', title:{display:true, text:'BPS（円）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--chart-blue')}, grid:{drawOnChartArea:false} },
     }})
   });
 }
@@ -757,9 +762,9 @@ function renderDiv(labels, recs){
   charts.div = new Chart(document.getElementById('chart-div'), {
     type:'line',
     data:{ labels, datasets:[
-      {label:'配当利回り(%)', data:recs.map(r=>r.val.div_yield), borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+      {label:'配当利回り(%)', data:recs.map(r=>r.val.div_yield), borderColor:cssVar('--chart-amber'), backgroundColor:cssVar('--chart-amber'), tension:.3, pointRadius:3},
       {label:'配当性向(%)', data:recs.map(r=>(r.val.dps!=null && r.pl.eps && r.pl.eps>0) ? r.val.dps/r.pl.eps*100 : null),
-       borderColor:'#a78bfa', backgroundColor:'#a78bfa', tension:.3, pointRadius:3},
+       borderColor:cssVar('--chart-violet'), backgroundColor:cssVar('--chart-violet'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts()
   });
@@ -769,8 +774,8 @@ function renderValRatio(labels, recs){
   charts.valratio = new Chart(document.getElementById('chart-valratio'), {
     type:'line',
     data:{ labels, datasets:[
-      {label:'PER(倍)', data:recs.map(r=>r.val.per), borderColor:'#60a5fa', backgroundColor:'#60a5fa', tension:.3, pointRadius:3},
-      {label:'PBR(倍)', data:recs.map(r=>r.val.pbr), borderColor:'#34d399', backgroundColor:'#34d399', tension:.3, pointRadius:3},
+      {label:'PER(倍)', data:recs.map(r=>r.val.per), borderColor:cssVar('--chart-blue'), backgroundColor:cssVar('--chart-blue'), tension:.3, pointRadius:3},
+      {label:'PBR(倍)', data:recs.map(r=>r.val.pbr), borderColor:cssVar('--chart-green'), backgroundColor:cssVar('--chart-green'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts()
   });
@@ -780,15 +785,15 @@ function renderMcap(labels, recs){
   charts.mcap = new Chart(document.getElementById('chart-mcap'), {
     type:'bar',
     data:{ labels, datasets:[
-      {label:'実績時価総額', data:recs.map(r=>mnToOku(r.val.market_cap)), backgroundColor:'#3b82f6', borderRadius:3},
-      {label:'理論時価総額', data:recs.map(r=>mnToOku(r.predicted_market_cap)), backgroundColor:'#a78bfa', borderRadius:3},
+      {label:'実績時価総額', data:recs.map(r=>mnToOku(r.val.market_cap)), backgroundColor:cssVar('--chart-blue'), borderRadius:3},
+      {label:'理論時価総額', data:recs.map(r=>mnToOku(r.predicted_market_cap)), backgroundColor:cssVar('--chart-violet'), borderRadius:3},
       {label:'乖離率(%)', type:'line', data:recs.map(r=>r.gap_ratio), yAxisID:'y1',
-       borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+       borderColor:cssVar('--chart-amber'), backgroundColor:cssVar('--chart-amber'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
       x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
       y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
-      y1:{ position:'right', title:{display:true, text:'乖離率 %', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+      y1:{ position:'right', title:{display:true, text:'乖離率 %', color:cssVar('--text-muted')}, ticks:{color:cssVar('--chart-amber')}, grid:{drawOnChartArea:false} },
     }})
   });
 }
@@ -801,7 +806,7 @@ function renderPrice(hist){
   charts.price = new Chart(document.getElementById('chart-price'), {
     type:'line',
     data:{ labels:hist.map(h=>h.trade_date), datasets:[
-      {label:'終値(円)', data:hist.map(h=>h.close), borderColor:'#38bdf8', backgroundColor:'rgba(56,189,248,.12)',
+      {label:'終値(円)', data:hist.map(h=>h.close), borderColor:cssVar('--chart-sky'), backgroundColor:cssVarAlpha('--chart-sky', .12),
        fill:true, pointRadius:0, borderWidth:1.5, tension:.1},
     ]},
     options: baseOpts({ scales:{
@@ -819,7 +824,7 @@ function renderZscore(latest){
     type:'radar',
     data:{ labels:['売上','営業利益率','ROE','自己資本比率','CF比率','EPS','D/Eレシオ','ネットキャッシュ'],
       datasets:[{ label:`業種内Zスコア (${latest.year})`, data:vals,
-        borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.2)', pointBackgroundColor:'#a78bfa', borderWidth:2 }] },
+        borderColor:cssVar('--chart-violet'), backgroundColor:cssVarAlpha('--chart-violet', .2), pointBackgroundColor:cssVar('--chart-violet'), borderWidth:2 }] },
     options:{ responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{labels:{color:cssVar('--text-body')}}, tooltip:{backgroundColor:cssVar('--bg-sunken'), borderColor:cssVar('--border'), borderWidth:1} },
       scales:{ r:{ min:-2.5, max:2.5, ticks:{stepSize:1, color:cssVar('--text-muted'), backdropColor:'transparent'},
@@ -831,14 +836,14 @@ function renderNC(labels, recs){
   charts.nc = new Chart(document.getElementById('chart-nc'), {
     type:'bar',
     data:{ labels, datasets:[
-      {label:'ネットキャッシュ(億円)', data:recs.map(r=>toOku(r.nc.net_cash)), backgroundColor:'#34d399', borderRadius:3},
+      {label:'ネットキャッシュ(億円)', data:recs.map(r=>toOku(r.nc.net_cash)), backgroundColor:cssVar('--chart-green'), borderRadius:3},
       {label:'NC比率(倍)', type:'line', data:recs.map(r=>r.nc.nc_ratio), yAxisID:'y1',
-       borderColor:'#f59e0b', backgroundColor:'#f59e0b', tension:.3, pointRadius:3},
+       borderColor:cssVar('--chart-amber'), backgroundColor:cssVar('--chart-amber'), tension:.3, pointRadius:3},
     ]},
     options: baseOpts({ scales:{
       x:{ ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
       y:{ title:{display:true, text:'億円', color:cssVar('--text-muted')}, ticks:{color:cssVar('--text-secondary')}, grid:{color:cssVar('--border-subtle')} },
-      y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:cssVar('--text-muted')}, ticks:{color:'#f59e0b'}, grid:{drawOnChartArea:false} },
+      y1:{ position:'right', title:{display:true, text:'NC比率（倍）', color:cssVar('--text-muted')}, ticks:{color:cssVar('--chart-amber')}, grid:{drawOnChartArea:false} },
     }})
   });
 }

@@ -20,6 +20,8 @@
   --val-down:#ef4444;--val-down-bg:#450a0a;--val-down-text:#fca5a5;
   --val-neutral:#10b981;--val-neutral-bg:#052e16;--val-neutral-text:#86efac;
   --shadow-color:rgba(0,0,0,.4);
+  --chart-blue:#60a5fa;--chart-sky:#38bdf8;--chart-cyan:#22d3ee;--chart-teal:#2dd4bf;--chart-indigo:#818cf8;--chart-violet:#a78bfa;--chart-green:#34d399;
+  --chart-amber:#f59e0b;--chart-yellow:#fbbf24;--chart-orange:#fb923c;--chart-red:#f87171;--chart-pink:#f472b6;--chart-slate:#8291a7;
 }
 :root[data-theme="light"]{
   --bg:#f8fafc;--bg-elevated:#ffffff;--bg-sunken:#f1f5f9;--bg-hover:#e2e8f0;
@@ -35,6 +37,8 @@
   --val-down:#dc2626;--val-down-bg:#fee2e2;--val-down-text:#991b1b;
   --val-neutral:#059669;--val-neutral-bg:#d1fae5;--val-neutral-text:#065f46;
   --shadow-color:rgba(0,0,0,.12);
+  --chart-blue:#2563eb;--chart-sky:#0369a1;--chart-cyan:#0e7490;--chart-teal:#0f766e;--chart-indigo:#4f46e5;--chart-violet:#7c3aed;--chart-green:#047857;
+  --chart-amber:#b45309;--chart-yellow:#a16207;--chart-orange:#c2410c;--chart-red:#dc2626;--chart-pink:#db2777;--chart-slate:#64748b;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 :focus-visible{outline:2px solid var(--accent-text);outline-offset:2px}
@@ -217,7 +221,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
         <div class="bs-head">
           <div>
             <div class="chart-title">損益計算書（PL）の構成 — 売上高の分解</div>
-            <div class="chart-note">各年の積み上げ棒＝<b style="color:#3b82f6">売上高</b>（億円）を費用と利益に分解（最上部の<b style="color:#34d399">緑＝純利益</b>）。折れ線＝営業利益率（右軸・％）。粒度を切り替えると内訳の細かさが変わります。出典: EDINET 有価証券報告書（年次）</div>
+            <div class="chart-note">各年の積み上げ棒＝<b style="color:var(--chart-blue)">売上高</b>（億円）を費用と利益に分解（最上部の<b style="color:var(--chart-green)">緑＝純利益</b>）。折れ線＝営業利益率（右軸・％）。粒度を切り替えると内訳の細かさが変わります。出典: EDINET 有価証券報告書（年次）</div>
           </div>
           <div class="seg" id="pl-gran" role="group" aria-label="表示粒度">
             <button class="seg-btn" data-gran="coarse" type="button">粗</button>
@@ -235,12 +239,12 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
       <div class="chart-card">
         <div class="chart-title">利益の段階 — 営業利益・経常利益・特別損益・純利益</div>
-        <div class="chart-note">折れ線＝<b style="color:#60a5fa">営業利益</b>・<b style="color:#f59e0b">経常利益</b>・<b style="color:#34d399">純利益</b>（億円）／棒＝<b style="color:var(--val-up)">特別利益(+)</b>・<b style="color:var(--val-down)">特別損失(−)</b>。経常利益−営業利益＝営業外損益。経常利益・特別損益は日本基準（JGAAP）固有のため、開示の無い企業（IFRS/米国基準の多く）では非表示になります。</div>
+        <div class="chart-note">折れ線＝<b style="color:var(--chart-sky)">営業利益</b>・<b style="color:var(--chart-amber)">経常利益</b>・<b style="color:var(--chart-green)">純利益</b>（億円）／棒＝<b style="color:var(--val-up)">特別利益(+)</b>・<b style="color:var(--val-down)">特別損失(−)</b>。経常利益−営業利益＝営業外損益。経常利益・特別損益は日本基準（JGAAP）固有のため、開示の無い企業（IFRS/米国基準の多く）では非表示になります。</div>
         <div class="chart-box tall"><canvas id="chart-profit-stages"></canvas></div>
       </div>
       <div class="chart-card">
         <div class="chart-title">研究開発費・減価償却費・EBITDA</div>
-        <div class="chart-note">棒＝<b style="color:#f472b6">研究開発費</b>・<b style="color:var(--text-secondary)">減価償却費</b>（億円）／折れ線＝<b style="color:#34d399">EBITDA</b>（営業利益＋減価償却費）。データの無い項目は表示されません。</div>
+        <div class="chart-note">棒＝<b style="color:var(--chart-pink)">研究開発費</b>・<b style="color:var(--text-secondary)">減価償却費</b>（億円）／折れ線＝<b style="color:var(--chart-green)">EBITDA</b>（営業利益＋減価償却費）。データの無い項目は表示されません。</div>
         <div class="chart-box tall"><canvas id="chart-rd-dep"></canvas></div>
       </div>
     </div>
@@ -250,7 +254,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
         <div class="bs-head">
           <div>
             <div class="chart-title">貸借対照表（BS）の構成 — 借方・貸方の対比</div>
-            <div class="chart-note">各年 <b style="color:#60a5fa">左＝資産（借方）</b> ／ <b style="color:#34d399">右＝負債・純資産（貸方）</b>。棒の高さ＝総資産（億円）。折れ線＝自己資本比率（右軸・％）。粒度を切り替えると内訳の細かさが変わります。</div>
+            <div class="chart-note">各年 <b style="color:var(--chart-blue)">左＝資産（借方）</b> ／ <b style="color:var(--chart-green)">右＝負債・純資産（貸方）</b>。棒の高さ＝総資産（億円）。折れ線＝自己資本比率（右軸・％）。粒度を切り替えると内訳の細かさが変わります。</div>
           </div>
           <div class="seg" id="bs-gran" role="group" aria-label="表示粒度">
             <button class="seg-btn" data-gran="coarse" type="button">粗</button>
@@ -262,7 +266,7 @@ table.cmp tbody tr:hover td{background:var(--border-subtle)}
       </div>
       <div class="chart-card">
         <div class="chart-title">有形固定資産の内訳</div>
-        <div class="chart-note">積み上げ棒（億円・純額）。<b style="color:#6366f1">建物及び構築物</b>＋<b style="color:#22d3ee">機械装置</b>＋その他有形＝有形固定資産合計。機械装置は連結純額の開示が無い企業では欠損します。</div>
+        <div class="chart-note">積み上げ棒（億円・純額）。<b style="color:var(--chart-indigo)">建物及び構築物</b>＋<b style="color:var(--chart-cyan)">機械装置</b>＋その他有形＝有形固定資産合計。機械装置は連結純額の開示が無い企業では欠損します。</div>
         <div class="chart-box tall"><canvas id="chart-ppe"></canvas></div>
       </div>
     </div>
