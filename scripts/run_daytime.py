@@ -715,6 +715,21 @@ JOBS: dict[str, Job] = {
         measured_min=45.4,
         parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
     ),
+    # 3 経路の運用再現で、買いのスコアの同点（全社同じ値の期・上位 K 社の境目をまたぐ同点）を数える（#1259・参考）。
+    # 買いの同点は社の順で決まり、予測が全社同じ値の期はコードの小さい社をそのまま買う（2026-11-17 に見つかった）。
+    # どのモデル・経路・期で起きるかを洗い出し、同点の規則を選ぶ材料にする。売りは既定（M-6 の μ̂）で S2 は回さない。
+    "measure:oof-replay-ties": Job(
+        name="oof_portfolio_replay_ties",
+        argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache",
+              "--start-shifts", "0,1,2", "--tie-report", "--out", "scripts/.cache/oof_portfolio_replay_ties.json"),
+        why="OOF 運用再現を 3 経路で回し、買いのスコアが全社同じ値の期と、上位 K 社の境目をまたぐ同点がある期を、モデル・"
+            "経路ごとに数える（#1259・参考）。同点は社の順で決まるので、その期はコードの小さい社を買っている。結果は"
+            " scripts/.cache/oof_portfolio_replay_ties.json。",
+        # 見積り: 同じ引数で `--tie-report` の無い `measure:oof-replay-paths` の 2026-11-11 の実測 45.4 分（数え上げは軽い）。
+        # **次の実走で差し替える。**
+        measured_min=46.0,
+        parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
+    ),
     # 同じ運用再現を売買代金の帯ごとのコスト付きで 1 回回す（#1224・参考）。2026-11-11 の「回さない」（ADR-0069）を
     # ユーザー判断で覆した（2026-11-14）。目的はコスト後の年率より、保有が売買代金の小さい帯へ寄っているかの内訳。
     "measure:oof-replay-bands": Job(

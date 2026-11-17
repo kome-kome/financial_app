@@ -1132,3 +1132,104 @@ class TestPortfolioJob:
         assert args.out not in others
         assert job.parallel_sensitive is True
         assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN
+
+
+# ── 買いのスコアの同点の数え上げ（#1259・参考）──────────────────────────────────
+
+class TestBuyTies:
+    """`buy_ties` の検体: 全社同じ値の期・境目をまたぐ同点の期・同点の無い期・社が少ない期。"""
+
+    def _buy(self):
+        buy = {}
+        buy.update({("2021-02", f"E{i:02d}"): 0.5 for i in range(12)})                    # 全社同じ値
+        # 上位 2 社は単独、3〜5 番目が同点（0.3）＝K=3 の境目をまたぐ
+        for i, v in enumerate([0.9, 0.8, 0.3, 0.3, 0.3, 0.1, 0.0]):
+            buy[("2021-05", f"E{i:02d}")] = v
+        buy.update({("2021-08", f"E{i:02d}"): float(i) for i in range(7)})                # 同点なし
+        buy.update({("2021-11", f"E{i:02d}"): 1.0 for i in range(2)})                     # K より少ない
+        return buy
+
+    def test_counts_flat_crossing_and_clean_periods(self):
+        t = op.buy_ties(self._buy(), (3, 6))
+        assert list(t) == ["2021-02", "2021-05", "2021-08", "2021-11"]
+        assert t["2021-02"] == {"n": 12, "n_unique": 1, "flat": True,
+                                "at_k": {"3": {"tied": 12, "crosses": True}, "6": {"tied": 12, "crosses": True}}}
+        assert t["2021-05"]["flat"] is False and t["2021-05"]["n_unique"] == 5
+        assert t["2021-05"]["at_k"]["3"] == {"tied": 3, "crosses": True}      # 3 番目の 0.3 は 4・5 番目と同点
+        assert t["2021-05"]["at_k"]["6"] == {"tied": 1, "crosses": False}     # 6 番目の 0.1 は単独
+        assert t["2021-08"]["at_k"]["3"] == {"tied": 1, "crosses": False}
+        assert t["2021-11"]["at_k"]["3"] == {"tied": None, "crosses": None}   # 社が K 以下＝境目なし
+
+    def test_the_crossing_tie_is_what_decides_by_code_in_replay(self):
+        """同点が境目をまたぐ期は、`replay` が社の順で買う＝数え上げが指す期と一致する。"""
+        buy = self._buy()
+        sell = {k: 0.0 for k in buy}
+        ivs = op.replay(["2021-02", "2021-05", "2021-08"], buy, sell, lambda ec, a, b: (0.0, False), 3, 0, 0.0)
+        assert ivs[0]["bought"] == ["E00", "E01", "E02"]                     # 全社同じ値＝コードの小さい 3 社
+        assert op.buy_ties(buy, (3,))["2021-02"]["flat"] is True
+
+
+class TestTiesWiring:
+    """`run_replays(tie_report=True)` と `main --tie-report` の配線。既定では何も足さない。"""
+
+    BASES = TestProductionRow.BASES
+
+    def _rows(self, monkeypatch, **kwargs):
+        row = TestProductionRow()
+        row._patch(monkeypatch)
+        return op.run_replays(row._common(), self.BASES, {}, None, list(self.BASES), "macro_enet", 3, 1, 10.0, **kwargs)
+
+    def test_every_row_gets_the_ties_only_when_asked(self, monkeypatch):
+        plain = self._rows(monkeypatch)
+        prod = {(ym, f"E{i:02d}"): 1.0 for ym in TestProductionRow.YMS for i in range(8)}   # 本番の行は全社同じ値
+        ties = self._rows(monkeypatch, tie_report=True, production=prod)
+        for name in self.BASES:
+            assert "buy_ties" not in plain[name]
+            assert {k: ties[name][k] for k in plain[name]} == plain[name]               # 既存のキーの値は変わらない
+            assert set(ties[name]["buy_ties"]) == set(TestProductionRow.YMS)
+            assert set(ties[name]["buy_ties"]["2021-06"]["at_k"]) == {"3", "6"}           # K と 2K
+        assert all(t["flat"] for t in ties[op.PRODUCTION_KEY]["buy_ties"].values())
+
+    def test_main_writes_and_prints_the_ties(self, monkeypatch, tmp_path, capsys):
+        import json
+        common = _fake_common(13, 8)
+        # 2021-04 だけ全社同じ値にする
+        common["2021-04"] = [(ec, (0.5, 0.5, 0.5), y) for ec, _p, y in common["2021-04"]]
+        _fake_main(monkeypatch, common, self.BASES, _fake_book())
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        out = tmp_path / "ties.json"
+        assert op.main(["--models", "macro_enet", "--top-k", "3", "--sell-k", "1", "--tie-report",
+                        "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        ties = payload["results"]["macro_enet"]["buy_ties"]
+        assert ties["2021-04"]["flat"] is True and ties["2021-01"]["flat"] is False
+        assert op.TIE_NOTE in payload["caveats"]
+        assert "全社同じ値: 2021-04(8社)" in capsys.readouterr().out
+
+    def test_the_default_run_has_no_ties(self, monkeypatch, tmp_path):
+        import json
+        _fake_main(monkeypatch, _fake_common(13, 8), self.BASES, _fake_book())
+        monkeypatch.setattr(op, "load_index_daily", lambda db, since: {})
+        out = tmp_path / "plain.json"
+        assert op.main(["--models", "macro_enet", "--top-k", "3", "--sell-k", "1", "--out", str(out)]) == 0
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert "buy_ties" not in payload["results"]["macro_enet"]
+        assert op.TIE_NOTE not in payload["caveats"] and "tie_report" not in payload["params"]
+
+
+class TestTiesJob:
+    KEY = "measure:oof-replay-ties"
+
+    def test_job_counts_the_ties_on_three_paths_into_its_own_file(self):
+        job = rd.JOBS[self.KEY]
+        assert job.argv[1:3] == ("-m", "scripts.oof_portfolio_replay")
+        args = op.build_parser().parse_args(list(job.argv[3:]))
+        assert args.tie_report and args.start_shifts == (0, 1, 2) and not args.portfolio
+        assert args.sell_source == op.CANDIDATE and args.cost_bands_bps is None   # S2 を回さない＝買いの側だけを数える
+        assert args.allow_full_pull and args.refresh_cache and not args.smoke
+        others = {op.build_parser().parse_args(list(rd.JOBS[k].argv[3:])).out
+                  for k in ("measure:oof-replay", "measure:oof-replay-paths", "measure:oof-replay-bands",
+                            "measure:oof-replay-portfolio")}
+        assert args.out not in others
+        assert job.parallel_sensitive is True
+        assert job.measured_min * rd.JOB_HEADROOM <= rd.JOB_BUDGET_MIN

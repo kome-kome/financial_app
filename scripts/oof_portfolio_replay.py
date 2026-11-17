@@ -83,6 +83,14 @@
 - 売りの並びは本番と同じ S2 に固定する（`--sell-source s2_quantile_low` でなければ終了コード 2・#1238）。日中枠のジョブは
   `measure:oof-replay-portfolio`（3 経路・積むのは親 #1227）
 
+## 同点の数え上げ（#1259・参考）
+
+- `replay` は買いの同点を社の順（EDINET コードの小さい順）で決める。予測が全社同じ値の期は、コードの小さい社を
+  そのまま買う（2026-11-17 に M-2* の 2021-02 と M-6 の経路 +2 か月の 2021-04 で見つかった）
+- `--tie-report` を付けたときだけ、各行に期ごとの買いのスコアの同点 `buy_ties`（`buy_ties`）を足し、全社同じ値の期と、
+  上位 K 社の境目をまたぐ同点がある期を表示する。予測は作り直さず、作った買いのスコアを数えるだけ。付けなければ
+  行と要約のキーは変わらない。日中枠のジョブは `measure:oof-replay-ties`（3 経路）
+
 実行:
     python -m scripts.oof_portfolio_replay                      # 既定 K=10・k=2・10bp
     python -m scripts.oof_portfolio_replay --top-k 30 --sell-k 6 --cost-bps 20
@@ -161,6 +169,9 @@ BREAKDOWN_NOTE = ("帯の内訳は、保有の延べ数（区間 × 保有の社
                   "分けた割合と、帯ごとの「区間リターン − 全社平均」の平均。帯は売買代金がそろう全社の三等分なので、偏りが"
                   "無ければ割合は約 1/3。記述だけで検定しない・判定には使わない（ADR-0069 の決定 5・#1224）")
 NO_BAND = "none"
+TIE_NOTE = ("同点の数え上げ（#1259・参考）: 期ごとに買いのスコアの一意な値の数と、上位 K 社・2K 社の境目の同点を数える。"
+            "同点は社の順（EDINET コードの小さい順）で決まるので、全社同じ値の期や境目をまたぐ同点がある期は、買う社がコードの"
+            "順で決まる。境目は全社の順位で数える（2 期目以降の補充は保有を除いた順位なので目安）")
 
 # 指数の週次足。`PriceBook` が読む 2 つの属性だけを持つ（株価の週次の行 `_WEEKLY_PX` と同じ名前）
 _IndexBar = namedtuple("_IndexBar", "trade_date close_last")
@@ -836,12 +847,37 @@ def predictions_with_params(panel: tuple, db, test_yms: Sequence[str],
     return preds, oof, {"n_periods_target": len(test_yms), "n_periods_matched": len(matched)}
 
 
+def buy_ties(buy: dict, ks: Sequence[int]) -> dict:
+    """期ごとの買いのスコアの同点（#1259・参考）。`{ym: {n, n_unique, flat, at_k}}` を返す。
+
+    `at_k[str(k)]` は全社の順位で k 番目の社と同じスコアの社の数 `tied` と、そのかたまりが k 番目と k+1 番目を
+    またぐか `crosses`（またぐなら、上位 k 社に入る社は社の順で決まる）。社が k 社以下の期は境目が無い（None）。
+    スコアは `replay` と同じく厳密な等号で比べる。
+    """
+    by_ym: dict[str, list[float]] = defaultdict(list)
+    for (ym, _ec), v in buy.items():
+        by_ym[ym].append(v)
+    out: dict[str, dict] = {}
+    for ym in sorted(by_ym):
+        vals = sorted(by_ym[ym], reverse=True)
+        n_unique = len(set(vals))
+        at_k = {}
+        for k in ks:
+            if len(vals) <= k:
+                at_k[str(k)] = {"tied": None, "crosses": None}
+                continue
+            v = vals[k - 1]
+            at_k[str(k)] = {"tied": vals.count(v), "crosses": vals[k] == v}
+        out[ym] = {"n": len(vals), "n_unique": n_unique, "flat": n_unique == 1, "at_k": at_k}
+    return out
+
+
 def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[str],
                 sell_source: str, top_k: int, sell_k: int, cost_bps: float,
                 production: dict | None = None, extra_m2: dict | None = None,
                 band_cost: Callable[[str, str], float] | None = None,
                 index_bars: list | None = None, bands: dict | None = None,
-                sell_keys: dict | None = None) -> dict:
+                sell_keys: dict | None = None, tie_report: bool = False) -> dict:
     """買いの並び（models）ごとに OOF 運用再現を回す。
 
     `production`（本番の設定の M-2 の `{(ym, 社): 予測}`・#1123）があり models に M-2 が入っていれば、M-2 の行の
@@ -854,6 +890,8 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
     どちらも渡さなければ（既定）、行と要約のキーは変わらない。
 
     `sell_keys`（#1238）を渡すと、売りの並びは `preds[sell_source]` ではなくそれ（S2 の売りのキー・`s2_sell_keys`）を使う。
+
+    `tie_report`（#1259）が真なら、全ての行に買いのスコアの同点 `buy_ties`（上位 K 社・2K 社の境目）を足す。
     """
     preds, y = common_to_dicts(common, bases)
     book = PriceBook(prices_by_co)
@@ -871,6 +909,8 @@ def run_replays(common: dict, bases: list, prices_by_co: dict, db, models: list[
         row = {"ordering": ordering, "summary": summarize(intervals, top_k), "intervals": intervals}
         if bands is not None:
             row["bands"] = band_breakdown(intervals, bands, book.period_return)
+        if tie_report:
+            row["buy_ties"] = buy_ties(buy, (top_k, 2 * top_k))
         return row
 
     def coverage(pred: dict, inside: dict) -> dict:
@@ -1068,6 +1108,19 @@ def _print_paths(paths: dict) -> None:
               + f"{_pct(row['mean']):>10}{_pct(row['min']):>10}{_pct(row['max']):>10}", flush=True)
 
 
+def _print_ties(paths: dict, top_k: int) -> None:
+    """買いのスコアの同点（#1259・参考）。全社同じ値の期と、上位 K 社の境目をまたぐ同点がある期だけを並べる。"""
+    print(f"\n=== 買いのスコアの同点（参考）===\n注意: {TIE_NOTE}", flush=True)
+    for shift, p in paths.items():
+        for name, row in p["results"].items():
+            ties = row.get("buy_ties") or {}
+            flat = [f"{ym}({t['n']}社)" for ym, t in ties.items() if t["flat"]]
+            cross = [f"{ym}({t['at_k'][str(top_k)]['tied']}社)" for ym, t in ties.items()
+                     if not t["flat"] and t["at_k"][str(top_k)]["crosses"]]
+            print(f"  経路 +{shift}か月 {_label(name):<6} 全社同じ値: {' '.join(flat) or 'なし'}"
+                  f" ／ 上位{top_k}社の境目をまたぐ同点: {' '.join(cross) or 'なし'}", flush=True)
+
+
 def _print_portfolio(paths: dict, decision: dict) -> None:
     """買い方の規則の計測（#1223・事前登録 docs/prereg/portfolio-construction.md）の構成ごとの表と判定。"""
     print(f"\n=== 買い方の規則（事前登録・参考）===\n注意: {PORTFOLIO_NOTE}", flush=True)
@@ -1143,6 +1196,8 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{PORTFOLIO_PREREG}。--prereg と --prereg-sha が要る）")
     ap.add_argument("--prereg", default=None, help=f"--portfolio の事前登録文書（{PORTFOLIO_PREREG}）")
     ap.add_argument("--prereg-sha", default=None, help="その凍結値（本文の sha256・追記節に記録したもの）")
+    ap.add_argument("--tie-report", action="store_true",
+                    help="各行に期ごとの買いのスコアの同点（全社同じ値・上位 K 社の境目）を足して表示する（#1259・参考）")
     ap.add_argument("--smoke", action="store_true", help="企業を絞った軽量パネルで動作確認")
     ap.add_argument("--smoke-companies", type=int, default=120)
     ap.add_argument("--allow-full-pull", action="store_true",
@@ -1243,7 +1298,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             results = run_replays(run["common"], run["bases"], panel[0], db, args.models,
                                   args.sell_source, args.top_k, args.sell_k, args.cost_bps,
                                   production=prod_preds, band_cost=band_cost,
-                                  index_bars=index_bars, bands=bands, sell_keys=sell_keys)
+                                  index_bars=index_bars, bands=bands, sell_keys=sell_keys,
+                                  tie_report=args.tie_report)
             paths[shift] = {"results": results, "production": prod_info, "has_production": prod_preds is not None,
                             "test_months": sorted(run["common"])}
             if use_s2:
@@ -1265,6 +1321,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print_paths(paths)
     if bands is not None:
         print(f"注意: {BAND_NOTE}", flush=True)
+    if args.tie_report:
+        _print_ties(paths, args.top_k)
     decision = None
     if args.portfolio:
         decision = portfolio_decision({s: p["portfolio"] for s, p in paths.items()})
@@ -1276,7 +1334,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "caveats":    ([M4_BASES_CAVEAT, DELIST_NOTE, INDEX_NOTE]
                        + ([PRODUCTION_NOTE] if any(p["has_production"] for p in paths.values()) else [])
                        + ([PATH_NOTE] if len(paths) > 1 else [])
-                       + ([BAND_NOTE, BREAKDOWN_NOTE] if bands is not None else [])),
+                       + ([BAND_NOTE, BREAKDOWN_NOTE] if bands is not None else [])
+                       + ([TIE_NOTE] if args.tie_report else [])),
         "params":     {"top_k": args.top_k, "sell_k": args.sell_k, "cost_bps": args.cost_bps,
                        "sell_source": args.sell_source, "models": args.models, "smoke": args.smoke,
                        "start_shifts": list(args.start_shifts),
