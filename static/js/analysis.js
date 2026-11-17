@@ -121,6 +121,21 @@ window.onThemeChange = function(){
   fetchModelStatus();
 };
 
+// 期待リターンの列名（#1262・CONTEXT.md「画面の表記」）。保存済みの表と実行後の表が同じ名前を読む。
+// M-1/M-2/M-6 は 52 週先リターンの予測、M-3 は週次の潜在アルファの最新推定を 52 倍した値で、
+// 算出方式が違う（大小を比べられない）ので M-3 だけ記号ごと別の名前にする。
+const MU_HEAD = {
+  forecast: {label: 'μ̂（1年先）',
+             tip: '1年先（52週）の期待リターンの予測（年率の対数リターン・無次元）。10.00% は年率 +10% を意味する。'},
+  dlm:      {label: '年率化アルファ（α×52）',
+             tip: '週次の潜在アルファ（その銘柄だけの上乗せ分）の最新推定値を 52 倍して年率に直した値（無次元）。'
+                  + '1年先の予測ではなく、M-1/M-2/M-6 の μ̂ とは算出方式が違うので大小を比べない。'},
+};
+const MU_HEAD_BY_PLUGIN = {macro_dlm: MU_HEAD.dlm};
+const muHead = name => MU_HEAD_BY_PLUGIN[name] || MU_HEAD.forecast;
+const muHeadCell = (h, extraTip = '') =>
+  `<span class="gloss" tabindex="0" data-tip="${esc(h.tip + extraTip)}">${esc(h.label)}</span>`;
+
 // プラグインシステム
 const PLUGIN_TAB_MAP = {
   'gap_analysis':       'gap',
@@ -1559,6 +1574,12 @@ function _savedHTML(d, tabId) {
       + diag;
   }
   const asof = d.asof && d.asof.snapshot_date ? d.asof.snapshot_date : '不明';
+  const head = muHead(d.name);
+  // M-3 の値は尺度がほかのモデルと違う（#1262）。既定で見える表なので、ツールチップに頼らず表の上に出す。
+  const scaleNote = head === MU_HEAD.dlm
+    ? '<div class="info-box">この値は週次の潜在アルファを 52 倍して年率に直したもので、1年先の予測ではありません。'
+      + 'ほかのモデル（M-2・M-6）の μ̂（1年先）とは算出方式が違うので、大小を比べないでください。</div>'
+    : '';
   const rows = (d.rows || []).map(r => {
     const mu = r.mu * 100;
     return `<tr>
@@ -1570,10 +1591,11 @@ function _savedHTML(d, tabId) {
     </tr>`;
   }).join('');
   return title + `<div class="saved-meta">保存 ${esc(_fmtSavedAt(d.saved_at))} ・ データ基準日 ${esc(asof)} ・ `
-    + `今買える ${Number(d.n_total).toLocaleString()}社のうち μ̂ の上位 ${(d.rows || []).length}社${by ? ' ・ ' + by : ''}</div>`
+    + `今買える ${Number(d.n_total).toLocaleString()}社のうち ${esc(head.label)} の上位 ${(d.rows || []).length}社${by ? ' ・ ' + by : ''}</div>`
+    + scaleNote
     + `<div style="overflow-x:auto"><table>
         <thead><tr><th style="text-align:right">順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-          <th style="text-align:right" title="1年先（52週）の期待リターンの予測（対数）。夜間などのバッチが保存した値">μ̂（1年先）</th></tr></thead>
+          <th style="text-align:right">${muHeadCell(head, '夜間などのバッチが保存した値。')}</th></tr></thead>
         <tbody>${rows}</tbody></table></div>` + diag;
 }
 
@@ -2695,7 +2717,7 @@ function _mrrPaintChart(v) {
           if (!p) return '';
           return [
             p.company_name || p.edinet_code,
-            `μ_raw: ${((p.mu_raw ?? 0) * 100).toFixed(2)}%`,
+            `${MU_HEAD.forecast.label}: ${((p.mu_raw ?? 0) * 100).toFixed(2)}%`,
             `${MRR_AXIS_LABELS[axisKey] || axisKey}: ${(p[axisKey] ?? 0).toFixed(4)}`,
             axisKey !== 'r2' && p.r2 != null ? `R2 ボラ: ${(p.r2 * 100).toFixed(2)}%` : null,
             axisKey !== 'r_macro' && p.r_macro != null ? `R_macro: ${(p.r_macro * 100).toFixed(2)}%` : null,
@@ -2715,7 +2737,7 @@ function _mrrPaintChart(v) {
         x: { type: useLogX ? 'logarithmic' : 'linear',
              title: { display: true, text: `リスク（${MRR_AXIS_LABELS[axisKey]}）` },
              min: xRange.min, max: xRange.max },
-        y: { type: 'linear', title: { display: true, text: '期待リターン（μ_raw・年率）' },
+        y: { type: 'linear', title: { display: true, text: `期待リターン（${MU_HEAD.forecast.label}）` },
              min: yRange.min, max: yRange.max },
       },
     },
@@ -2747,7 +2769,7 @@ function _mrrTableHTML(v) {
   }
   const total = (_mrrData && _mrrData.results ? _mrrData.results.length : v.top.length);
   const header = `<tr><th>順位</th><th>証券コード</th><th>企業名</th><th>業種</th>
-    <th><span class="gloss" tabindex="0" data-tip="期待リターン（52週=1年先の年率対数リターン、無次元）。小数を%表示しているだけで、10.00%は年率+10%を意味する（OLSモデルの生予測値）。">μ_raw</span></th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
+    <th>${muHeadCell(MU_HEAD.forecast, '線形回帰の素の予測値（業種平均への収縮なし）。')}</th><th>R2 ボラ</th><th>R_macro</th><th>R3 信頼性</th><th>効用 U</th><th>D（負効用）</th><th>F</th></tr>`;
   const rows = v.top.map((r, i) => {
     const mu = r.mu_raw ?? 0;
     const muClass = mu > 0 ? 'text-green' : 'text-red';
@@ -2785,8 +2807,8 @@ function _mrrTableHTML(v) {
     </div>
     ${_mrrLambdaNoteHTML(v)}
     <div class="text-sm" style="color:var(--text-muted);margin-bottom:6px;font-size:11px">
-      ※ μ_raw は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。モデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
-      順位は目安。μ_shrunk はセクター平均への収縮後の保守的推定（参考）。
+      ※ μ̂ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。モデルの素の銘柄別推定（収縮なし）。検証 R² は低く推定にはノイズを含むため、
+      順位は目安。
     </div>
     <div style="overflow-x:auto">
       <table><thead>${header}</thead><tbody>${rows}</tbody></table>
@@ -3093,7 +3115,7 @@ const _mgView = _riskReturnView({
     ${_mgLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ は52週（1年）先の年率対数リターン予測（例: 表示10.00% = 年率+10%）。M-1と同一ターゲットをXGBoostで学習。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">順位のボタンか行をクリックすると SHAP 寄与を表示します。銘柄名は企業詳細を新しいタブで開きます</div>`,
-  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="期待リターン（M-1と同じ52週=1年先の年率対数リターン、無次元）。0.10は年率+10%を意味する（XGBoostモデルの予測値）。">μ</span></th>${_rrTailHead(v.axis)}`,
+  headCells: v => `${_rrLeadHead()}<th>${muHeadCell(MU_HEAD.forecast, '勾配ブースティングの予測値。')}</th>${_rrTailHead(v.axis)}`,
   rowCells: (r, i, v, c) => `${_rrLeadCells(r, i, c)}
       <td class="${r.mu_raw>0?'text-green':''}">${r.mu_raw!=null?(r.mu_raw*100).toFixed(2)+'%':'-'}</td>
       ${_rrTailCells(r, v.axis)}`,
@@ -3221,7 +3243,7 @@ const _enetView = _riskReturnView({
     ${_enetLambdaNoteHTML(v)}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で検証済み。</div>
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">順位のボタンか行をクリックすると予測の内訳を表示します。銘柄名は企業詳細を新しいタブで開きます</div>`,
-  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th><span class="gloss" tabindex="0" data-tip="52週=1年先の年率対数リターンの予測値（ElasticNet）。順位は OOF で検証済みだが、水準は検証していない。">μ̂</span></th>${_rrTailHead(v.axis)}`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th>${muHeadCell(MU_HEAD.forecast, '正則化線形の予測値。順位は OOF で検証済みだが、水準は検証していない。')}</th>${_rrTailHead(v.axis)}`,
   rowCells: (r, i, v, c) => `${_rrLeadCells(r, i, c)}
       <td class="${r.mu_rel>0?'text-green':''}">${_rrPct(r.mu_rel, true)}</td>
       <td>${_rrPct(r.mu_raw)}</td>
@@ -3554,7 +3576,7 @@ function _dlmTableHTML(data, v) {
     </div>
     ${makeChartContainer('chart-dlm', 320)}
     <div style="overflow-x:auto"><table>
-      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th><span class="gloss" tabindex="0" data-tip="期待リターン（週次の潜在アルファ状態推定値をα×52で年率換算、無次元）。0.10は年率+10%を意味する。カルマンフィルタによる最新推定値のため、M-1/M-2（回帰・機械学習の予測値）とは算出方式が異なる。">μ̂(年率)</span></th><th>R_macro</th><th>U=μ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
+      <thead><tr><th>#</th><th>コード</th><th>銘柄名</th><th>業種</th><th>${muHeadCell(MU_HEAD.dlm, 'カルマンフィルタによる最新推定値。')}</th><th>R_macro</th><th>U=μ̂−λR</th><th>F</th>${betaHead}<th>RMSE</th><th>被覆</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>`;
 }
