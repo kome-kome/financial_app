@@ -373,7 +373,7 @@ function renderWeightGrid() {
   for (const [key, [label, def]] of Object.entries(WEIGHT_LABELS)) {
     grid.innerHTML += `
       <div style="background:var(--bg-sunken);border-radius:8px;padding:10px">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${label}</div>
+        <label for="range-${key}" style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:6px">${label}</label>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="range" min="-2" max="3" step="0.1" value="${def}"
             style="flex:1;accent-color:var(--accent);cursor:pointer"
