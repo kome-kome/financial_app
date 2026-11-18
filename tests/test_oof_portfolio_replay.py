@@ -1160,13 +1160,74 @@ class TestBuyTies:
         assert t["2021-08"]["at_k"]["3"] == {"tied": 1, "crosses": False}
         assert t["2021-11"]["at_k"]["3"] == {"tied": None, "crosses": None}   # 社が K 以下＝境目なし
 
-    def test_the_crossing_tie_is_what_decides_by_code_in_replay(self):
-        """同点が境目をまたぐ期は、`replay` が社の順で買う＝数え上げが指す期と一致する。"""
+    def test_the_crossing_tie_is_broken_by_the_hash_in_replay(self):
+        """同点が境目をまたぐ期は、`replay` が `tie_order` の順で買う＝数え上げが指す期で規則が効く（ADR-0077）。"""
         buy = self._buy()
         sell = {k: 0.0 for k in buy}
         ivs = op.replay(["2021-02", "2021-05", "2021-08"], buy, sell, lambda ec, a, b: (0.0, False), 3, 0, 0.0)
-        assert ivs[0]["bought"] == ["E00", "E01", "E02"]                     # 全社同じ値＝コードの小さい 3 社
+        codes = [f"E{i:02d}" for i in range(12)]
+        assert ivs[0]["bought"] == sorted(codes, key=lambda ec: op.tie_order("2021-02", ec))[:3]
         assert op.buy_ties(buy, (3,))["2021-02"]["flat"] is True
+
+
+# ── 同点の割り方（#1259・ADR-0077）──────────────────────────────────────────
+
+class TestTieOrder:
+    """同点は `(期, 社)` の SHA-256 の順で割る。コード順にしない・再現できる・入力の順に依らない・同点でない順位は変えない。"""
+
+    YMS = ["2021-02", "2021-05", "2021-08"]
+    CODES = [f"E{i:05d}" for i in range(40)]
+    RET = staticmethod(lambda ec, a, b: (0.0, False))
+
+    def _flat(self, ym: str, v: float = 0.5) -> dict:
+        return {(ym, ec): v for ec in self.CODES}
+
+    def _by_hash(self, ym: str, ecs) -> list[str]:
+        return sorted(ecs, key=lambda ec: op.tie_order(ym, ec))
+
+    def test_tie_order_is_stable_bytes_and_depends_on_the_period(self):
+        assert op.tie_order("2021-02", "E00001") == op.tie_order("2021-02", "E00001")
+        assert isinstance(op.tie_order("2021-02", "E00001"), bytes)
+        # 社だけで決めると毎期同じ社が先頭に来る（固定の偏り）。期が変われば並びも変わる
+        assert self._by_hash("2021-02", self.CODES) != self._by_hash("2021-05", self.CODES)
+
+    def test_a_flat_period_does_not_buy_the_smallest_codes(self):
+        buy = {**self._flat("2021-02"), **self._flat("2021-05"), **self._flat("2021-08")}
+        sell = {k: 0.0 for k in buy}
+        ivs = op.replay(self.YMS, buy, sell, self.RET, 10, 0, 0.0)
+        assert ivs[0]["bought"] != self.CODES[:10]
+        assert ivs[0]["bought"] == self._by_hash("2021-02", self.CODES)[:10]
+
+    def test_same_result_twice_and_independent_of_input_order(self):
+        buy = {**self._flat("2021-02"), **self._flat("2021-05"), **self._flat("2021-08")}
+        sell = {k: 0.0 for k in buy}
+        a = op.replay(self.YMS, buy, sell, self.RET, 10, 2, 0.0)
+        b = op.replay(self.YMS, buy, sell, self.RET, 10, 2, 0.0)
+        rev_buy = dict(reversed(list(buy.items())))
+        rev_sell = dict(reversed(list(sell.items())))
+        c = op.replay(self.YMS, rev_buy, rev_sell, self.RET, 10, 2, 0.0)
+        assert a == b == c
+
+    def test_distinct_scores_keep_their_order(self):
+        buy = {(ym, ec): float(i) for ym in self.YMS for i, ec in enumerate(self.CODES)}
+        sell = {k: 0.0 for k in buy}
+        ivs = op.replay(self.YMS, buy, sell, self.RET, 10, 0, 0.0)
+        assert ivs[0]["bought"] == self.CODES[::-1][:10]                     # スコアの高い 10 社を高い順のまま
+
+    def test_a_flat_sell_key_sells_by_the_hash(self):
+        buy = {(ym, ec): float(i) for ym in self.YMS for i, ec in enumerate(self.CODES)}
+        sell = {k: 0.0 for k in buy}                                        # 売りのキーは全社同じ値
+        ivs = op.replay(self.YMS, buy, sell, self.RET, 10, 2, 0.0)
+        held = ivs[0]["holdings"]
+        assert ivs[1]["sold"] == self._by_hash("2021-05", held)[:2]
+
+    def test_combined_uses_the_same_rule(self):
+        buys = {op.CANDIDATE: {**self._flat("2021-02"), **self._flat("2021-05"), **self._flat("2021-08")}}
+        sell = {k: 0.0 for k in buys[op.CANDIDATE]}
+        ivs = op.replay_combined(self.YMS, buys, sell, self.RET, 10, 2, 0.0)
+        single = op.replay(self.YMS, buys[op.CANDIDATE], sell, self.RET, 10, 2, 0.0)
+        assert ivs[0]["holdings"] == sorted(self._by_hash("2021-02", self.CODES)[:10])
+        assert [r["holdings"] for r in ivs] == [r["holdings"] for r in single]
 
 
 class TestTiesWiring:

@@ -85,8 +85,9 @@
 
 ## 同点の数え上げ（#1259・参考）
 
-- `replay` は買いの同点を社の順（EDINET コードの小さい順）で決める。予測が全社同じ値の期は、コードの小さい社を
-  そのまま買う（2026-11-17 に M-2* の 2021-02 と M-6 の経路 +2 か月の 2021-04 で見つかった）
+- `replay`・`replay_combined` は買い・売りの同点を `tie_order(期, 社)`（SHA-256）の順で割る（ADR-0077）。
+  以前は社の順（EDINET コードの小さい順）で、予測が全社同じ値の期はコードの小さい社をそのまま買っていた
+  （2026-11-17 に M-2* の 2021-02 と M-6 の経路 +2 か月の 2021-04 で見つかった・11/18 の計測で M-6 は経路の途中の期にもあった）
 - `--tie-report` を付けたときだけ、各行に期ごとの買いのスコアの同点 `buy_ties`（`buy_ties`）を足し、全社同じ値の期と、
   上位 K 社の境目をまたぐ同点がある期を表示する。予測は作り直さず、作った買いのスコアを数えるだけ。付けなければ
   行と要約のキーは変わらない。日中枠のジョブは `measure:oof-replay-ties`（3 経路）
@@ -101,6 +102,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import hashlib
 import json
 import math
 import os
@@ -170,8 +172,8 @@ BREAKDOWN_NOTE = ("帯の内訳は、保有の延べ数（区間 × 保有の社
                   "無ければ割合は約 1/3。記述だけで検定しない・判定には使わない（ADR-0069 の決定 5・#1224）")
 NO_BAND = "none"
 TIE_NOTE = ("同点の数え上げ（#1259・参考）: 期ごとに買いのスコアの一意な値の数と、上位 K 社・2K 社の境目の同点を数える。"
-            "同点は社の順（EDINET コードの小さい順）で決まるので、全社同じ値の期や境目をまたぐ同点がある期は、買う社がコードの"
-            "順で決まる。境目は全社の順位で数える（2 期目以降の補充は保有を除いた順位なので目安）")
+            "同点は (期, 社) のハッシュの順で割る（ADR-0077）ので、全社同じ値の期や境目をまたぐ同点がある期は、買う社が"
+            "モデルでなくハッシュの順で決まる。境目は全社の順位で数える（2 期目以降の補充は保有を除いた順位なので目安）")
 
 # 指数の週次足。`PriceBook` が読む 2 つの属性だけを持つ（株価の週次の行 `_WEEKLY_PX` と同じ名前）
 _IndexBar = namedtuple("_IndexBar", "trade_date close_last")
@@ -327,6 +329,15 @@ def months_between(ym0: str, ym1: str) -> int:
     return (y1 - y0) * 12 + (m1 - m0)
 
 
+def tie_order(ym: str, ec: str) -> bytes:
+    """同点を割る順（ADR-0077・#1259）。`(期, 社)` の SHA-256 で、毎回同じ・入力の順に依らない・コード順に偏らない。
+
+    社だけで決めると毎期同じ社が先に来る（コード順と同じ種類の固定の偏り）ので期も混ぜる。`hash()` は起動ごとに
+    変わるので使わない。予測が全社同じ値の期は、事実上の無作為な社を買う（期待値は全社平均）。
+    """
+    return hashlib.sha256(f"{ym}|{ec}".encode()).digest()
+
+
 def replay(periods: list[str], buy: dict, sell: dict,
            ret: Callable[[str, str, str], tuple[float | None, bool]],
            top_k: int, sell_k: int, cost_bps: float,
@@ -337,7 +348,7 @@ def replay(periods: list[str], buy: dict, sell: dict,
     buy = {(ym, 社): 買いのスコア}（高いほど買う）、sell = {(ym, 社): 売りのキー}（低いほど先に売る）。
     その期に予測がある社＝両方がそろう社。ret(社, ym0, ym1) は `(リターン, 途切れたか)`。
     区間 i は periods[i] で組んだ保有を periods[i+1] まで持った結果。最後の期では入れ替えない。
-    同点は社の順で決める（入力の順に依らない）。
+    同点は `tie_order(期, 社)` の順で割る（入力の順に依らない・ADR-0077）。
 
     参考（#1167）: `swap_gain` は 2 回目以降の入れ替えで「買った社 − 売った社」の、この区間のリターンの平均の差
     （どちらかの社のリターンが 1 つも取れない区間と初回は None）。予測が切れて外した社（`forced`）は売った社に
@@ -357,10 +368,10 @@ def replay(periods: list[str], buy: dict, sell: dict,
         domain = by_ym.get(ym, set())
         forced = sorted(ec for ec in holdings if ec not in domain)
         keep = [ec for ec in holdings if ec in domain]
-        sold = sorted(keep, key=lambda ec: (sell[(ym, ec)], ec))[:min(sell_k, len(keep))] if i else []
+        sold = sorted(keep, key=lambda ec: (sell[(ym, ec)], tie_order(ym, ec)))[:min(sell_k, len(keep))] if i else []
         kept = set(keep) - set(sold)
         candidates = sorted((ec for ec in domain if ec not in kept and ec not in sold),
-                            key=lambda ec: (-buy[(ym, ec)], ec))
+                            key=lambda ec: (-buy[(ym, ec)], tie_order(ym, ec)))
         bought = candidates[:max(0, top_k - len(kept))]
         holdings = sorted(kept | set(bought))
         cost = cost_rate * (len(sold) + len(forced) + len(bought)) / top_k
@@ -444,7 +455,7 @@ def replay_combined(periods: list[str], buys: dict[str, dict], sell: dict,
         for leg in legs:
             dom = domain[leg].get(ym, set())
             keep = [ec for ec in holdings[leg] if ec in dom]
-            sold = sorted(keep, key=lambda ec: (sell[(ym, ec)], ec))[:min(sell_k, len(keep))] if i else []
+            sold = sorted(keep, key=lambda ec: (sell[(ym, ec)], tie_order(ym, ec)))[:min(sell_k, len(keep))] if i else []
             kept[leg], sold_by[leg] = set(keep) - set(sold), set(sold)
         union_now: set = set().union(*kept.values())
         skipped = 0
@@ -453,7 +464,7 @@ def replay_combined(periods: list[str], buys: dict[str, dict], sell: dict,
             got: list[str] = []
             for ec in sorted((ec for ec in domain[leg].get(ym, set())
                               if ec not in kept[leg] and ec not in sold_by[leg]),
-                             key=lambda ec: (-buys[leg][(ym, ec)], ec)):
+                             key=lambda ec: (-buys[leg][(ym, ec)], tie_order(ym, ec))):
                 if len(got) >= need:
                     break
                 ind = industry_of.get(ec)
@@ -851,7 +862,7 @@ def buy_ties(buy: dict, ks: Sequence[int]) -> dict:
     """期ごとの買いのスコアの同点（#1259・参考）。`{ym: {n, n_unique, flat, at_k}}` を返す。
 
     `at_k[str(k)]` は全社の順位で k 番目の社と同じスコアの社の数 `tied` と、そのかたまりが k 番目と k+1 番目を
-    またぐか `crosses`（またぐなら、上位 k 社に入る社は社の順で決まる）。社が k 社以下の期は境目が無い（None）。
+    またぐか `crosses`（またぐなら、上位 k 社に入る社は `tie_order` の順で決まる）。社が k 社以下の期は境目が無い（None）。
     スコアは `replay` と同じく厳密な等号で比べる。
     """
     by_ym: dict[str, list[float]] = defaultdict(list)
