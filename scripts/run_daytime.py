@@ -751,7 +751,7 @@ JOBS: dict[str, Job] = {
         argv=("{python}", "-m", "scripts.oof_portfolio_replay", "--allow-full-pull", "--refresh-cache",
               "--portfolio", "--start-shifts", "0,1,2", "--sell-source", "s2_quantile_low",
               "--prereg", "docs/prereg/portfolio-construction.md",
-              "--prereg-sha", "b2737334fa25e4d1fcba8796a37b7d32e0619b05d0ce80cad7c63671ef4ee147",
+              "--prereg-sha", "e21ab3584f12be989c75d9cead9e7919b162deb76dd4da9b1c01b010bdd48000",
               "--out", "scripts/.cache/oof_portfolio_replay_portfolio.json"),
         why="事前登録した 7 つの保有の組み方（M-6 と M-2* の上位 10 社ずつの合算・業種の上限 4／3 社・単独）を、売りの並びを"
             "本番と同じ S2 にした OOF 運用再現で 3 経路回し、事前登録 §4 の判定（業種の上限・M-6 単独を採るか、今のままか）を"
