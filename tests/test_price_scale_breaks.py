@@ -5,6 +5,7 @@ J-Quants の AdjC（JPX公式・調整後）と突合して段差を検出し、
 取り直す経路を、HTTP を遮断して検証する（DB は conftest の SQLite セッション）。
 """
 import asyncio
+import json
 import os
 import sys
 from datetime import date
@@ -16,7 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import collector_prices                   # noqa: E402
 from collector_prices import (            # noqa: E402
+    OFFICIAL_SPLIT_STAMP_KEY,
     _pick_probe_dates,
+    drop_from_official_split_stamp,
+    merge_official_split_stamp,
+    read_official_split_stamp,
     _probe_official_closes,
     classify_unadjusted_breaks,
     collect_stock_price_history_jquants,
@@ -529,6 +534,88 @@ class TestRepairPriceScaleBreaks:
         rec.assert_not_called()
         assert r["repaired"] == 0
         assert "スケール段差" in r["failed"][0]["reason"]
+
+    @staticmethod
+    def _stamp(db, fixed):
+        collector_prices.upsert_setting(db, OFFICIAL_SPLIT_STAMP_KEY, json.dumps({
+            "applied_at": "2026-08-29T11:39:35+00:00", "issue": 466,
+            "cover": ["2024-06-06", "2026-06-06"], "fixed": fixed}))
+
+    def test_rewriting_official_fix_is_reported_and_unstamped(self, db):
+        """公式の係数だけで直した社を Yahoo で取り直したら、消えたことを報告し印から外す（#1279）。
+
+        E00484 の実例: 8/29 に公式だけで直した 335 週が、1:2 分割の取り直しで黙って未調整へ戻った。
+        外すので `--only <社> --apply` が --force 無しで通り、他社の記録は残る。
+        """
+        self._stamp(db, {"E00000": 335, "E99999": 17})
+        p_detect, p_yahoo, p_sleep = self._patched([self._found(2), self._found(0)])
+        with p_detect, p_yahoo, p_sleep:
+            with patch("collector_prices.record_prices_batch", return_value=1):
+                r = asyncio.run(repair_price_scale_breaks(db, "key", persist=True))
+
+        assert [b["edinet_code"] for b in r["official_lost"]] == ["E00000"]
+        stamp = read_official_split_stamp(db)
+        assert stamp["fixed"] == {"E99999": 17}
+        assert stamp["lost_by_ec"]["E00000"]["by"] == "repair-price-breaks"
+        assert stamp["cover"] == ["2024-06-06", "2026-06-06"]
+
+    def test_failed_rewrite_keeps_the_stamp(self, db):
+        """取り直しが書けなかった社は印に残す（補正は消えていない）。"""
+        self._stamp(db, {"E00000": 335})
+        p_detect, p_yahoo, p_sleep = self._patched([self._found(1), self._found(1)], yahoo_rows=[])
+        with p_detect, p_yahoo, p_sleep:
+            with patch("collector_prices.record_prices_batch") as rec:
+                r = asyncio.run(repair_price_scale_breaks(db, "key", persist=True))
+
+        rec.assert_not_called()
+        assert r["official_lost"] == []
+        assert read_official_split_stamp(db)["fixed"] == {"E00000": 335}
+
+    def test_dry_run_does_not_touch_the_stamp(self, db):
+        self._stamp(db, {"E00000": 335})
+        p_detect, p_yahoo, p_sleep = self._patched([self._found(1)])
+        with p_detect, p_yahoo, p_sleep:
+            r = asyncio.run(repair_price_scale_breaks(db, "key", persist=False))
+
+        assert r["official_lost"] == []
+        assert read_official_split_stamp(db)["fixed"] == {"E00000": 335}
+
+
+class TestOfficialSplitStamp:
+    """公式補正の印は社ごと（#1279）。掛け直しが他社の記録を消さない。"""
+
+    OLD = {"applied_at": "2026-08-29T11:39:35+00:00", "issue": 466,
+           "cover": ["2024-06-06", "2026-06-06"], "fixed": {"E01300": 337, "E00484": 335}}
+
+    def test_merge_keeps_other_companies(self):
+        got = merge_official_split_stamp(self.OLD, {"E00484": 335}, cover=("2024-11-20", "2026-11-20"),
+                                         applied_at="2026-11-20T00:00:00+00:00")
+        assert got["fixed"] == {"E01300": 337, "E00484": 335}
+        # 古い形の社は印全体の時刻を引き継ぐ
+        assert got["applied_at_by_ec"] == {"E01300": "2026-08-29T11:39:35+00:00",
+                                           "E00484": "2026-11-20T00:00:00+00:00"}
+        assert got["cover"] == ["2024-11-20", "2026-11-20"]
+        assert self.OLD["fixed"] == {"E01300": 337, "E00484": 335}     # 入力を変えない
+
+    def test_drop_then_merge_clears_lost(self):
+        dropped, ecs = drop_from_official_split_stamp(self.OLD, ["E00484", "E77777"],
+                                                      at="t1", by="repair-price-breaks")
+        assert ecs == ["E00484"]
+        assert dropped["fixed"] == {"E01300": 337}
+        assert dropped["lost_by_ec"] == {"E00484": {"at": "t1", "by": "repair-price-breaks"}}
+        again = merge_official_split_stamp(dropped, {"E00484": 335}, cover=("a", "b"), applied_at="t2")
+        assert again["fixed"] == {"E01300": 337, "E00484": 335}
+        assert "lost_by_ec" not in again
+
+    def test_drop_of_unstamped_company_is_a_no_op(self):
+        same, ecs = drop_from_official_split_stamp(self.OLD, ["E77777"], at="t", by="x")
+        assert same is self.OLD and ecs == []
+
+    def test_broken_stamp_raises_instead_of_reading_as_empty(self, db):
+        """壊れた印を空とみなすと、2度掛けの守りが黙って外れる。"""
+        collector_prices.upsert_setting(db, OFFICIAL_SPLIT_STAMP_KEY, "[1, 2]")
+        with pytest.raises(ValueError):
+            read_official_split_stamp(db)
 
 
 class TestClassifyUnadjustedBreaks:

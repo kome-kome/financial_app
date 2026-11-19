@@ -382,6 +382,13 @@ class TestSafetyDefaults:
         """キーを変えると過去の適用が見えなくなり、2度掛け（係数の二乗）が通る。"""
         assert R.STAMP_KEY == "splits_repaired_from_jquants"
 
+    def test_guard_is_per_company(self):
+        """2度掛けを拒むのは印に載る社だけ（#1279）。印が1社でもあると全体を拒む形へ戻さない。"""
+        stamp = {"fixed": {"E00484": 335}}
+        assert R.stamped_targets(stamp, ["E00484", " E01300"]) == ["E00484"]
+        assert R.stamped_targets(stamp, ["E01300"]) == []
+        assert R.stamped_targets({}, ["E00484"]) == []
+
     def test_apply_corrections_skips_unit_factors(self):
         """係数 1.0 の週へ UPDATE を撃たない（無駄な書き込みを増やさない）。"""
         executed = []

@@ -111,6 +111,8 @@ from sqlalchemy import text as sqla_text
 import database as D
 from collector_prices import (
     _jquants_fetch_code, _learn_jquants_coverage, detect_price_scale_breaks,
+    # 印は Yahoo 経路（`--repair-price-breaks --persist`）も読み書きするので本番側に置く（#1279）
+    OFFICIAL_SPLIT_STAMP_KEY, merge_official_split_stamp, read_official_split_stamp,
 )
 from collector_utils import (
     JQUANTS_RATE_SLEEP,
@@ -132,7 +134,15 @@ from corporate_actions import (
 # `AdjFactor` がイベントとみなされる下限。唯一の源は corporate_actions（ここは互換の別名）。
 EVENT_EPS = ADJ_FACTOR_EVENT_EPS
 
-STAMP_KEY = "splits_repaired_from_jquants"
+# 印のキー。唯一の源は collector_prices（ここは互換の別名）。印は社ごと（#1279）——
+# 2度掛け（係数の二乗）を拒むのは印に載る社だけで、書くときは既存の印へ足す。
+STAMP_KEY = OFFICIAL_SPLIT_STAMP_KEY
+
+
+def stamped_targets(stamp: dict, ecs) -> list:
+    """`ecs` のうち、公式の補正が既に載っている（印の `fixed` にある）社。"""
+    fixed = stamp.get("fixed") or {}
+    return sorted(ec for ec in {e.strip() for e in ecs} if ec in fixed)
 
 
 # ── 純関数（ネットワークにも DB にも触らない・ここがテスト対象）─────────────────
@@ -384,10 +394,13 @@ async def _run(args) -> dict:
         if D.DB_TARGET != "local" or not D._is_local:
             raise SystemExit(f"接続先が local ではありません（{D.DB_TARGET!r}）。"
                              "このスクリプトはローカル正本専用です（ADR-0038）。")
-        stamp = D.get_setting(db, STAMP_KEY)
-        if stamp and args.apply and not args.force:
-            raise SystemExit(f"既に適用済みです（app_settings.{STAMP_KEY}）:\n  {stamp}\n"
-                             "  2度掛けると係数が二乗されます。やり直すなら --force。")
+        stamp = read_official_split_stamp(db)
+        guard = args.apply and not args.force
+        if guard and args.only:
+            already = stamped_targets(stamp, args.only.split(","))
+            if already:
+                raise SystemExit(f"既に適用済みの社があります（app_settings.{STAMP_KEY}）: {already}\n"
+                                 "  2度掛けると係数が二乗されます。やり直すなら --force。")
 
         api_key = os.environ.get("JQUANTS_API_KEY", "")
         if not api_key:
@@ -422,10 +435,14 @@ async def _run(args) -> dict:
             targets, cover, on_progress=lambda i, t, m: print(f"  {m}", flush=True))
 
         report = {"cover": list(cover), "fixed": [], "withheld": [], "skipped": [],
-                  "embargoed": [], "clean": []}
+                  "embargoed": [], "clean": [], "already": []}
         for ec, sec in targets:
             rows = weekly_rows(db, ec)
             bucket, entry, factors = judge_company(ec, sec, rows, official.get(ec) or [])
+            if bucket == "fixed" and guard and stamped_targets(stamp, [ec]):
+                # 検出器が拾った社でも、印に載っていれば書かない（印は Yahoo で取り直すと外れる）
+                report["already"].append(entry)
+                continue
             if bucket == "fixed" and args.apply:
                 entry["updated"] = apply_corrections(db, ec, rows, factors)
             report[bucket].append(entry)
@@ -436,11 +453,11 @@ async def _run(args) -> dict:
             # 「値だけの訂正」を原理的に見られない。
             import weekly_price_cache
             weekly_price_cache.bump_generation(db, f"#466 split repair ({len(report['fixed'])}社)")
-            D.upsert_setting(db, STAMP_KEY, json.dumps({
-                "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "issue": 466, "cover": list(cover),
-                "fixed": {e["edinet_code"]: e.get("updated", 0) for e in report["fixed"]},
-            }, ensure_ascii=False))
+            D.upsert_setting(db, STAMP_KEY, json.dumps(merge_official_split_stamp(
+                stamp, {e["edinet_code"]: e.get("updated", 0) for e in report["fixed"]},
+                cover=cover,
+                applied_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ), ensure_ascii=False))
             db.commit()
         return report
     finally:
@@ -468,6 +485,13 @@ def print_report(rep: dict, applied: bool) -> None:
             for w in e["withheld"]:
                 print(f"  {e['edinet_code']} {e['sec_code']}: 公式 {w['date']} x{w['factor']:g}"
                       f"（理論 x{w['expected_factor']:.6g}）/ {w['reason']}")
+
+    if rep.get("already"):
+        print(f"\n=== 印に載っているので書かなかった {len(rep['already'])}社（app_settings.{STAMP_KEY}）===")
+        print("  公式の補正が載っているはずの社に、まだ公式で説明できる段差がある。2度掛けを避けて書かない。")
+        print("  Yahoo で取り直した社なら印から外れているはず（#1279）。中身を確かめてから --force。")
+        for e in rep["already"]:
+            print(f"  {e['edinet_code']} {e['sec_code']}")
 
     if rep["clean"]:
         print(f"\n=== 乖離なし {len(rep['clean'])}社（触らない）===")
@@ -513,7 +537,8 @@ def main() -> int:
         description="Yahoo が遡及反映しない分割で残る週次段差を公式の裏付け付きで直す（#466）")
     ap.add_argument("--apply", action="store_true", help="実際に UPDATE する（既定はドライラン）")
     ap.add_argument("--only", help="edinet_code をカンマ区切りで指定（検出を省く）")
-    ap.add_argument("--force", action="store_true", help="適用済みスタンプを無視する")
+    ap.add_argument("--force", action="store_true",
+                    help="適用済みの印（社ごと）を無視する。印は他社の記録を残して足し込む")
     ap.add_argument("--json", action="store_true", help="機械可読出力")
     args = ap.parse_args()
 
