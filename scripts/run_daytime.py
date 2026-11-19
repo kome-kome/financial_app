@@ -757,8 +757,8 @@ JOBS: dict[str, Job] = {
             "本番と同じ S2 にした OOF 運用再現で 3 経路回し、事前登録 §4 の判定（業種の上限・M-6 単独を採るか、今のままか）を"
             "機械的に出す（#1227）。参考で、決めるのは保有の組み方だけ（ADR-0069）。結果は"
             " scripts/.cache/oof_portfolio_replay_portfolio.json。",
-        # 実測: 2026-11-17 の日中枠 96.6 分（3 経路の M-4 と M-2*・S2 の 19 fold × 3・exit 0）。見積りの 100.0 分から差し替えた。
-        measured_min=96.6,
+        # 実測: 2026-11-19 の日中枠 95.5 分（3 経路の M-4 と M-2*・S2 の 19 fold × 3・exit 0）。11/17 の 96.6 分から差し替えた。
+        measured_min=95.5,
         parallel_sensitive=True,   # `measure:oof-replay` と同じ理由
     ),
     # 9/18 の列数上限の本測定で「上限が財務の列を締め出している」は否定された（上限 40 でも財務は
