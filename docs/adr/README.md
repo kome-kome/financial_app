@@ -86,6 +86,7 @@
 | [0075](0075-delisted-rows-are-scored-only-in-the-live-check.md) | **上場廃止した社の行は、本番予測の答え合わせの主審にだけ足す（OOF の比較と学習は今の答えのまま）** | #1195, #1197, #1210 | accepted（2026-11-13） |
 | [0076](0076-sell-ranking-orders-by-the-sell-quantile-model.md) | **売り候補ランキングの並びのキーを、売り専用の予測 S2（下側 20% 点）へ切り替える（ADR-0071 の決定 1 を覆す）** | #1201, #1158, #1202 | accepted（2026-11-15） |
 | [0077](0077-replay-ties-break-by-hash.md) | **OOF 運用再現の同点は、コード順でなく (期, 社) のハッシュの順で割る** | #1259, #1227 | accepted（2026-11-18） |
+| [0078](0078-portfolio-construction-stays-merged-equal-weight.md) | **保有の組み方は今のまま——2 モデルの上位の合算を等金額で持ち、業種・銘柄の上限は置かない** | #1227, #1223 | accepted（2026-11-19） |
 
 ## 運用
 
