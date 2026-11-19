@@ -32,7 +32,8 @@ from collector_utils import (
     BULK_UPDATE_CHUNK, DELISTED_RETRY_INTERVAL_DAYS, DELISTED_STALE_DAYS,
     HEAVY_STATEMENT_TIMEOUT, JQUANTS_BACKFILL_DAYS, JQUANTS_ENDPOINT,
     JQUANTS_MASTER_ENDPOINT, JQUANTS_MAX_CONSECUTIVE_FORBIDDEN, JQUANTS_RATE_SLEEP,
-    JQuantsAccessError, JQuantsOutOfCoverage, JST, MARKET_CLOSE_JST, MAX_GAP_DAYS,
+    JQuantsAccessError, JQuantsOutOfCoverage, JST, MACRO_SPIKE_MAX_RUN,
+    MACRO_SPIKE_NEIGHBOR_TOL, MACRO_SPIKE_RATIO, MARKET_CLOSE_JST, MAX_GAP_DAYS,
     NIGHTLY_PRICE_BREAK_PROBE_MONTHS, OFFICIAL_SCALE_WRITABLE_UNTIL, PRICE_BATCH_MAX_ATTEMPTS,
     PRICE_BATCH_RETRY_SLEEP, PRICE_BREAK_ACCEPTED,
     PRICE_BREAK_MAX_REPAIR, PRICE_BREAK_PROBE_MONTHS, PRICE_BREAK_THRESHOLD,
@@ -4006,6 +4007,44 @@ async def fetch_yahoo_history(
     return rows
 
 
+def drop_isolated_spikes(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """「1〜2 日だけ跳んで戻る」行を分ける（#1283・純関数）→ (残す行, 弾いた行)。
+
+    `MACRO_SPIKE_MAX_RUN` 日以下の連続した行が、直前の行と直後の行の**両方**に対して
+    `MACRO_SPIKE_RATIO` 倍以上か 1/倍 以下で、かつ直前と直後が互いに `MACRO_SPIKE_NEIGHBOR_TOL`
+    倍以内のときだけ弾く。系列の両端（前後のどちらかが無い）は判定しない＝戻ったかが分からない
+    最新日の本物の急変を弾かない。終値が無い・0 以下の行は判定に使わず残す。並びは trade_date 順で返す。
+    """
+    ordered = sorted(rows, key=lambda r: r["trade_date"])
+    closes = [r.get("close") for r in ordered]
+    usable = [c is not None and c > 0 for c in closes]
+
+    def far(a: float, b: float) -> bool:
+        ratio = a / b
+        return ratio >= MACRO_SPIKE_RATIO or ratio <= 1.0 / MACRO_SPIKE_RATIO
+
+    drop: set[int] = set()
+    n = len(ordered)
+    for i in range(1, n - 1):
+        if i in drop or not usable[i] or not usable[i - 1] or i - 1 in drop:
+            continue
+        for run in range(1, MACRO_SPIKE_MAX_RUN + 1):
+            j = i + run          # 直後の行
+            if j >= n:
+                break
+            if not all(usable[k] for k in range(i, j + 1)):
+                break
+            before, after = closes[i - 1], closes[j]
+            if not (1.0 / MACRO_SPIKE_NEIGHBOR_TOL <= before / after <= MACRO_SPIKE_NEIGHBOR_TOL):
+                continue
+            if all(far(closes[k], before) and far(closes[k], after) for k in range(i, j)):
+                drop.update(range(i, j))
+                break
+    kept = [r for k, r in enumerate(ordered) if k not in drop]
+    dropped = [r for k, r in enumerate(ordered) if k in drop]
+    return kept, dropped
+
+
 async def collect_macro_data(
     db,
     years_back: int = 5,
@@ -4109,6 +4148,19 @@ async def collect_macro_data(
                 if on_progress:
                     on_progress(i, total, f"[マクロ {i}/{total}] {series['name']} データ無し")
                 continue
+
+            # 1〜2 日だけ跳んで戻る行は書かず、既に DB にあるその日の行も消す（#1283）。
+            # 弾くだけだと過去の晩に書いた行が残り続ける。消した日はログに出す（黙って消さない）。
+            rows, spikes = drop_isolated_spikes(rows)
+            if spikes:
+                spike_dates = [r["trade_date"] for r in spikes]
+                n_del = (db.query(MacroData)
+                         .filter(MacroData.series_code == series["code"],
+                                 MacroData.trade_date.in_(spike_dates))
+                         .delete(synchronize_session=False))
+                log.warning(f"[マクロ] {series['code']}（{series['yf_ticker']}）: 前後の日から"
+                    f" {MACRO_SPIKE_RATIO:g} 倍以上離れて戻る {len(spikes)} 日を書かない"
+                    f"（{', '.join(spike_dates)}・DB から {n_del} 行を消した・#1283）")
 
             # 系列単位のバルク upsert（(series_code, trade_date) 競合で最新値上書き）。
             # 旧実装は行ごとに INSERT/UPDATE を発行していたが N+1 解消のため 1 文に圧縮。
