@@ -1149,3 +1149,85 @@ def test_only_rejects_unknown_series_code(db):
 
     with pytest.raises(ValueError, match="NOPE"):
         _run(db, handler, only=["NOPE"])
+
+
+# ── 1〜2 日だけ跳んで戻る値を書かない（#1283）────────────────────────────────
+from collector_prices import drop_isolated_spikes
+
+
+def _rows(closes: list) -> list[dict]:
+    return [{"trade_date": f"2026-03-{d:02d}", "close": c} for d, c in enumerate(closes, start=23)]
+
+
+def _dates(rows: list[dict]) -> list[str]:
+    return [r["trade_date"] for r in rows]
+
+
+class TestDropIsolatedSpikes:
+    def test_two_day_tenth_is_dropped(self):
+        # 実例: Yahoo の 1306.T（2026-03-27 → 30・31 → 04-01）
+        rows = _rows([383.6, 382.6, 382.7, 37.64, 37.14, 389.2, 383.0])
+        kept, dropped = drop_isolated_spikes(rows)
+        assert [r["close"] for r in dropped] == [37.64, 37.14]
+        assert len(kept) == 5
+
+    def test_one_day_jump_up_is_dropped(self):
+        kept, dropped = drop_isolated_spikes(_rows([100, 101, 1000, 102, 103]))
+        assert [r["close"] for r in dropped] == [1000]
+
+    def test_real_crash_that_does_not_come_back_is_kept(self):
+        # 戻らない段差（本物の暴落・2016-07 の未調整の分割の形）は弾かない
+        kept, dropped = drop_isolated_spikes(_rows([1346, 1350, 134.5, 132.8, 134.6]))
+        assert dropped == [] and len(kept) == 5
+
+    def test_three_day_run_is_kept(self):
+        # MAX_RUN（2 日）を超えて続くものは、跳んで戻るとは決めない
+        kept, dropped = drop_isolated_spikes(_rows([100, 10, 10, 10, 100]))
+        assert dropped == []
+
+    def test_moderate_move_is_kept(self):
+        # 為替・金利の大きいが本物の動き（30% 程度）は弾かない
+        kept, dropped = drop_isolated_spikes(_rows([1.0, 0.7, 1.0, 1.3, 1.0]))
+        assert dropped == []
+
+    def test_edges_are_not_judged(self):
+        # 最新日・最古日は前後がそろわないので、戻ったかが分からない＝残す
+        kept, dropped = drop_isolated_spikes(_rows([10, 100, 100, 100, 1000]))
+        assert dropped == []
+
+    def test_neighbors_must_agree(self):
+        # 前後どうしが 1.25 倍を超えて違う（前後で段差がある）ときは弾かない
+        kept, dropped = drop_isolated_spikes(_rows([100, 100, 10, 200, 200]))
+        assert dropped == []
+
+    def test_missing_close_is_kept_and_not_used(self):
+        rows = _rows([100, None, 100, 100])
+        kept, dropped = drop_isolated_spikes(rows)
+        assert dropped == [] and len(kept) == 4
+
+    def test_returns_in_date_order(self):
+        rows = list(reversed(_rows([100, 100, 10, 100])))
+        kept, _ = drop_isolated_spikes(rows)
+        assert _dates(kept) == sorted(_dates(kept))
+
+
+def test_spike_is_not_saved_and_existing_row_is_deleted(db):
+    """収集の経路: 跳んで戻る日は書かず、過去の晩に書いた同じ日の行も消す（#1283）。"""
+    ts = [TS1 + k * 86400 for k in range(5)]
+    spike_date = date.fromtimestamp(ts[2]).strftime("%Y-%m-%d")
+    db.add(MacroData(series_code="TOPIX", series_name="TOPIX", category="equity",
+                     trade_date=spike_date, open=10.0, high=10.0, low=10.0, close=10.0, volume=1.0))
+    db.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "query1.finance.yahoo.com":
+            return httpx.Response(200, json=_yahoo_json(ts, [100.0, 101.0, 10.0, 102.0, 103.0]))
+        return httpx.Response(500)
+
+    saved = _run(db, handler)
+
+    assert saved == len(MACRO_SERIES) * 4
+    topix = {r.trade_date: r.close for r in db.query(MacroData).filter_by(series_code="TOPIX").all()}
+    assert spike_date not in topix
+    assert len(topix) == 4
+    assert db.query(MacroData).filter(MacroData.trade_date == spike_date).count() == 0
