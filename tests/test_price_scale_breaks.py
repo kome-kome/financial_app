@@ -35,6 +35,7 @@ from corporate_actions import (           # noqa: E402
     WITHHELD_OFFICIAL_ADJUSTMENTS,
     before_spinoff_ex_date,
     spinoff_factor,
+    withheld_official_events,
 )
 
 
@@ -303,6 +304,16 @@ class TestSpinoffAdjustment:
                 assert len(start) == len(end) == 10     # 文字列比較で窓を判定するため
                 assert expected > 0.0
                 assert reason.strip()
+
+    def test_withheld_window_for_e05716_covers_only_the_2026_rights_allotment(self):
+        """地域新聞社（E05716）の窓は 2026-08-07 の公式イベントだけを止める（#1254）。
+
+        2025-10-30・2026-06-24 の公式イベントは DB と既に一致している＝窓へ入れると、
+        台帳が F の検出からも外してしまう。窓を広げ過ぎた書き誤りをここで縛る。
+        """
+        events = [("2025-10-30", 0.5), ("2026-06-24", 0.555556), ("2026-08-07", 0.668663)]
+        hit = withheld_official_events("E05716", events)
+        assert [d for d, *_ in hit] == ["2026-08-07"]
 
     def test_yahoo_scale_db_is_not_reported(self, db, make_company, make_weekly):
         """権利落ち前は DB = 公式 × 係数（Yahoo が調整済み）＝段差ではない。"""
