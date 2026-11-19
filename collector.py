@@ -133,6 +133,15 @@ if __name__ == "__main__":
                     for b in r["introduced"]:
                         print(f"  [新規] {b['edinet_code']} {b.get('name', '')[:24]} "
                               f"乖離{b['max_dev'] * 100:.2f}%")
+                    lost = r.get("official_lost") or []
+                    if lost:
+                        # 公式の係数だけで直した補正を Yahoo の取り直しで上書きした（#1279）
+                        ecs = ",".join(b["edinet_code"] for b in lost)
+                        print(f"\n公式の係数だけで直した補正が消えた {len(lost)}社（印から外した・#1279）:")
+                        for b in lost:
+                            print(f"  [公式補正消失] {b['edinet_code']} {b.get('name', '')[:24]}")
+                        print(f"  → python -m scripts.repair_splits_from_jquants --only {ecs}"
+                              " で確かめてから --apply で掛け直す")
                     # 週次を書き換えても financial_records の株価・PER/PBR/時価総額は
                     # 自動では追随しない。同じ作業内で必ず反映する（#465）。
                     print("\n次の2つを実行して修復を反映させること:\n"

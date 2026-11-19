@@ -2193,6 +2193,65 @@ def unadjusted_split_log_line(res: dict) -> str:
             "（docs/GOTCHAS.md「株価のスケール（1）」・#1253）")
 
 
+# ── 公式の係数だけで直した社の印（#466・#1279）────────────────────────────────
+# `scripts/repair_splits_from_jquants.py --apply` は、Yahoo が調整しない企業イベント（自己株式の
+# 無償割当など）を公式 AdjFactor だけで週次へ当てる。下の Yahoo 経路は該当社の**全履歴**を
+# 取り直すので、その補正を黙って消す（#1279: E00484）。印は両方の道具が読み書きするので
+# 本番側（ここ）に置く——本番のコードから `scripts/` を import しない。
+# 形: {"applied_at", "issue", "cover", "fixed": {社: 更新週数}, "applied_at_by_ec": {社: 時刻},
+#      "lost_by_ec": {社: {"at", "by"}}}。`fixed` に載る社だけが「公式の補正が今も載っている」。
+OFFICIAL_SPLIT_STAMP_KEY = "splits_repaired_from_jquants"
+
+
+def read_official_split_stamp(db) -> dict:
+    """印を読む。無ければ {}。壊れた JSON は例外（空とみなすと2度掛けの守りが外れる）。"""
+    raw = get_setting(db, OFFICIAL_SPLIT_STAMP_KEY)
+    if not raw:
+        return {}
+    stamp = json.loads(raw)
+    if not isinstance(stamp, dict):
+        raise ValueError(f"app_settings.{OFFICIAL_SPLIT_STAMP_KEY} が dict ではない: {raw[:200]}")
+    return stamp
+
+
+def merge_official_split_stamp(stamp: dict, fixed: dict, *, cover, applied_at: str) -> dict:
+    """今回直した社を既存の印へ**足す**（他社の記録を消さない・#1279）。純関数。
+
+    古い形（`applied_at_by_ec` が無い）の社には、印全体の `applied_at` を社ごとの時刻として引き継ぐ。
+    """
+    old_fixed = dict(stamp.get("fixed") or {})
+    at = dict(stamp.get("applied_at_by_ec") or {})
+    for ec in old_fixed:
+        at.setdefault(ec, stamp.get("applied_at"))
+    lost = {ec: v for ec, v in (stamp.get("lost_by_ec") or {}).items() if ec not in fixed}
+    out = dict(stamp)
+    out.update(applied_at=applied_at, issue=466, cover=list(cover),
+               fixed={**old_fixed, **fixed},
+               applied_at_by_ec={**at, **{ec: applied_at for ec in fixed}})
+    if lost:
+        out["lost_by_ec"] = lost
+    else:
+        out.pop("lost_by_ec", None)
+    return out
+
+
+def drop_from_official_split_stamp(stamp: dict, ecs, *, at: str, by: str) -> tuple:
+    """`ecs` のうち印に載る社を外し、`lost_by_ec` に記録する。(新しい印, 外した社) を返す。純関数。"""
+    fixed = dict(stamp.get("fixed") or {})
+    dropped = sorted(ec for ec in set(ecs) if ec in fixed)
+    if not dropped:
+        return stamp, []
+    at_by = dict(stamp.get("applied_at_by_ec") or {})
+    lost = dict(stamp.get("lost_by_ec") or {})
+    for ec in dropped:
+        fixed.pop(ec)
+        at_by.pop(ec, None)
+        lost[ec] = {"at": at, "by": by}
+    out = dict(stamp)
+    out.update(fixed=fixed, applied_at_by_ec=at_by, lost_by_ec=lost)
+    return out, dropped
+
+
 async def repair_price_scale_breaks(
     db,
     api_key: Optional[str] = None,
@@ -2214,6 +2273,11 @@ async def repair_price_scale_breaks(
 
     検算で乖離が残った銘柄は `remaining` に入れて**そのまま報告する**（黙って通さない）。
     分割以外の理由でずれている銘柄は Yahoo で取り直しても収束しない。
+
+    公式の係数だけで直した社（印 `OFFICIAL_SPLIT_STAMP_KEY` の `fixed`）を取り直すと、その補正は
+    消える（#1279）。取り直しは止めない（新しい分割は Yahoo で直す必要がある）が、`official_lost`
+    に入れて報告し、印からその社を外す——外すので `repair_splits_from_jquants --only <社> --apply`
+    を `--force` 無しで掛け直せ、他社の記録も消えない。
     """
     found = await detect_price_scale_breaks(
         db, api_key, months=months, threshold=threshold, on_progress=on_progress)
@@ -2223,6 +2287,7 @@ async def repair_price_scale_breaks(
         "compared": found["compared"], "breaks": breaks,
         "probe_dates": probe_dates, "coverage": found["coverage"],
         "repaired": 0, "failed": [], "remaining": [], "introduced": [],
+        "official_lost": [],
     }
 
     if len(breaks) > max_repair:
@@ -2250,6 +2315,7 @@ async def repair_price_scale_breaks(
     # 食い違いを書くことは仕事に含まれない。Yahoo が全履歴を比率倍で揃えて返すと応答の中には
     # 段差が無いので、DB の値を基準に入れて比べる。
     anchors = latest_prices(db, target_ecs)
+    official_fixed = set((read_official_split_stamp(db).get("fixed") or {}))
     async with httpx.AsyncClient(timeout=60) as session:
         for i, b in enumerate(breaks, 1):
             ec, sec = b["edinet_code"], b.get("sec_code")
@@ -2278,6 +2344,12 @@ async def repair_price_scale_breaks(
                     # 1社ごとに trim=True：daily を保持窓外に溜めない（容量安全）
                     record_prices_batch(db, recs, trim=True)
                     out["repaired"] += 1
+                    if ec in official_fixed:
+                        # 書けた直後に1社ずつ印から外す（途中で落ちても、印は「補正が載っている」
+                        # と言い張る側＝掛け直しを拒む安全側にしか残らない）
+                        _forget_official_split_fix(db, ec)
+                        out["official_lost"].append(
+                            {"edinet_code": ec, "sec_code": sec, "name": b.get("name", "")})
                 except Exception as e:
                     db.rollback()
                     out["failed"].append({"edinet_code": ec, "reason": str(e)[:150]})
@@ -2308,6 +2380,18 @@ async def repair_price_scale_breaks(
              f"失敗{len(out['failed'])}社 / 残存{len(out['remaining'])}社 / "
              f"新規{len(out['introduced'])}社")
     return out
+
+
+def _forget_official_split_fix(db, ec: str) -> None:
+    """Yahoo で取り直した社を公式補正の印から外す（#1279）。"""
+    stamp, dropped = drop_from_official_split_stamp(
+        read_official_split_stamp(db), [ec],
+        at=datetime.now(timezone.utc).isoformat(timespec="seconds"), by="repair-price-breaks")
+    if dropped:
+        upsert_setting(db, OFFICIAL_SPLIT_STAMP_KEY, json.dumps(stamp, ensure_ascii=False))
+        log.warning(f"{ec}: 公式の係数だけで直した補正を Yahoo の取り直しで上書きした（#1279）。"
+                    f"`python -m scripts.repair_splits_from_jquants --only {ec}` で確かめてから"
+                    " `--apply` で掛け直す")
 
 
 def _nearest_price(sorted_dates: list, price_dict: dict, target_str: str,
