@@ -41,7 +41,7 @@
 | **自動（イベント）** | 他ワークフローの failure / cancelled を Issue 化 | 対象ワークフロー完了時（`workflow_run`） | GitHub Actions `notify-failure.yml` |
 | **自動（毎週）** | pin した依存の脆弱性照合（pip-audit・#723）。検出は failure → `notify-failure` が起票 | 毎週月曜 JST 07:23 ＋ `requirements*.txt` を変える PR / main への push | GitHub Actions `dependency-audit.yml` |
 
-### GitHub Actions workflow 早見表（いつ・何を・どれを使うか）
+### バッチ暦と GitHub Actions
 
 #### バッチ暦（定期実行の占有表・時刻を動かす前に必ずここを見る）
 
@@ -104,22 +104,11 @@
 | （push/PR） | `ci.yml` | 随時 | 〜15分 | — | 0（DB へ接続しない） |
 | （失敗時） | `notify-failure` | 随時 | 〜10分 | — | 0 |
 
-**GitHub Actions（#503 で停止したもの）**
+**GitHub Actions（#503 で停止・削除したもの）**: 収集・スコア更新・月次の cron は #503（2026-08-20）で止め、ローカルのバッチ暦へ移した。停止した yml には理由・復旧条件・代替経路が書いてあり（`tests/test_workflow_schedule_pauses.py` が強制）、停止と代替の対応表は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー-503-で停止したものと代替) へ移した。
 
-| 旧 UTC | ワークフロー | 停止理由 | 代替 |
-|---|---|---|---|
-| 08:17 | `daily-incremental` → `nightly-scores` ／ マクロ鮮度ゲート（**#876 で削除**） | 正本がローカルへ移り、動かすと Supabase だけが前進して分岐する | ローカル `run_nightly.ps1`（JST 17:20）。鮮度ゲートはその `macro_health` ステップ |
-| 00:00 | `macro-beta-inference`（**#504 で削除**） | 同上（`macro_beta_loadings` が分岐する） | `run_monthly_beta.ps1`（#579・毎月2日 JST 01:00） |
-| 16:30 | `tune-hyperparameters`（**#504 で削除**） | 同上。M-1/M-2/M-3 の**唯一の自動更新経路**だったので、止めた時点で μ̂ の鮮度も止まる | 月次本体の `tune:macro_dlm`（M-3）、日中枠の探索の周回 `tune_cycle:macro_gbdt`（M-2・#1114・#1118）と `run_monthly_m1.ps1`（M-1・#584） |
-| 22:00 | `recommend-factor-premia`（**#504 で削除**） | 同上。#423 子5 で「実行履歴ゼロのまま 37 期の重みで固着」を直した cron なので、**止めれば同じ固着へ戻る** | 月次本体の `factor_premia` ステップ（先頭に置いて打ち切りに強くしてある） |
-| 土 23:30 | `vacuum-maintenance` | **2026-08-25 に停止**（#290 / #505）。断面は 2026-08-07 で凍結＝書き込みが無いので bloat も増えず、毎週 `VACUUM FULL` を打っても初回以降は何も回収しない | ローカル月次の `vacuum` ステップ（#504・先頭。実測 daily 59→49MB / weekly 188→165MB / 計13.4秒） |
-
-- `nightly-scores` は `daily-incremental` の `workflow_run` チェーンなので、親を止めれば連動して止まる（yml 側の schedule は元から無い）。同じチェーンにいたマクロ鮮度ゲートは、#503 から起動元が無いまま #876 で見つかり、ワークフローを削除して夜間バッチの `macro_health` ステップへ移した。
-- `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` は `workflow_dispatch` 専用。放置で害はないが、**手動起動すると Supabase へ書く**＝正本と分岐するので注意。
-- **月次3本は #504 でファイルごと削除した**（「停止中」のまま残さなかった）。削除を選んだ理由は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー-月次3本を削除した理由504)。
 - `nightly_scores.HEAVY_AUTOMATION` は全エントリがローカルバッチ（`local:<スクリプト>`）を指す。**yml を指すエントリは schedule が生きていることまで CI が確かめる**（`tests/test_nightly_scores.py`）が、`local:` には**タスクスケジューラ登録**という CI から見えない一段が残る（[ADR-0031](adr/0031-heavy-plugins-require-registered-automation.md) の 2026-08-21 改訂）。
 
-#### Storage バックアップの初期設定（#503 Phase 3・初回だけ）
+### Storage バックアップの初期設定（#503 Phase 3・初回だけ）
 
 `scripts/backup_push.py --dest storage` を使う前に、Supabase 側で2つ用意する。
 
@@ -144,7 +133,7 @@
 | Egress | 5GB/月（DB と共用） | **upload は Egress に載らない**。download は復元時だけ |
 
 
-#### バックアップからの復元（#503 Phase 3）
+### バックアップからの復元（#503 Phase 3）
 
 Supabase Storage に置いた世代から戻す。**復元先はローカル限定**（`guard_dest_local`）。
 
@@ -165,53 +154,18 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
   復元へ進まない（マニフェストにチェックサムは無いのでサイズまで。中身の担保は行数一致側）。
 - **四半期に1度、空の DB へ実際に流す**。`edinet` は `createdb` 権限を持たないので、予行には
   `initdb` の使い捨てクラスタ（port 5433）を使う——正本のインスタンス（5432）に触れないことが要点。
-- **2026-09-04 に Storage 経路を初めて通した**（#503 検証8）: `20260821T013818Z` を落として
-  使い捨てクラスタへ復元し、**17表すべて行数一致**。さらに `DATABASE_URL_LOCAL` を復元先へ向けて
-  API を起動し、`/health` と全9画面が 200・`/api/stats` が `companies 4,438 / records 50,490 /
-  stock_price 1,293,208` を返すことまで確認した（**戻せたことの本体は「サービスが再開できる」こと**）。
+- Storage から使い捨てクラスタへ戻して API が再開できることは 2026-09-04 に確かめた（記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#バックアップ-storage-経路の初回の復元2026-09-04)）。
 
-#### アクティブ（`.github/workflows/` 直下・Actions 対象）
+### GitHub Actions の workflow（手動の口）
 
-> #503 で `daily-incremental` の `schedule:` はコメントアウトされ、連動して `nightly-scores`
-> の `workflow_run` チェーンも発火しない（下表の2行は今の状態に書き直した。
-> GHA で定時に動いていた頃の行は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー早見表-cron-停止前の3行503-まで) へ移した・#844）。
-> 同じチェーンにいたマクロ鮮度ゲートは **#876 でファイルごと削除し**、夜間バッチの `macro_health`
-> ステップへ移したので下表にも無い。
-> 月次3本（`macro-beta-inference` / `tune-hyperparameters` /
-> `recommend-factor-premia`）は **#504 でファイルごと削除した**ので下表にも無い。
-> **現在の駆動は `scripts/run_nightly.py`（日次）・`scripts/run_monthly.py`
-> （月次）・`run_monthly_beta.ps1`・`run_monthly_m1.ps1`（月次の別タスク）・
-> `run_daytime.ps1`（平日）**（時刻は上の「バッチ暦」）で、停止と代替の対応は上の「GitHub Actions（#503 で停止したもの）」が
-> 正本。残っているファイルは `workflow_dispatch` の口が生きているが、**GHA からはローカル正本の DB へは
-> 書けない**（書けるのは Supabase 断面だけ＝走らせると正本と分岐する）。定時（cron）で生きているのは
-> `egress-health`（毎日）と `dependency-audit`（毎週・#723）の**2本**で、`ci` / `notify-failure` はイベント駆動
-> （`vacuum-maintenance` は 2026-08-25 に停止・#290 / #505）。
+workflow の一覧と役割の正本は [ARCHITECTURE.md §10](ARCHITECTURE.md#10-ファイル役割一覧) の `.github/workflows/` の行。ここには動かすときに要る注意だけを書く。
 
-| カテゴリ | workflow 名 | ファイル | 使うタイミング | 所要時間の目安 |
-|---|---|---|---|---|
-| `[CI]` | ruff（F 系）＋ pytest 自動テスト | `ci.yml` | PR・main push で自動実行（手動起動不要） | 〜1分 |
-| `[停止]` | 差分収集（旧・毎日自動実行） | `daily-incremental.yml` | **⛔ 定時は #503（2026-08-20）で停止**。収集の入口はローカル夜間バッチの `_pipeline_incremental.py`（上の「バッチ暦」の `financial_app-nightly`）。`workflow_dispatch` の口は生きているが、**手動起動すると Supabase 断面へ書く＝正本と分岐する**。動作の中身（gap-fill・J-Quants catchup 等）は下記「daily-incremental の動作詳細」 | —（GHA 時代の実測は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー早見表-cron-停止前の3行503-まで)） |
-| `[全件]` | XBRL収集・財務データ全件更新 | `full-pipeline.yml` | DB初期構築時・全社バックフィル必要時（`daily-incremental` は #503 で schedule を止めてあるので、同時実行回避の退避は不要） | 200〜240分 |
-| `[補完]` | マクロのみ収集 | `collect-macro.yml` | `MACRO_SERIES`（為替・金利・指数・コモディティ・ボラ）を Yahoo から収集。新規系列追加や macro_data の鮮度補完。`workflow_dispatch`（years 既定5）。**新系列のバックフィルは years=6 で起動**（yoy は1年+30日で足りるが、将来 zscore 版追加時に再バックフィル不要な余裕幅。#358 コモディティ8系列追加時の運用）。入力 `series` に series_code（カンマ区切り）を渡すと**その系列だけ**を収集する（#444・定義是正後の再収集で GDELT 累積クエリ制限を消費しないため） | 〜数分 |
-| `[停止]` | 夜間スコア更新（`sector_ols` + M-6） | `nightly-scores.yml` | **⛔ `daily-incremental` の `workflow_run` チェーンなので、#503 で親ごと発火しなくなった**（手動起動の口だけ残る）。`nightly_scores.py` 自体はローカル夜間バッチの `scores` ステップで毎晩回る。回すモデル・1モデルの失敗が他を巻き込まないこと・書き込みの直接確認・`shared_snapshot_cache()` の共有は [ARCHITECTURE.md](ARCHITECTURE.md) の `nightly_scores.py` の行が正本 | —（GHA 時代の実測は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー早見表-cron-停止前の3行503-まで)） |
-| `[補完]` | 半期(H1)財務収集 | `collect-interim.yml` | EDINET 半期報告書（043A00/docType160）と旧四半期報告書（043000/docType140）の Q2(中間=H1累計)を収集し `financial_records` に `period_type='H1'` で保存（Issue #219② フェーズB）。通期収集とは独立・常に差分（収集済み doc_id をスキップ）。`workflow_dispatch`（years_back 既定6＝既存通期窓に整合）。240分に収まらない場合は years_back を分割 | 数時間（過去6年・事前選別でQ1/Q3を除外し概ね1社1半期1DL） |
-| `[定常]` | Supabase 枠消費ゲート | `egress-health.yml` | `python -m scripts.check_egress_health`（Issue #478 / #483・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）が **Egress のサイクル累計**（`app_settings.egress_cycle_bytes`）と **Database Size**（`pg_database_size`）を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が Issue 起票。**毎日 UTC 21:00（JST 06:00）自動**。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**——Egress は超えても翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため。**DB は Usage 画面と同じ割合で判定する**（#1109・2026-11-01）: `pg_database_size` に Usage との差（`DB_USAGE_GAP_BYTES`・11/1 の実測 14.4 MiB を切り上げて 15 MiB）を足した「Usage 換算」を、**10 進の上限 500 MB**（Usage 画面の 0.5 GB）で割る。以前は `pg_database_size` ÷ 2 進の 500 MiB に、差（8/19 の実測 約 35MB: Usage 430MB / Infrastructure 409.8MB / `pg_database_size` 395MB）を織り込んだ 0.85 を当てていたが、上限を約 5% 大きく見ていたので 11/1 は Usage 80% を 73.1% と出していた。**差は固定ではない**ので、割合が Usage 画面と数ポイント以上ずれたら測り直す。**`workflow_run` チェーンにせず cron で回すのが要点**：Egress はワークフローの成否と無関係に積み上がり、開発者のローカル CLI からも積まれる（過去2回の超過はどちらもローカル検証の反復が主因）ので「収集が成功した後に見る」では見落とす経路が残る。Management API の PAT は不要（判定材料は DB の中にある＝#483 のブロッカーを迂回）。手動即時実行は `workflow_dispatch`（`warn_only` で常に exit 0） | 〜2分（`timeout-minutes: 10`） |
-| `[定常]` | 依存パッケージの脆弱性検査 | `dependency-audit.yml` | `requirements*.txt`（glob で全本・推移依存込み）を pip-audit で照合し、既知の脆弱性があれば failure → `notify-failure` が起票（Issue #723）。**毎週 UTC 22:23・日（JST 07:23・月）自動**＋ `requirements*.txt` を変える PR / main への push。手動は `workflow_dispatch`。仕組みと検出時の対応は下記「依存パッケージの脆弱性検査」節 | 〜数分（ローカル実測 48秒・107件） |
-| `[定常]` | ワークフロー失敗の自動 Issue 起票 | `notify-failure.yml` | 上記ワークフロー（`ci.yml` を除く全本数・列挙しない設計）＋セルフテストが `failure` または `cancelled` で終わると自動起票（`workflow_run`）。手動起動しない。詳細は下記「ワークフロー失敗の通知」節 | 〜1分 |
-| `[検証]` | notify-failure セルフテスト | `notify-failure-selftest.yml` | `notify-failure.yml` の変更後に発火を実証するための、意図的に失敗するだけのワークフロー（本番データ不使用）。`workflow_dispatch`（`mode=fail`／`mode=cancel`） | 〜1分（cancel は約1分） |
-| `[手動]` | DBメンテナンス（VACUUM FULL・Supabase 断面用） | `vacuum-maintenance.yml` | **⛔ 定時実行は 2026-08-25 に停止（#290 / #505・[ADR-0038](adr/0038-local-postgres-is-the-primary.md) の追補）。正本側の担い手はローカル月次バッチの `vacuum` ステップ**（#504）で、この yml は断面を手で保守するときの口としてだけ残る。**起動するときは step env へ `FINAPP_DB_TARGET: prod` を一時的に足すこと**（常設すると「誤起動が localhost で落ちる」安全弁を外すことになり `tests/test_db_target.py` が落ちる）。**per-table の autovacuum 設定を `init_db()` / `_ensure_tables()` へ入れない**（lifespan が無条件実行するので、ローカル API の起動だけで本番へ不可逆に反映される）。Supabase が正本だった時代の設計記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844） | 数秒〜数分（対象テーブルは実測 ~50MB・42万行） |
-
-#### アーカイブ済み（`.github/workflows/old/` 配下・一回性・Actions 対象外）
-
-一回性バックフィル完了後に `old/` へ退避済み。サブディレクトリの yml は Actions が認識しないので、再実行が必要な場合のみ `.github/workflows/` へ戻してから `workflow_dispatch` で起動する。定期スケジュールは持たない。
-
-> 株価履歴バックフィル / 週次株価バックフィル / C2 NULL バックフィル / CF NULL バックフィル / bs_machinery バックフィルの5本は完了済みにつき削除済み（Issue #259）。
-
-| カテゴリ | workflow 名 | ファイル | 用途 | 所要時間の目安 |
-|---|---|---|---|---|
-| `[補完]` | PL/BS NULL バックフィル | `.github/workflows/old/refill-pl-bs.yml` | `bs_inventory` 等 旧コホート（〜2022年）が NULL の場合に再取得 | 4〜5時間 |
-
-> **CI（`ci.yml`）**: データ収集系ワークフローとは独立した回帰検知用。`pull_request` と main への `push` で Python 3.13.7 上に `requirements.txt` + `requirements-dev.txt` を入れて `ruff check`（F 系＝未定義名・import 漏れの静的検出・ルールは `ruff.toml`・#724）→ `pytest` の順に実行する。Secrets・外部ネットワーク・本番 DB には一切触れず、`conftest.py` の in-memory SQLite / モックで完結する範囲のみを検証する。
+- 定時（cron）で生きているのは `egress-health`（毎日）と `dependency-audit`（毎週・#723）の2本で、`ci` / `notify-failure` はイベント駆動。それ以外は `workflow_dispatch` の口だけが残る。
+- **GHA からはローカル正本の DB へ書けない。** `full-pipeline` / `backfill-*` / `collect-interim` / `collect-disclosures` / `collect-macro` / `daily-incremental` / `nightly-scores` を手で起動すると **Supabase 断面へ書く＝正本と分岐する**。
+- 手で起動するときの目安: `full-pipeline` は 200〜240分。`collect-macro` は years 既定5で、新系列のバックフィルは years=6（将来 zscore 版を足しても再バックフィルが要らない余裕幅・#358）、入力 `series` で系列を絞れる（#444・GDELT の累積クエリ制限を消費しないため）。`collect-interim` は years_back 既定6で、240分に収まらなければ years_back を分割する。
+- `vacuum-maintenance` は断面を手で保守するときの口（正本側の担い手はローカル月次の `vacuum` ステップ）。**起動するときは step env へ `FINAPP_DB_TARGET: prod` を一時的に足す**（常設すると誤起動を localhost で落とす安全弁が外れ `tests/test_db_target.py` が落ちる）。**per-table の autovacuum 設定を `init_db()` / `_ensure_tables()` へ入れない**（lifespan が無条件実行するので、ローカル API の起動だけで本番へ不可逆に反映される）。
+- `egress-health`（[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）は Egress のサイクル累計（`app_settings.egress_cycle_bytes`）と Database Size を閾値と突き合わせ、超過なら exit 2 → `notify-failure` が起票する。閾値は Egress 80%（`db_egress.CYCLE_WARN_RATIO`）／DB 85%（`check_egress_health.DB_WARN_RATIO`）で、**DB 側を厳しくしてある**（Egress は翌サイクルで戻るが、Database Size 超過は read-only で収集そのものが止まるため）。**DB は Usage 画面と同じ割合で判定する**（#1109）: `pg_database_size` に Usage との差（`DB_USAGE_GAP_BYTES`・15 MiB）を足し、10 進の上限 500 MB で割る。**差は固定ではない**ので、割合が Usage 画面と数ポイント以上ずれたら測り直す。`workflow_run` チェーンにせず cron で回すのは、Egress がワークフローの成否と無関係にローカル CLI からも積まれるため。手動は `workflow_dispatch`（`warn_only` で常に exit 0）。
+- `.github/workflows/old/` 配下（一回性・完了済みの `refill-pl-bs.yml` だけ）は Actions が認識しない。再実行するときだけ `.github/workflows/` へ戻して `workflow_dispatch` で起動する。
 
 ### ワークフロー失敗の通知（`notify-failure.yml`・Issue #414）
 
@@ -235,8 +189,6 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
 | どちらも無い／annotation 取得に失敗 | — | 不明 → **起票する**（安全側） |
 
 **denylist（手動と確認できたものだけスキップ）から allowlist（timeout と確認できたものだけ起票）へ反転させないこと。** allowlist にすると、GitHub が annotation の文言を変えた瞬間や取得に失敗した瞬間に **timeout 通知が静かに消える**＝#414 と同型の欠落になる。判別できない cancelled は必ず起票側へ倒す。向きは `tests/test_workflow_failure_notification.py::test_manual_cancel_is_the_only_skip_path` が固定する。
-
-> この振り分けが無かった 2026-08-04 に、人が押したキャンセル1件が `priority:high` の Issue #453 として自動起票された。**「復旧すべき障害」ではないノイズが high として積まれると、本物の失敗の優先度が相対的に薄まる**（Issue 本文自身が「open のまま放置すると次の失敗がコメントに埋もれる」と警告している通り）。
 
 **運用ルール（重要）**:
 
@@ -287,9 +239,7 @@ gh run cancel <run-id>   # → annotation は "The run was canceled by @…" →
 
 **Dependabot alerts との関係**: GitHub の Dependabot alerts は通知がメールと Security タブに出るだけで、#414 で「GitHub 標準のメール通知では誰も気づかなかった」実績がある。有効にしていても、Issue として表に出るこの経路は別に要る（有効かどうかは Settings → Code security で確かめる）。
 
-**初回の検査結果（2026-09-24・ローカル実測）**: 107件を照合・スキップ 0。検出は **anyio 4.13.0 の2件**（CVE-2026-63374 / GHSA-82r6-8w77-94w6、CVE-2026-64847 / GHSA-5p39-cfhj-2xmp・修正版 4.14.2）。anyio は starlette / httpx の推移依存。前者は非 ASCII ドメインへの TLS 接続、後者は `anyio.to_process` のプロセスプールが条件で、本アプリはどちらも踏まない見込みだったが、修正版があるので #730（検査の初回実走が起票した Issue）で 4.14.2 へ上げて解消した。最新の 4.15.x は Python 3.13 で `typing_extensions>=4.16.0` を要求し pin（4.15.0）と衝突するので、単独 PR の範囲に収まる 4.14.2 を選んだ。
-
-**2回目の検出（2026-10-26・週次の定期実行）**: **certifi 2026.4.22 の1件**（PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2・修正版 2026.10.19）。CA バンドルに残っていた emSign ECC Root CA - G3（配下の中間証明書が鍵漏えいで失効）を信頼してしまう問題で、#1067（自動起票）で 2026.10.19 へ上げて解消した。certifi は依存を持たないので他の pin は動かない。**ローカルの `venv` は自動では上がらない**ので、バッチの走っていない時間に `.\venv\Scripts\python.exe -m pip install certifi==2026.10.19` で揃える。
+**ローカルの `venv` は自動では上がらない**ので、修正版へ上げたらバッチの走っていない時間に `.\venv\Scripts\python.exe -m pip install <パッケージ>==<版>` で揃える。これまでの検出の記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#依存の脆弱性検査-検出の記録)。
 
 **ローカルで回すとき**（プロジェクトの `venv` には入れず、リポジトリの外の使い捨て venv で。夜間バッチは `venv` をそのまま使うので、共有の依存の版を動かさない）:
 
@@ -302,7 +252,7 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 
 ### daily-incremental の動作詳細
 
-`_pipeline_incremental.py`（**現在はローカルの夜間バッチ `scripts/run_nightly.py` が毎晩呼ぶ**（時刻は「バッチ暦」）。GHA の `schedule` は #503 で停止しており、下の JST 17:17 は停止時点の設定値＝起動時刻の根拠としてだけ残す）は:
+`_pipeline_incremental.py`（**ローカルの夜間バッチ `scripts/run_nightly.py` が毎晩呼ぶ**。時刻は「バッチ暦」）は:
 
 > **⏰ 起動時刻の根拠（#476・2026-08-09 に JST 03:00 から移動）**
 >
@@ -311,21 +261,17 @@ PYTHONUTF8=1 "$TEMP/audit-venv/Scripts/pip-audit" --strict -r requirements.txt -
 > | 15:30 | 東証 大引け（2024-11-05 のクロージング・オークション導入で 15:00 から延伸） |
 > | 16:30頃 | J-Quants 株価四本値（無料は12週遅延＝当日ぶんは来ない） |
 > | **17:15** | EDINET 提出受付終了 → その日の書類一覧が確定 |
-> | **17:17** | ← 起動 |
+> | **17:20** | ← 夜間バッチの名目時刻（停止前の GHA の cron は 17:17） |
 > | 18:00頃 / 24:30頃 | J-Quants 財務情報（速報 / 確報） |
 > | 22:30（夏）/ 23:30（冬） | 米国市場オープン |
 > | 05:00（夏）/ 06:00（冬） | 米国市場クローズ |
 >
 > **市場データの中身は JST 03:00 起動と同じで、変わるのは結果を見られる時刻と EDINET の当日提出ぶんだけ。** この時刻は東証も NYSE も閉じている唯一の窓（JST 16:00〜22:30）だが、スケジュールは第一防御でしかなく、保証はコード側（`last_closed_session` / in-progress バー除外）が持つ。理由と実測（GHA の cron 遅延・#474 の進行中バー）は [GOTCHAS.md](GOTCHAS.md#日付時刻の境界jstと株価の鮮度)「収集の日付境界は必ず JST で判定する」が正本。分を `:00` からずらしてあるのは毎時ピークの遅延を避けるため。
->
-> チェーン終端の見込みは JST 21〜22時台（本体は下の手順4の所要 ＋ `nightly-scores` 実測33〜35分）。週次 VACUUM は 土 23:30Z なので衝突しない。
 
 1. EDINET API の書類一覧を **前年1月1日〜「確定済みの最新 JST 日付」**の全日スキャンで取得し（`years_back=1`・`collector_financials.py` Phase 3）、未収集 `doc_id` のみ XBRL 収集・DB保存。「60日以内」は旧実装の記述で実態と乖離していた（#422）。<br>**終端は `latest_settled_edinet_date`（JST 基準・#476）**: EDINET 提出受付は平日 9:00〜17:15 で、受付終了後はその日の一覧が確定するため、`EDINET_CUTOFF_JST` を過ぎていれば当日を含める。ランナーの UTC 日付から引いていた旧実装が確定済みの JST 前日ぶんを落としていた経緯（反映まで約33時間 → 約10時間）は [GOTCHAS.md](GOTCHAS.md#日付時刻の境界jstと株価の鮮度)「収集の日付境界は必ず JST で判定する」
 2. 株価更新（Phase 4）: **①Yahoo Finance が銘柄ごとに `その社の最終日+1 〜 today` をギャップ補完**（`fill_recent_stock_price_gap_yahoo`）→ **②J-Quants catchup（`today-90`〜`today-80`）で Yahoo 暫定値を公式値へ置換** → ③`update_market_data_from_history`。<br>**J-Quants 無料は直近84日（12週）を配信しない**ため、旧実装の `days_back=14` はエンバーゴ内で構造的に常に0件かつ全日403となり、中断ガードを誤発火させて Yahoo 補完まで巻き添えで止めていた（#419 / #425）。撤去済み。鮮度を担う Yahoo を先に置き、J-Quants catchup の失敗は握って継続する（片方の収集元の障害がもう片方を止めない）。鮮度はこの Yahoo 補完が担う（J-Quants 制約表の「配信遅延」行を参照）。<br>起点は**銘柄別**（Issue #415）。全社横断の最大日を1つ選んで全社へ適用すると、一部銘柄だけ先行して復旧した場合に遅延銘柄の欠測が永久に埋まらない（2026-07 に発生。2銘柄が 07-31 / 3,677銘柄が 07-13 の状態で 14営業日分が穴のまま残った）。起点は daily 保持窓（`DAILY_WINDOW_DAYS`）でクリップし、それ以前は `backfill-weekly.yml` の管轄とする。<br>**対象社の判定基準は「閉場済みの最新 JST 営業日」**（`last_closed_session`・#474）で、基準セッションより後の `trade_date`（Yahoo が場中に返す**進行中バー**）は取り込まない。UTC 日付と比べていた旧実装が全社の金曜バーを取り直していた経緯（本番実測で **4,437社 → 735社**）は [GOTCHAS.md](GOTCHAS.md#日付時刻の境界jstと株価の鮮度)「毎晩の gap-fill は『閉場済みの最新 JST 営業日』を基準にする」。<br>**その 735社のうち 454社は「株価を1件も持たない社」で、2026-08-21 の実測では全て `is_active=False`**（#475）＝上場廃止済みで Yahoo も返さない。毎晩 454リクエスト ≒ 13分を捨てていたので、`DELISTED_RETRY_INTERVAL_DAYS=7` 日に1回だけ試す形にした（**恒久除外にはしない**——`is_active` は `/equities/master` 由来で、エンバーゴにより新規上場が誤って delisted に見える前例がある＝#463。除外すると復活も新規も永久に拾えず、しかも失敗が出ない）。曜日は `edinet_code` から決定的に散らすので1日あたり 57〜74社に均される。<br>**株価履歴を持つ廃止社も同じ間隔で試す**（#556）。#475 は価格ゼロ社だけを絞ったため、`is_active=False`・サフィックス未解決・最終株価が `DELISTED_STALE_DAYS=30` 日より前の社（2026-09-11 実測 263社・全社が 60日超前で停止）は毎晩対象に残り、Yahoo が 404 を返し続けていた（毎晩の 4xx 約320件の大半）。**最終株価の古さを条件に入れる**ので、#463 の誤 delisted（新規上場）は当たり日に一度履歴を得れば翌晩から lag 1日に戻り、毎晩の取得へ合流する。サフィックス解決済みの社（地方取引所で現に取引がある社）は通り抜ける。見送り数は価格ゼロ社の見送りと混ぜず、別の断片としてログに出す（「止まった社」と「一度も取れていない社」は増減の意味が違う）
 3. 成長率・Zスコアを再計算
-4. 所要時間: **2h05m〜2h38m**（2026-08-02 の success run 2本で実測。大半は EDINET 全日スキャンと Yahoo ギャップ補完の逐次リクエスト。`timeout-minutes: 360`）。**#474 以降、週末・祝日明けの run は gap-fill をほぼ丸ごと飛ばすため大きく短くなる**（平日は全社取得のままなので据え置き）
-
-> **GHA の `daily-incremental.yml` は止まっている**（#503 で `schedule:` をコメントアウト。ファイル名は `.yml` のまま）。停止の有無はファイル名ではなく、yml 本文の `schedule:` を見て判断すること。GHA で定時に動いていた頃の運用パターン（全件収集中の `.disabled` へのリネーム）・cron の履歴・2026-07 の19日連続 failure は [archive/DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した。
+4. 所要時間: ローカルの夜間ログ（`.logs/nightly_YYYYMMDD.log`）の `END` 行が正本。#474 以降、週末・祝日明けは gap-fill をほぼ丸ごと飛ばすので短い。GHA で回していた頃の実測は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#daily-incremental-gha-で定時に動いていた頃の運用と履歴503-まで)
 
 > **鮮度の確認は max ではなく分位で行うこと。** 理由・2026-08-02 の実測・確認用の SQL は [GOTCHAS.md](GOTCHAS.md#日付時刻の境界jstと株価の鮮度)「データ鮮度は『全社の max』で測らない」が正本。
 
@@ -347,14 +293,11 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
   #1118 で月次から外した（月次は締切で 150 件中 73 件ほどしか測れずに本番の設定を書いていた・ADR-0070 決定 5）。M-1 は実測 約752分で本体の窓（960分）に入らないため専用タスク
   （`run_monthly_m1.ps1`・毎月3日・#584・[ADR-0046](adr/0046-steps-that-cannot-finish-get-their-own-task.md)）。
   ステップ予算は `scripts/run_monthly.py::BUDGET_MIN` が持ち、**Σ予算＋マージン ≤ 窓** を CI が照合する。
-- **品質ゲート（#291 → #590 で作り直し・[ADR-0047](adr/0047-tuning-gate-compares-on-one-panel.md)）**:
-  旧実装は永続化済みの `objective_value` と比較し、劣化していれば persist をスキップして
-  非ゼロ終了した。だが保存値は「そのとき存在したパネルでの値」で、パネルは毎晩伸びるため
-  月をまたいだ比較が成立しない（実測 0.5068=10 fold / 0.0221=55 fold＝**fold が少ない候補ほど
-  高く出る**）。実際 `macro_gbdt` はこれで 2026-07-19 の値のまま閉じ続けた。現在は champion を
-  **同一パネル上で**測り直して候補プールへ入れるので `best >= champion` が構造的に成立し、
+- **品質ゲート（[ADR-0047](adr/0047-tuning-gate-compares-on-one-panel.md)）**: champion を候補と
+  **同じパネルで**測り直して候補プールへ入れるので `best >= champion` が構造的に成り立ち、
   persist は常に行い exit は 0。水準の移動は WARNING と `plugin_tuned_params` の
   `prev_objective_value` / `champion_objective_value` / `n_periods` / `n_oof_samples` に残す。
+  保存値と比べていた旧実装（#291）が固着した経緯は ADR-0047。
 - **失敗時の対応手順**:
   1. `.logs/monthly_YYYYMMDD.log`（M-1 は `monthly_m1_*`）の `END tune:<model>: exit=...` を見る。
      **`exit=124` はステップ予算での打ち切り**。#638・ADR-0054 以後は、その手前で子が自分から
@@ -365,15 +308,10 @@ M-1（`macro_risk_return`）・M-2（`macro_gbdt`）・M-3（`macro_dlm`）の�
   2. 失敗は `scripts/batch_common.py` が `gh issue create` で起票する（#587 が実例）。**同じタイトル
      （＝同じバッチの同じステップの組み合わせ）の open Issue があれば、新しく立てずにコメントで追記する**
      （#885・GHA の notify-failure と watchdog と同じ寄せ方）。一覧を読めなければ新規起票へ倒す。
-     **ただしその Issue を閉じても穴は残る**——2026-09-01 の打ち切り後、`plugin_tuned_params` は
-     M-2 が 50日・M-3 が 59日 古いまま誰も気づかなかった。成果物の固着は
-     `batch_freshness.PRODUCERS` を watchdog が見て別に起票する（#504）。
-     **`PRODUCERS` は月次の成果物だけではない**——夜間バッチが更新する `JPX 業種マスタ`
-     （`app_settings.jpx_industry_last_success`）も同じ表で見る。取得が止まっても既存の業種は
-     DB に残り、`nightly_last_run` も画面も健全なままなので、ここ以外に現れる場所が無い
-     （#632・2026-09-03 の拡張子変更は6晩連続の 404 を `exit=0` で通した）。JPX に載らない上場社の
-     空欄を埋める `EDINET コードリスト（業種の空欄補完）`（`app_settings.edinet_codelist_last_success`・
-     #784）も同じ理由で同じ表に並ぶ。
+     **ただしその Issue を閉じても穴は残る**ので、成果物の固着は `batch_freshness.PRODUCERS` を
+     watchdog が見て別に起票する（#504）。夜間バッチの JPX 業種マスタ・EDINET コードリストも同じ表で見る
+     （ここ以外に止まったことが現れる場所が無いため）。経緯は
+     [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#探索の運用-品質ゲートと成果物の固着の経緯)。
   3. 予算切れが続くなら `BUDGET_MIN` を実測から見直すか、そのステップを日中枠
      （`run_daytime.ps1 -Enqueue tune:macro_gbdt`・#618）へ逃がす。
 
