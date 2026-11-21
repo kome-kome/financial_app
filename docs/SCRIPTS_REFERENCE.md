@@ -29,8 +29,6 @@
 | [`scripts/_cache.py`](#scripts_cachepy) | ユーティリティ |
 | [`scripts/import_index_list.py`](#scriptsimport_index_listpy) | ユーティリティ |
 | [`scripts/prereg.py`](#scriptspreregpy) | ユーティリティ |
-| [`scripts/event_study_disclosure_surprise.py`](#scriptsevent_study_disclosure_surprisepy) | 検証（実験） |
-| [`scripts/event_study_multivariate_xgboost.py`](#scriptsevent_study_multivariate_xgboostpy) | 検証（実験） |
 | [`scripts/measure_embargo_impact.py`](#scriptsmeasure_embargo_impactpy) | 検証（実験） |
 | [`scripts/measure_strict_binding.py`](#scriptsmeasure_strict_bindingpy) | 検証（実験） |
 | [`scripts/measure_sector_coverage.py`](#scriptsmeasure_sector_coveragepy) | 検証（実験） |
@@ -161,18 +159,6 @@
 事前登録文書（`docs/prereg/*.md`・用語は CONTEXT.md「事前登録」）の凍結と照合（#1007・親 #1001）。`python -m scripts.prereg <文書>` で本文（マーカー行より上）の sha256 を出し、`--check <sha256>` で照合する（不一致・追記節の凍結値との食い違いは終了コード 2）。計測道具は `add_arguments(parser)` で `--prereg` / `--prereg-sha` を必須にし、`stamp_from_args(args)` が返す印（本文の sha256・HEAD SHA・事前登録の Issue の URL）を出力 JSON へそのまま入れる。守ること: **sha256 は改行を LF にそろえ BOM を外してから取る**（`core.autocrlf=true` で `.gitattributes` が無いので、そろえないと手元の CRLF と CI の LF で指紋が食い違う）／**マーカー行は 1 行だけ**（0・2 行以上は失敗）／**HEAD SHA は `nightly_scores._code_version` を使い書き写さない**／**本文を変えたら追記節の凍結値も同じ PR で更新する**（`tests/test_prereg.py` の凍結ガードが落ちる。開封＝stage B の後は変えない）。前向き監視の境界表は `model_stats.ld_obf_boundaries` の出力で、文書の表との一致も同じテストが照合する
 
 種別: ユーティリティ ／ 依存先: nightly_scores.py（`_code_version`）
-
-## `scripts/event_study_disclosure_surprise.py`
-
-決算開示サプライズ×フォワードリターンのイベントスタディ（Issue #323 フェーズ0・単一特徴量 m_pm1 で rank-IC 0.031）。本番書込なし・手動実行（`python -m scripts.xxx`）
-
-種別: 検証（実験） ／ 依存先: database.py, feature_disclosure.py, scripts/_cache.py
-
-## `scripts/event_study_multivariate_xgboost.py`
-
-同フェーズ1の多変量 XGBoost 版＋target 相対化 ablation（#337）＋断面/自己履歴特徴量×target 軸マトリクス（#336）。本番書込なし・手動実行
-
-種別: 検証（実験） ／ 依存先: database.py, feature_disclosure.py, scripts/_cache.py
 
 ## `scripts/measure_embargo_impact.py`
 

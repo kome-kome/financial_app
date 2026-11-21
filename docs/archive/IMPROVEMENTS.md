@@ -300,3 +300,9 @@ scikit-learn の導入が承認され、統計解析の質を向上させる改�
 
 ### [済] O-3. GitHub Actions workflow の整理・命名改善（2026-06-17）
 - 全 yml の `name:` に `[CI]`/`[定常]`/`[全件]`/`[一回性]`/`[補完]` プレフィックスを付与し、`docs/DEPLOYMENT.md` に「GitHub Actions workflow 早見表」テーブルを追加。
+
+### [退役] 決算開示イベントスタディの検証スクリプト 2 本（#323 の実験・2026-11-22 / #1287）
+- `scripts/event_study_disclosure_surprise.py`（#323 フェーズ0）: 開示サプライズ m_pm1（純利益率の予想対比）と 4 週先リターンの rank-IC は 0.031（弱い有意）。
+- `scripts/event_study_multivariate_xgboost.py`（同フェーズ1）: 多変量 XGBoost での強化、インデックス相対 target の ablation（#337・「弱い肯定」）、断面/自己履歴特徴量×target 軸マトリクス（#336）。
+- 元の #323（決算開示イベント駆動モデル）は not planned で閉じ、起動元も無くなったので退役した。取り出すときは `git log --diff-filter=D --oneline -- scripts/event_study_multivariate_xgboost.py` で削除コミットを探し、`git show <削除コミット>^:scripts/<ファイル名>` で読む。
+- 2 本の退役で `feature_disclosure.py` の呼び出し元は無くなった（扱いは別 Issue）。
