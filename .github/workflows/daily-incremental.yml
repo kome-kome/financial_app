@@ -20,15 +20,10 @@ name: "[定常] 差分収集・毎日自動実行"
 # 分を :00 からずらしてあるのは毎時ピークの遅延を避けるため。
 
 on:
-  # ✅ schedule は有効（2026-06-22〜）。Yahoo ギャップ補完が GitHub Actions（Azure IP）
-  # から動作することを workflow_dispatch で実証済み。J-Quants 無料は直近12週を配信
-  # しないため、株価鮮度の担い手は Phase 4 の Yahoo ギャップ補完
-  # （fill_recent_stock_price_gap_yahoo）である＝ここが失敗すると鮮度が止まる。
-  # 実測所要 2h05m〜2h38m（2026-08-02 の success run 2本・#422）。#474 以降、
-  # 週末・祝日明けは gap-fill をほぼ丸ごと飛ばすため大きく短くなる。
-  # このワークフローの success が nightly-scores の workflow_run チェーンを
-  # 起動する（#432）ので、name を変えるときは nightly-scores.yml の if も直す。
-  # nightly-scores は実測33〜35分なので、チェーン終端は JST 21〜22時台の見込み。
+  # 停止前の運用（2026-06-22〜08-10）: Yahoo ギャップ補完が GitHub Actions（Azure IP）
+  # から動くことを確かめて schedule を有効にしていた。実測所要 2h05m〜2h38m（#422）。
+  # 当時は success が nightly-scores の workflow_run チェーンを起動していた（#432）ので、
+  # name を変えるときは nightly-scores.yml の if も直す。
   # ⛔ 2026-08-10: Egress 超過（#477）で一時停止 → **2026-08-20 に恒久停止へ切り替え**（#503）。
   #    停止の理由が「枠が戻るまでの待避」から「役割の終了」へ変わった:
   #    **正本がローカル PostgreSQL へ移った**（#503・ADR-0038）。GHA はクラウドで走るので
