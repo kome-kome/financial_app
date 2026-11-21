@@ -406,7 +406,7 @@ Supabase が restricted になると**アプリも分析も一切動かせない
 
 | 項目 | 値 |
 |---|---|
-| サーバ | **PostgreSQL 18.6**（Windows サービス `postgresql-x64-18`・port 5432） |
+| サーバ | **PostgreSQL 18.7**（Windows サービス `postgresql-x64-18`・port 5432）。2026-11-21 に 18.6 から上げた（11/12 のセキュリティ更新・脆弱性 52 件）。マイナー更新は EDB のインストーラを同じフォルダへ上書きするだけでデータの移行は要らず、終わりに開くスタックビルダは何も選ばずに閉じてよい |
 | クライアント | `C:\Program Files\PostgreSQL\18\bin`。**PATH に無い**ので `pg_dump` 等はフルパスで呼ぶ |
 | 認証 | `pg_hba.conf` は local/host とも `scram-sha-256` |
 | 待ち受け | `postgresql.conf` の `listen_addresses = 'localhost'`（`127.0.0.1` と `::1` だけ・2026-11-01・#1097。それまでは `'*'`）。`pg_hba.conf` の host も `127.0.0.1/32`・`::1/128` だけ。接続文字列（ロール・パスワード）は公開済みなので、**外へ開く変更は待ち受け・`pg_hba.conf`・ファイアウォールの3段がそろって初めて効く**ように保つ。CLAUDE.md の「`postgresql.conf` は変えない」はセッション設定（ADR-0043）の規則で、待ち受けとは別。サービスの再起動は**UAC で権限を上げた PowerShell** が要る（サービスの権限は SYSTEM と Administrators だけ。`C:\Program Files\PostgreSQL\18\data` は権限を上げずに書けるので、書き換えだけ通って再起動で `サービスを開けません` になる） |
