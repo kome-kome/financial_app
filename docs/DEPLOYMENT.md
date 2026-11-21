@@ -530,99 +530,43 @@ Render ダッシュボードで管理。
 | 匿名経路（Data API・RLS） | **Data API（PostgREST）は無効**。`public` の全表で RLS 有効・ポリシー無し、anon / authenticated の表・シーケンスの権限と既定の権限は外してある（2026-11-01・#1094） | アプリは Data API を使わず BYPASSRLS のロールで直結するので影響を受けない。Render の `init_db` が新しく作る表は RLS off のままだが、Data API が無効なので外からは届かない。Advisor が RLS の警告を出したら [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6553557142)の SQL ②③ を流し直す。**BYPASSRLS もポリシーも無いロールでつなぐと、RLS の表はエラー無しで0行を返す** |
 | Render の接続ロール | **常用は `finapp_web`**（2026-11-02・#1094）: ログイン可・BYPASSRLS・`public` の全表と VIEW に SELECT・書けるのは `app_settings` の INSERT / UPDATE だけ（本番で書くのは `APP_PASSWORD` と `egress_cycle_*` の 3 キー）。`postgres` は `DATABASE_MIGRATION_URL` で起動時の書き込みにだけ使う | `alter default privileges for role postgres ... grant select on tables to finapp_web` を入れてあるので、`init_db` が VIEW を作り直しても・表を足しても SELECT は自動で付く（**`postgres` 以外のロールで表を作ると付かない**）。作り方・確認・戻し方は [#1094 のコメント](https://github.com/kome-kome/financial_app/issues/1094#issuecomment-6575980435) |
 
-#### Egress 設計（日次ジョブ = 最大の消費者・Issue #446）
+#### Egress（転送量）の計測と歯止め
 
-**測り方は二階建て**（Issue #478・[ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)）。
-
-| 層 | 何を使うか | いつ | 精度 |
-|---|---|---|---|
-| **正本** | サーバ側 `sum(octet_length(<列>::text))` | 手動・設計判断のとき | 実測（誤差数%） |
-| **常時** | `db_egress` のクライアント側台帳（行数 × 較正済み B/行） | 全プロセス・全経路で自動 | 推定 |
-
-**正本**: 行を持ってこずにサーバ側で `octet_length(<列>::text)` を集計する（psycopg2 はテキストプロトコルなので、これが実際に流れるペイロード長。TLS/TCP ヘッダは含まないが誤差は数%）。ダッシュボードの数字は他の消費と混ざって分離できないため、**列単位で積み上げた実測をこちらの正本とする**。
-
-**常時計測（`db_egress.py`）**: `engine` の `after_cursor_execute` フックが「どのクエリが何行・何列を返したか」を全プロセス（GHA バッチ・ローカル CLI・Render）で記録する。psycopg2 の既定カーソルはクライアント側バッファなので、このフックの時点で行は既に転送済み＝`cursor.rowcount` がそのまま転送行数になる（結果は消費しないので既存挙動に干渉しない）。プロセス終了時に `[egress] summary job=... total=...MB rows=... top=<テーブル>:<MB>,...` を標準エラーへ1行出す。ワークフローの帰属は各 yml の `FINAPP_JOB` で付く。
-
-- **推定は正本ではない**。較正値（B/行）はサーバ側の実測から導出しており（出所は `db_egress.EGRESS_COST_TABLE` の各エントリ）、未較正の組み合わせは 17.5 B/列/行 の保守的な既定を使う（#446 時点は 12.0。#493 の全表実測で `macro_beta_loadings` が 17.3 とそれを上回っていたため引き上げた＝**既定は実測レンジの上側に置く**）。**台帳の役目は帰属とブレーカであって、実測の置き換えではない。**
-- **較正には2世代ある**。#446（2026-08-06）は消費側が実際に投げる**部分列**、#493（2026-08-19）は mirror 16 表の**全列**。**部分列エントリを全列エントリで上書きしてはいけない**——列ごとに B/値 が違うため過小評価になる（`stock_price_weekly` は 3列で 10.7 B/列/行、全列平均では 7.8 B/列/行）。
-- **ロールアップ**: `python -m scripts.egress_report`（JSONL 台帳）／`--log <gh run view --log の保存先>`（run ログの `[egress] summary` 行）。DB に繋がないので実行しても Egress は増えない。**JSONL は既定で `.egress/ledger.jsonl` へ書かれる**（2026-08-19・#478 の穴3）——以前は `FINAPP_EGRESS_LEDGER` を人が手で立てる運用で、**過去2回の超過の主因だったローカル検証の反復が1バイトも記録されていなかった**。無効化は `FINAPP_EGRESS_LEDGER=0`。GHA では全ワークフローが `upload-artifact` の `path` に `.egress/*.jsonl` を含める（`tests/test_db_egress.py::TestWorkflowLedgerCollection` が回収漏れを CI で落とす＝**漏れは failure を出さないので通知では拾えない**）。
-
-**サーキットブレーカ**: プロセス単位で `FINAPP_EGRESS_ROW_LIMIT`（既定 3,000,000 行）/ `FINAPP_EGRESS_MB_LIMIT`（既定 400MB）を超えると `EgressBudgetExceeded` を送出する。既定は既知の最大実行（夜間バッチ ≒ 1.39M 行 / 67.7MB）の約2倍。GHA では例外＝failure ＝ `notify-failure.yml` が Issue を自動起票するので、**ブレーカは自分で自分を報告する**。
-
-- 正当に重い一回性の処理は `db_egress.egress_budget(mb=..., rows=...)` で**その区間だけ**引き上げる（ADR-0032 の `db_timeouts` と同じ原則＝上書きは局所・既定は変えない）。
-- 緊急時の全体解除は `FINAPP_EGRESS_ENFORCE=0`。**計測は続く**ので台帳は埋まる。
-
-**請求サイクル累計（第2の軸・Issue #478・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）**: プロセス予算だけでは月枠を守れない。400MB/プロセスなので**1日に12プロセス走れば 4.8GB/日を流しても一度も踏まれない**。過去2回の超過は形が違っていた——2026-07（61.2GB）は暴走型でブレーカが効くが、**2026-08（7.312GB）はスパイク約2GB＋平常運転 約5GB の「じわじわ型」で、プロセス予算は原理的に無力**だった。
+設計の正本は [ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)（台帳とプロセス予算）・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)（請求サイクル累計）・ARCHITECTURE.md §10 の `db_egress.py` の行。Supabase が正本だった頃の詳しい解説は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#egress-の計測と歯止めの解説1292-まで) へ移した。今は Render の閲覧と `egress-health` だけが Supabase を読む（ローカル正本の読取は Egress を使わない）。
 
 | 軸 | 何を守るか | 置き場所 | 閾値 |
 |---|---|---|---|
-| プロセス予算 | 1回の暴走をその場で止める | プロセスメモリ | 3,000,000 行 / 400MB |
-| **サイクル累計** | **月枠に対する残量をプロセス跨ぎで守る** | **`app_settings.egress_cycle_bytes`** | warn 80% / block 95% |
+| プロセス予算 | 1回の暴走をその場で止める | プロセスメモリ | `FINAPP_EGRESS_ROW_LIMIT` 3,000,000 行 / `FINAPP_EGRESS_MB_LIMIT` 400MB |
+| サイクル累計 | 月枠に対する残量をプロセス跨ぎで守る | `app_settings.egress_cycle_bytes` | warn 80% / block 95% |
 
-- **DB に置く理由**: ローカル CLI と GHA ランナーが**同じカウンタを見られる唯一の場所**だから（`weekly_price_cache` が世代印を DB に置いたのと同じ理屈）。ファイルに置くと手元で払った Egress が GHA から見えない。
-- **サイクル境界**は `db_egress.EGRESS_CYCLE_DAY = 18`（ダッシュボード表記 "18 Aug 2026 - 18 Sep 2026"）。印が現サイクルと違えば累計は 0 から数え直す＝**前サイクルの値を繰り越さない**（リセット直後の誤警報を作らない）。
-- **block を 100% に置かない**。使い切った瞬間に全ジョブが死ぬより、残り 5%（256MB）を人の判断用に残す方が復旧が速い（restricted のコストは実測で8日間）。
-- **ミラー接続では積まない**（`FINAPP_DB_TARGET=local`）。ローカルからの読取は Egress を1バイトも使わないので、積むと**ミラーへ逃がす動機を自分で壊す**。台帳 JSONL には残る。
-- **pytest 実行中は必ず無効**。ローカルの pytest は `.env` の `DATABASE_URL` を読んだ本番向け engine を import するため、有効なままだと全テストが本番へ接続し atexit が本番へ書き込む（実装中に実際に起きた）。
-- 緊急停止は `FINAPP_EGRESS_CYCLE=0`（プロセス予算と JSONL 台帳は生きたまま）。
-- 閾値超過の通知は `egress-health.yml`（毎日 UTC 21:00）が exit 2 → `notify-failure` が Issue 起票。
+- **実測の正本はサーバ側の `sum(octet_length(<列>::text))`**。台帳（行数 × 較正済み B/行）は帰属とブレーカのための推定で、実測の置き換えではない。
+- **較正値の部分列エントリを全列エントリで上書きしない**（#446 は消費側が投げる部分列、#493 は全列。列ごとに B/値 が違うので過小評価になる。例: `stock_price_weekly` は 3列で 10.7、全列平均では 7.8 B/列/行）。明細の正本は `db_egress.EGRESS_COST_TABLE` のエントリと note。
+- **つまみ**: 正当に重い一回性の処理は `db_egress.egress_budget(mb=..., rows=...)` で**その区間だけ**引き上げる。全体解除は `FINAPP_EGRESS_ENFORCE=0`（計測は続く）。サイクル累計だけ止めるのは `FINAPP_EGRESS_CYCLE=0`。台帳 JSONL（既定 `.egress/ledger.jsonl`）の無効化は `FINAPP_EGRESS_LEDGER=0`。
+- **サイクル累計を積まない場面**: ミラー接続（`FINAPP_DB_TARGET=local`・積むとミラーへ逃がす動機を壊す）と pytest 実行中（有効なままだと本番向け engine の atexit が本番へ書く）。
+- **ロールアップ**: `python -m scripts.egress_report`（JSONL 台帳）／`--log <run ログの保存先>`。DB に繋がないので Egress は増えない。GHA の全ワークフローは `.egress/*.jsonl` を artifact に含める（回収漏れは `tests/test_db_egress.py::TestWorkflowLedgerCollection` が CI で落とす。漏れは failure を出さないので通知では拾えない）。
+- **リクエスト経路が今の主な消費者**（#482）: Render の `/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く（削減前後の実測は DEPLOYMENT_HISTORY.md）。
+- **閾値超過の通知**は `egress-health.yml`（毎日 UTC 21:00）が exit 2 → `notify-failure` が起票（判定は上の「GitHub Actions の workflow（手動の口）」）。
 
-夜間スコア更新（`sector_ols` + M-6）の Egress 実測表（2026-08-20）と解説は、夜間バッチがローカルで走り Supabase を使わなくなったので [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
+#### 読む列を絞る（Egress を増やさない書き方）
 
-- **削減した2列は「消費側が一度も読まない列」だけ**。`volume_sum` は `px_volz`（出来高z-score）専用で、M-1 は price_features を持たず M-2/M-6 は既定 OFF＝`load_data(db, with_volume=...)` で選択時のみ引く。M-3 は既定 ON なので従来どおり引く。
-- **未ロードは `None` ではなく番兵**（`macro_snapshots._VOLUME_NOT_LOADED`）にして、読もうとしたら即 `ValueError`。欠測として扱うと `px_volz` が全 nan になり「データが薄い」と見分けがつかない＝#438 と同型の静かな故障になる。
-- **`financial_metrics` VIEW は列指定で引く（#459）**。`plugins/macro_snapshots.py::FIN_LOAD_FIELDS`（36列＝`FIN_BASE_OPTIONS` の選択肢＋`recommend.METRICS` の非 RUNTIME 列＋突合/メタ6列）だけを引き、軽量 namedtuple `_FinRow` で返す。
-  - 列を落とした結果が黙って欠測に化けないよう、`FIN_LOAD_FIELDS` 外の列を `fin_features` に渡したら `build_snapshots` が `ValueError` を投げる。`getattr(..., None)` 任せだと全社が捨てられて学習0件になり「データが薄い」と誤読する（`volume_sum` の番兵と同じ考え方）。
-  - 消費側との対応（`recommend.METRICS` / `FIN_BASE_OPTIONS` / `scripts/candidate_bakeoff._FIN_FIELDS`）は `tests/test_macro_snapshots_loaders.py` のメタテストが CI で照合する。列の追加漏れは failure ではなく「静かに全社が消える」形で出るため、通知では拾えない（ADR-0031 と同型）。
-- #482（2026-08-15）で残る5経路を列指定へ広げた経緯は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
-- **新規の全列ロードは CI で落とす**: `tests/test_column_scoping.py` が `plugins/` ＋ `routers/` ＋ ルート直下を **AST で走査**し、`db.query(Model)`（＝全列）を検出して許可リスト `FULL_ROW_LOADS` と**双方向差分**を取る（未登録＝fail／実体の消えた登録＝fail／理由文20文字未満＝fail）。`.first()` 等の単一行終端と `with_entities` は対象外。正規表現ではなく AST なのは、`db.query(M.col)` との判別と docstring 内コード例の除外のため。`scripts/` は `scripts/_cache.py`（#355）の別制御下なので対象外。
-  - **静的解析で完結させる理由**: `db_egress._Bucket` は `n_cols` を保持せず、SQLite では `cursor.rowcount = -1` で `unknown_calls` にしか積まれない。「このクエリが何列引いたか」を実行時に測る手段が無い。
-
-##### 週次株価の差分ロード（#480・[ADR-0036](adr/0036-weekly-prices-incremental-load.md)）
-
-導入の理由と Egress の見積りは [ADR-0036](adr/0036-weekly-prices-incremental-load.md) が正本で、導入時の表は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
-
-- **仕組み**: 指紋（`max(week_start)` + `count(*)`＝サーバ側集約なので Egress は2行ぶん）でキャッシュ世代を判定し、**直近27週は常に再取得**して訂正を吸収する。27週は `database.WEEKLY_OVERLAP_DAYS`（`DAILY_WINDOW_DAYS` からの導出）で、ミラー同期（#481）と**同一オブジェクト**を共有する。
-- **キャッシュの置き場**: ローカルは `.weekly_cache/`、GHA は `actions/cache`（`nightly-scores.yml` のみ）。`scripts/.cache/`（#355）とは別物で、ログ接頭辞も `[wpcache]` と `[cache]` で分けてある。あちらは検証用で TTL 無し・明示リフレッシュのみ＝要求が逆を向いている。
-- **指紋では見えない訂正がある**。`repair_price_scale_breaks`（#465）は該当社の**全期間**を書き換えるので、行数も `max(week_start)` も変わらない。そこで `app_settings.weekly_prices_generation` を世代印とし、**書き手が印を進める**。印を DB に置くのは、修復 CLI がローカルで走りキャッシュは GHA ランナーに載るため（ディスク上の印では届かない）。
-- **印を進めるのは構造的な条件**: `_recompute_weeks_from_daily` が「保持窓より古い週を実際に書き換えた」とき。定常経路は取得開始日を `today − DAILY_WINDOW_DAYS` でクリップするのでここへは来ない。明示フック（repair / backfill-weekly）は保険であって主ではない——列挙は必ず漏れる（ADR-0031「登録≠実行」と同型）。
-- **ログの読み方**: `[wpcache] HIT ... fresh=<行数>` と `[egress] summary` の `top=stock_price_weekly:<MB>` を突き合わせる。乖離したら**キャッシュを通らない別経路が残っている**（#478 で `scripts/_cache.py` について学んだ読み方と同じ）。全ワークフローが `.egress/*.jsonl` を artifact に含めるので、`python -m scripts.egress_report` で構造化データから読める。
-- **静かな劣化への歯止め4層**: ①行数照合はハードゲート（不一致は必ずフルロード）②鮮度アサートは raise（GHA では failure ＝自動起票）③週1回の強制コールド（`FINAPP_WEEKLY_CACHE_MAX_AGE_DAYS`・既定7）④コールド時のドリフト監査（差分が触らない過去区間を旧キャッシュと突合・追加 Egress ゼロ）。stale なパネルで μ̂ を出しても failure は出ないので、設計側で塞ぐしかない。
-- **緊急停止**: `FINAPP_WEEKLY_CACHE=0`。このとき**指紋クエリすら発行しない**＝従来と1文も変わらない。
-
-**リクエスト経路の Egress（#482）**: `/api/plugins/sell_ranking/run` と `/api/morning` は**ユーザーが押すたび**に払う。回数が cron ではなく操作頻度で決まるので、1回の重さがそのまま効く。
-
-削減前後の実測表と `macro_beta_loadings` の較正の経緯は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
-
-**全表較正（#493・2026-08-19）**: Egress リセット直後に mirror 16 表を全列で測り直した。**明細（B/行・列数・行数）の正本は `db_egress.EGRESS_COST_TABLE` のエントリと note**（ここに書き写すと黙って陳腐化する）。設計判断に効く要点だけ:
+- **`financial_metrics` VIEW は列指定で引く（#459）**: `plugins/macro_snapshots.py::FIN_LOAD_FIELDS` だけを引く。外の列を `fin_features` に渡したら `build_snapshots` が `ValueError`、出来高の未ロードは番兵 `_VOLUME_NOT_LOADED`（読めば `ValueError`）——どちらも「黙って欠測に化けて学習0件」を防ぐため。消費側との対応は `tests/test_macro_snapshots_loaders.py` が照合する。
+- **新規の全列ロードは CI で落とす**: `tests/test_column_scoping.py` が `db.query(Model)` を AST で検出し、許可リスト `FULL_ROW_LOADS` と双方向で突き合わせる（理由は GOTCHAS.md「Egress（転送量）の計測と削減」）。
+- **週次株価の差分ロード**（[ADR-0036](adr/0036-weekly-prices-incremental-load.md)・規則は CLAUDE.md の設計制約）: 緊急停止は `FINAPP_WEEKLY_CACHE=0`（指紋クエリすら発行しない）。`[wpcache] HIT ... fresh=<行数>` と `[egress] summary` の `top=stock_price_weekly:<MB>` が乖離したら、キャッシュを通らない別経路が残っている。
+- **検証 CLI のキャッシュ（`scripts/_cache.py`）**: 終了時の `[cache] summary hits=N misses=M` の **MISS と REFRESH は本番 DB を引いた**という意味。2回目以降も misses が減らないならキーが毎回ミスしている。
+- **全表の較正**（#493・明細は `EGRESS_COST_TABLE`）: 下のコマンドで表ごとに1行＝Egress ほぼゼロで測れる。通常の表は 7.9〜17.3 B/列/行 に収まり、JSON 列を持つ `macro_beta_meta`・`plugin_tuned_params` は桁が違うので平均から外して読む。
 
 ```powershell
 $env:FINAPP_JOB = "egress-calibration"
-python -m scripts.mirror_verify --level counts --bytes --warn-only   # 表ごとに1行＝Egress ほぼゼロ
+python -m scripts.mirror_verify --level counts --bytes --warn-only
 ```
-
-- **通常の表の B/列/行 は 7.9〜17.3 に収まる**。ただし JSON 列を持つ2表（`macro_beta_meta` 492、`plugin_tuned_params` 1238）は桁が違う＝**平均から外して読む**
-- **`statement_timeout=2min`（ADR-0032）には当たらなかった**。128万行の `octet_length` 全走査も含めて全16表が通ったので、`table_stats()` に timeout の局所引き上げは足していない（当たるようになったら `database.db_timeouts` で包む）
-
-**キャッシュが効いているかを見る（#478）**: `scripts/` 系の検証 CLI は実行のたびに `[cache] HIT/MISS/REFRESH <key>` を標準エラーへ出し、終了時に `[cache] summary hits=N misses=M produced=X.XMB` を出す。**MISS と REFRESH は本番 DB を引いた＝Egress を使った**という意味なので、2回目以降の実行で misses が減らないならキーが実質毎回ミスしている。2026-07 と 2026-08 の2回とも、超過後にこの内訳が分からず原因の切り分けに時間を要した（黙ってミスしても気づけない＝#438 と同型）。`produced` は pickle のバイト数であって Egress そのものではない（正本は上記の `octet_length` 実測）。
 
 #### 容量設計（株価 = 最大の消費者）
 
-旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、年約220MB で増加して 500MB 上限の主犯だった。**close-only の2本立て**へ移行して恒久対策とする：
+旧 `stock_price_history`（日次OHLCV全履歴）が約 359MB / 全体80% を占め、500MB 上限の主犯だったので **close-only の2本立て**へ移した（500MB に対する見通しと移行の記録、当時の将来構想は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md)）：
 
 - **`stock_price_daily`**：直近 `DAILY_WINDOW_DAYS`（≒6か月）の日次終値のみ。収集のたびにローリング削除（trim）でサイズが頭打ち……のはずだが、DELETE ベースの trim は btree インデックス（`pk_stock_price_daily`/`ix_spd_trade_date`）を bloat させ続け、autovacuum は死領域をテーブル内で再利用するのみでファイルサイズは縮まない（**Issue #290**・実測: 2026-07-09 VACUUM FULL 直後 48MB→3日後 72MB）。**月次バッチの `vacuum` ステップ**（`_pipeline_vacuum.py`・月次本体の先頭・#504）で物理サイズを頭打ちにする（GHA の `vacuum-maintenance.yml` は 2026-08-25 に停止＝正本がローカルへ移り、断面は凍結して bloat が増えないため・#290 / #505）。チャートの日次ズーム・短期バックテスト用。**VACUUM 本体の所要は伸びている**（43〜92MB で 7.6〜10.4秒／2026-07-18〜08-01 → **79MB で 37.4秒**／2026-08-09 手動実行・79MB→49MB・DB 426MB→395MB）。`statement_timeout` に固定の上限は置かない（#471）。**時間の歯止めは起動元で違う（#868）**: 月次バッチからは親の締切（`vacuum` の予算15分）から「残り − 60秒」を `statement_timeout` に入れる＝サーバー側の VACUUM FULL も締切で打ち切られロックが外れる（予算超過の `kill_tree` が止めるのはクライアントだけ）。締切の無い手動の `vacuum-maintenance.yml` は無制限で、`timeout-minutes: 30` が止めるのはクライアントだけ。
 - **`stock_price_weekly`**：全履歴の週次集約（追記専用・trim しない）。`close_last`＋生集約 `volume_sum`/`turnover_sum`/`n_days` のみ保持し、**VWAP・相対流動性は派生**（保存しない）。チャート全期間・長期バックテスト・将来の予測モデル用。
 - 書き込みは単一チョークポイント `record_prices_batch`（daily upsert→触れた週を weekly 再集約→trim）。
-
-500MB に対する見通しと、一回限りの移行（2026-06 完了）の手順記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
-
-**将来オプション（いずれも未実装・発動条件つき）**：
-- *別ストア退避*（S3互換 / 別Postgres 等）：真の日次OHLCV・出来高分析・intraday が要件化したとき、または Supabase 使用量が 400MB を再突破したとき検討。
-- *ティアード in-place 圧縮*（1テーブルで日次→週次→月次に加齢圧縮）：上記2本立てで容量・UXとも足りているため不要。再考は別ストアと同条件。
-
-**後続PR（本対策に連なる別タスク）**：
-- *予測モデルの平滑化ターゲット化*：`turnover_sum`/`volume_sum` 由来の VWAP・相対流動性を説明/被説明変数に。年次株価変動ノイズ対策。MODELS.md 更新を伴う。
-- 実装済みの2件（`financial_records.raw_xbrl_json` の drop・過去2〜5年の Yahoo 週次バックフィル）は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md) へ移した（#844）。
 
 #### バックアップ運用ポリシー
 
