@@ -576,8 +576,7 @@ Render ダッシュボードで管理。
 - `full-pipeline.yml` finalize（Phase 3〜5）: **run 31229841870（2026-08-08・`jquants_days=180`）で 255.8分 実測**（`timeout-minutes: 355`）。内訳 = 成長率/Zスコアは VIEW 算出でスキップ ／ **マクロ 6.0分** ／ **Yahoo ギャップ補完 83.3分**（3,708件・4,437社 × `YAHOO_STOCK_RATE_SLEEP=0.5秒`＝差分が1日でも全社ループの固定費がかかる） ／ **J-Quants 23.4分**（130営業日中70日を取得＝235,359件 upsert・60日は契約窓外でリクエストせずスキップ） ／ **`update_market_data_from_history` 143.1分**（42,289レコード）。
   - **J-Quants は窓長にほぼ比例**（1営業日 = `JQUANTS_RATE_SLEEP` 20秒）。`jquants_days=730` なら窓内約462営業日＝約154分。`full-pipeline.yml` の `jquants_days` 入力で切り替える。
   - **`update_market_data_from_history` の143.1分は #464 で解消済み**（1件1 UPDATE → `UPDATE ... FROM` の一括更新でローカル約56秒）。GHA では往復回数が 42,394 → 22 に減るため、この項は数分以下になる見込み。**次回の実走で再計測すること。** 解消後は 730日でも合計約250分で 355分に収まり、公式値置換のために専用ワークフローを分ける必要はない。
-- `backfill-stock-history.yml`（完了につき削除済み・上の「アーカイブ済み」節）: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
-- `backfill-weekly-history.yml`（#198・完了につき削除済み）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。
+- 完了して削除したバックフィル2本（`backfill-stock-history.yml`・`backfill-weekly-history.yml`）の所要は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#ワークフロー-完了して削除したバックフィル2本の所要) へ移した。
 
 ### Supabase（無料プラン）
 
