@@ -5,7 +5,7 @@ M-1/M-2 の execute() を回し、`oof_backtest` の rank-IC / long-short spread
 before/after で並べる。#375 の follow-up。
 
 **低 Egress 設計**: 重い stock_price_weekly（約97万行）は `scripts/.cache/weekly_prices_close.pkl`
-（Issue #355・`scripts/event_study_*` が作成）を再利用し pull しない。小さい financial_metrics /
+（Issue #355）を再利用し pull しない。小さい financial_metrics /
 companies / macro_data のみ本番から 1 回 pull する。キャッシュが無ければ既定では 97万行 pull を
 拒否する（`--allow-full-pull` で明示解除。ただしローカルからの 97万行 pull はストールしやすい
 ＝ [[feedback_verification_fullloads_exhaust_egress]]）。
@@ -65,8 +65,7 @@ def _load_prices(allow_full_pull: bool) -> dict:
         if not allow_full_pull:
             raise SystemExit(
                 "weekly_prices_close キャッシュがありません。97万行の pull はストールしやすいため既定で"
-                "拒否します。scripts/event_study_multivariate_xgboost.py 等でキャッシュを作るか、"
-                "--allow-full-pull を付けて実行してください。"
+                "拒否します。--allow-full-pull を付けて実行すると、キャッシュを作って以後は再利用します。"
             )
         from database import StockPriceWeekly
         db = SessionLocal()

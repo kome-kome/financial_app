@@ -160,7 +160,7 @@ def _fmt_sig(sig: dict | None) -> str:
 
 def main() -> None:
     # Windows の既定 cp932 では μ̂（結合文字 U+0302）等が出力できずクラッシュするため、
-    # リダイレクト時も含めて UTF-8 に固定する（event_study_multivariate_xgboost.py と同流儀）。
+    # リダイレクト時も含めて UTF-8 に固定する。
     for _stream in (sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
