@@ -322,3 +322,10 @@ pg_restore --clean --no-acl --no-owner \
 > **cron の履歴（2026-06-22 再開 → 2026-08 停止・現在は停止中）**: dual-table 移行後の `workflow_dispatch` 手動実行で Yahoo ギャップ補完・J-Quants 株価取得が GitHub Actions（Azure IP）から正常動作することを確認 → `on.schedule` を有効化。**2026-08-09 に UTC 18:00（JST 03:00）→ UTC 08:17（JST 17:17）へ移動**（#476・上の起動時刻の根拠を参照）。その後 **#503 で正本がローカル PostgreSQL へ移り `schedule:` はコメントアウト**＝上の時刻は「停止時点の設定値」であって現在の挙動ではない（起動時刻の根拠としてだけ残す）。
 >
 > **⚠️ 2026-07-14 〜 08-01 は19日連続で failure していた**（真因: Phase 4 冒頭の J-Quants 403 が例外送出しプロセスが exit 1 → 鮮度の担い手である Yahoo ギャップ補完に一度も到達しなかった）。#412 で 403 をカバレッジ境界の欠測として継続扱いに修正済み。**この障害に19日間誰も気づかなかった**のは全ワークフローに失敗通知が無いためで、#414 で対応する。
+
+## ワークフロー: 完了して削除したバックフィル2本の所要
+
+2026-11-22（/tidy）に DEPLOYMENT.md「GitHub Actions」→「ジョブ所要時間（設計参考値）」の箇条から移した。どちらも本番実行を終えて yml を削除済みで、現行の設計参考値にならない。
+
+- `backfill-stock-history.yml`（完了につき削除済み）: 対象＝stock_price NULL かつ period_end 730日超前（初回 約3,800社）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`・1社1リクエストで **約60〜90分**（`timeout-minutes: 150`）。
+- `backfill-weekly-history.yml`（#198・完了につき削除済み）: 対象＝`stock_price_weekly` の最古日が `today-years` より新しい社。`backfill_weekly_history_yahoo` が Yahoo から過去方向に取得し、**1社ごとに `record_prices_batch(trim=True)`** で daily→weekly 再集約しつつ daily を都度 trim する（5年×全社の daily 同時展開を避け Supabase 500MB を超えない）。`YAHOO_STOCK_RATE_SLEEP=0.5秒`で **約60〜150分**（`timeout-minutes: 150`）。

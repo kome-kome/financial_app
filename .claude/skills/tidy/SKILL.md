@@ -94,7 +94,7 @@ description: >
 - `collector.py` / `api.py` / `database.py` / `plugins/` の中核ロジック
 - `requirements.txt`（完全 pin 維持）
 - `.github/workflows/daily-incremental.yml`（**schedule をコメントアウトして停止中**。#503 で正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐するため。運用ノートは DEPLOYMENT.md に記載）
-  - 全件収集中は同時実行回避のため `.yml.disabled` へリネームする運用手順が DEPLOYMENT.md にあるが、**現在そのファイル名は存在しない**（停止は schedule のコメントアウトで実現している）
+  - 全件収集中に `.yml.disabled` へリネームしていた GHA 時代の運用手順は `docs/archive/DEPLOYMENT_HISTORY.md` へ移した。**現在そのファイル名は存在しない**（停止は schedule のコメントアウトで実現している）
 
 **archive は削除しない**（統合・整理のみ）:
 - `docs/archive/` 配下は完了済み作業記録。現行参照には使わないが git 履歴の補助として残す。

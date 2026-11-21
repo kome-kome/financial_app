@@ -22,7 +22,7 @@ model: haiku
 | `collector_disclosures.py` | 会社予想（ガイダンス）開示収集。本番の API / プラグイン経路からは使われていない |
 | `collector_interim.py` | 半期(H1)財務収集 |
 | `api.py` | FastAPI アプリ本体（HTML 配信・認証/CORS ミドルウェア）。REST ルートの実体は `routers/` |
-| `routers/` | REST ルーター5本（`auth` / `collect` / `market` / `analysis` / `morning`） |
+| `routers/` | REST ルーター6本（`auth` / `collect` / `market` / `analysis` / `morning` / `portfolio`） |
 | `plugins/` | 分析モデル（自動検出方式）。一覧は `docs/ARCHITECTURE.md` §7・§10、実装詳細は `docs/PLUGIN_REFERENCE.md` |
 | `scripts/` | バッチ・計測の CLI（`python -m scripts.X` で実行）。詳細は `docs/SCRIPTS_REFERENCE.md` |
 | `templates/*.html` | UI。JS は `static/js/<page>.js` に外部化 |

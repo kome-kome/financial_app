@@ -1317,22 +1317,23 @@ classDiagram
         +execute() M-2 を継承し4フックのみ override（producer なし＝OOF 比較専用）
     }
 
-    class PluginRegistry {
+    class PluginsInit {
+        <<module plugins/__init__.py>>
         -dict _registry
         +_load() プラグインファイルを自動スキャン
         +get_plugin(name) AnalysisPlugin
         +list_plugins() list
         +ensure_dependencies(plugin, db) depends_on 強制
-        +execute_plugin(plugin, raw, db) coerce→ensure→execute の単一入口（execute は asyncio.to_thread でオフロード・実行中は any_executing()=True）
+        +execute_plugin(plugin, raw, db) async・coerce→ensure→execute の単一入口（execute は asyncio.to_thread でオフロード・実行中は any_executing()=True）
     }
 
     class Utils {
-        <<module>>
+        <<module plugins/utils.py>>
         +coerce_params(schema, raw) typed params : パラメータ契約の coerce seam
         +ols(X, y) coefficients, r2
         +normalize(values, method) normalized_values
         +winsorize(values, p_low, p_high) clipped_values
-        +walk_forward_cv(X, y, n_splits) cv_metrics
+        +walk_forward_cv_monthly(...) cv_metrics
         +fit_feature_columns(X, n_feat) win_params, norm_params
         +transform_feature_row(sample, win_params, norm_params) list
     }
@@ -1349,7 +1350,7 @@ classDiagram
     AnalysisPlugin <|-- MacroEnetPlugin
     MacroGbdtPlugin <|-- MacroGbdtRankPlugin
 
-    PluginRegistry --> AnalysisPlugin : 管理・呼び出し
+    PluginsInit --> AnalysisPlugin : 管理・呼び出し
 
     GapAnalysisPlugin     --> Utils : 統計処理を使用
     SectorOLSPlugin       --> Utils : ols() / winsorize() / normalize() を使用
@@ -1558,7 +1559,7 @@ graph TB
 
 | ファイル | 種別 | 役割 | 主な依存先 |
 |---|---|---|---|
-| `api.py` | バックエンド | FastAPI アプリ本体。REST ルートは `routers/` 5本へ分割し `include_router` で集約。自身は HTML ページ配信・`/api/system/info`・`/heartbeat`・ミドルウェア（認証/CORS）・`StaticFiles` マウントを担う（`/health` は `routers/auth.py`）。収集ジョブの実行時状態は `collection_jobs.jobs` registry、バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲 | routers/*, database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
+| `api.py` | バックエンド | FastAPI アプリ本体。REST ルートは `routers/` 6本へ分割し `include_router` で集約。自身は HTML ページ配信・`/api/system/info`・`/heartbeat`・ミドルウェア（認証/CORS）・`StaticFiles` マウントを担う（`/health` は `routers/auth.py`）。収集ジョブの実行時状態は `collection_jobs.jobs` registry、バックテスト計算は `backtest`、財務レコード整形は `serializers` へ委譲 | routers/*, database.py, collector.py, collection_jobs.py, backtest.py, serializers.py, plugins/ |
 | `routers/*.py` | バックエンド | `api.py` が `include_router` で束ねる REST ルーター6本（いずれも `APIRouter()`・フルパス保持）。`auth`（認証・Cookie/CSRF 発行）/ `collect`（収集管理・進捗SSE・売買の記録の書く口）/ `portfolio`（売買の記録と運用成績の読む口・#1222）/ `market`（統計・企業一覧・株価/履歴・マクロ・CSV・スクリーニング・DBビューア）/ `analysis`（プラグイン実行・推薦・乖離・バックテスト）/ `morning`（朝の推奨＝永続化済みスコア＋鮮度ブロックの読み出し専用・#423 子3）。REST ルート定義の実体はここにある | database.py, collection_jobs.py, plugins/, data_quality.py |
 | `collection_jobs.py` | バックエンド | 収集ジョブの実行時状態を集約する registry。job 名キーの `JobState`（running/progress/log/cancel）＋ start/cancel/snapshot/stream を提供。旧6本の並列 status dict を1箇所に畳む。SSE 配信ジェネレータ（`_sse_stream`）を内包。収集ジョブ専用ではなく job 名キーが衝突しなければ任意のバックグラウンドジョブに使える汎用 registry。heavy プラグインの進捗（#545）は `plugin:{name}` スロットへ相乗りし、`stream_awaiting_start` で配信する（**完了まで返らない POST と併走する**ため、開始前に開かれたストリームを猶予つきで待ち合わせる。素の `_sse_stream` は running=False で即切れる） | fastapi |
 | `backtest.py` | バックエンド | バックテスト分析（スコアリング上位N社の実績リターン）。`run(db, …, source, cost_bps=0.0)->dict` / `score_record` / `percentile` / `SCORING_SOURCES`(`recommend`/`valuation`/`net_cash`。`sell` は ADR-0071 で外した) / `MULTI_PERIODS`。**株価を使う列（`market_cap`・`div_yield`・`gap_ratio`）は開始日の株価で作り直す**（`asof_row` と `sector_gap_asof.gaps_on`・#1248。VIEW の値は今の株価なので、そのままだと開始日の後の値下がりで順位が付く。応答の `asof_valuation`・`asof_gap`）。**断面標準化は `run` が `fit_view_metric_stats` で作り `score_record` へ渡す**（1レコードでは断面統計を持てないため・#509。渡さないと as-of 再現が是正前のスコアを測ることになる）。**recommend の合成は本番の買い推奨と同じ `plugins.recommend.weighted_score`**（値がある指標の |w| 和で割る・被覆率が画面の既定 0.5 未満の社は採点しない・#745。以前は Σw·ẑ のままで欠けの多い銘柄を中央へ寄せていた）。`source` で検証対象の一次分析を切替（メタ層の一般化）。`cost_bps`（Issue #316・片道bp）は往復2倍控除したネット値を `return_pct_net`/`avg_return_net_pct` 等 `*_net` キーへ併記し、無印キー（コスト控除前）は常に不変＝後方互換固定。FastAPI 非依存で直接テスト可能。スコア指標は `FinancialMetric`（VIEW 派生）を引く | database.py, plugins.recommend, plugins.net_cash_analysis |
@@ -1734,6 +1735,8 @@ graph TB
 | `docs/adr/*.md` | ドキュメント | ADR（Architecture Decision Record）本体。**一覧・要約は [docs/adr/README.md](adr/README.md) が正本**（本表に列挙しない＝ADR 追加のたびの更新漏れを構造的に防ぐ・Issue #407）。ADR を追加したら `docs/adr/README.md` の表に1行足す | — |
 | `CLAUDE.md` | 設定 | Claude Codeへの動作指示（索引＋必須ルール） | — |
 | `.claude/agents/financial-app-explorer.md` | 設定 | read-only 探索サブエージェント定義（多ファイル調査・大ドキュメント精読をトークン節約で委譲） | — |
+| `.claude/settings.json` | 設定 | プロジェクト共有の Claude Code 設定（権限・フック登録） | — |
+| `.claude/hooks/stop-git-reminder.ps1` | 設定 | 応答終了時に未コミット・未 push の変更を知らせるフック | — |
 | `.claude/skills/*/SKILL.md` | 設定 | プロジェクト固有スキル（`/tidy` 軽量化点検 等）＋汎用スキル群。索引・各スキルの説明は [SKILLS_AND_AGENTS.md](SKILLS_AND_AGENTS.md) を参照 | — |
 | `.github/workflows/ci.yml` | GitHub Actions | push/PR で `ruff check`（F 系＝未定義名・import 漏れ。ルールは `ruff.toml`・除外は理由と Issue 付きの登録表を `tests/test_ci_lint.py` が照合・#724）→ `pytest --durations=20`（testpaths=tests）を実行する CI。`timeout-minutes: 15` はハング止め（#703）——ランナー準備の空白（実測最大 114秒）も算入される。1本の call が 60秒を超えたテストは `tests/conftest.py` が失敗にし、意図的に重いテストは `@pytest.mark.slow(reason=...)` で外す（空理由は収集時に使用エラー）。経緯は [GOTCHAS.md](GOTCHAS.md)「テスト・CI」 | — |
 | `.github/workflows/daily-incremental.yml` | GitHub Actions（**手動のみ**） | 差分収集。`_pipeline_incremental.py` を起動。**schedule は #503（ADR-0038）で恒久停止**＝正本がローカル PostgreSQL へ移り、動かすと Supabase だけが前進して分岐する（停止の発端は #477 の Egress 超過だが、#503 の反転で復帰の前提が消えた。**復帰条件は「正本を Supabase へ戻す決定をしたとき」だけ**で、その場合は #503 を再オープンしローカル→Supabase の引き渡し経路を先に用意する）。停止前の cron は **JST 17:17**＝UTC 08:17（#476 で JST 03:00 から前倒し）＝**起動時刻の根拠としてだけ残す値**。`workflow_dispatch` は残るが**手動起動すると Supabase へ書く** | `_pipeline_incremental.py` |
