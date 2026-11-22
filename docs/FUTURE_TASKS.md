@@ -16,6 +16,8 @@ gh issue view <N>                          # 詳細
 gh issue create --label "priority:low,ops" # 新タスク起票
 ```
 
+> 守ること（命令）の正本は [CLAUDE.md](../CLAUDE.md) の「GitHub ワークフロー」節。本書はその理由と詳細を持ち、同じ命令を書き写さない。
+
 - **優先度ラベル**: `priority:high` / `priority:medium` / `priority:low`
 - **種別**: `ops`（本番運用・インフラ＝コード変更なし）／ `enhancement`・`refactor`・`docs`・`ci`・`bug`（コード）／ `task`（エージェントが処理してよい）・`help wanted`（実測・日付待ち・人の判断が要る。全自動は拾わず、通常の `/next-issue` が人の作業を手順で渡して進める）／ `triage`（未分類。`/next-issue` が中身で判定する。下の「自動解決の流れ」を参照）
 - **着手→完了の同期**: PR 本文に `Closes #N` を書く。**main マージで Issue が自動クローズ**され、コード状態と残タスクが構造的に一致する。
@@ -75,7 +77,7 @@ Get-ScheduledTask -TaskName 'financial_app-*' | Where-Object { $_.State -eq 'Run
 Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'scripts[\\./]run_(daytime|nightly|monthly)' }
 ```
 
-**両方が要る。** タスク（`financial_app-*`）は `LogonType S4U` で登録されセッション0で走るので、対話セッションの非昇格プロセスからは python の `CommandLine` が空で返り、2 はタスク経由の実行を拾えない（2026-10-07 17:40 JST、`financial_app-nightly` が `Running` の最中に 2 は0件だった・#829）。逆に 1 は、タスクを通さずに端末から起動したバッチを見ない。バックアップ（`run_backup`）と watchdog は軽いので対象にしない。1 を除外の形で書くのは、タスクが増えたときに「実行中」の側へ倒すため。各バッチの起動時刻と窓は [DEPLOYMENT.md](DEPLOYMENT.md) の冒頭の表が正本。
+**両方が要る。** タスク（`financial_app-*`）は `LogonType S4U` で登録されセッション0で走る（セッション0で変わること全般は [GOTCHAS.md](GOTCHAS.md#ローカルバッチの実行環境windowsタスクスケジューラ)）ので、対話セッションの非昇格プロセスからは python の `CommandLine` が空で返り、2 はタスク経由の実行を拾えない（2026-10-07 17:40 JST、`financial_app-nightly` が `Running` の最中に 2 は0件だった・#829）。逆に 1 は、タスクを通さずに端末から起動したバッチを見ない。バックアップ（`run_backup`）と watchdog は軽いので対象にしない。1 を除外の形で書くのは、タスクが増えたときに「実行中」の側へ倒すため。各バッチの起動時刻と窓は [DEPLOYMENT.md](DEPLOYMENT.md) の冒頭の表が正本。
 
 判定を書き換えたら、0件だけでなく**陽性も確かめる**（#823 の検証はバッチが止まっている時間帯だけで、陽性を一度も見ていなかった）。
 

@@ -588,7 +588,7 @@ sequenceDiagram
 
 ## 4-2. 株価履歴収集フロー
 
-> 株価を取得し、**close-only の2本立て**（`stock_price_daily`＝直近6か月の日次／`stock_price_weekly`＝全履歴の週次集約）へ保存するフローです。容量恒久対策（Supabase Free 500MB）として旧 `stock_price_history`（日次OHLCV全履歴）から移行。詳細は [DEPLOYMENT.md「容量設計」](DEPLOYMENT.md) 参照。
+> 株価を取得し、**close-only の2本立て**（`stock_price_daily`＝直近6か月の日次／`stock_price_weekly`＝全履歴の週次集約）へ保存するフローです。容量恒久対策（Supabase Free 500MB）として旧 `stock_price_history`（日次OHLCV全履歴）から移行。詳細は [DEPLOYMENT.md「容量設計」](DEPLOYMENT.md#容量設計株価--最大の消費者) 参照。
 
 **現在の経路**: 夜間バッチ（`_pipeline_incremental.py` の Phase 4）が ①Yahoo で直近の欠損を補完（`fill_recent_stock_price_gap_yahoo`）→ ②J-Quants catchup で 80〜90日前を公式値へ置き換え（`collect_stock_price_history_jquants`）→ ③`update_market_data_from_history` で `financial_records` へ反映する。stooq はクラウド IP だけでなくローカルからも JavaScript のボット検証ページ（HTTP 200）を返し、CSV は取れない（2026-09-25 実測・[GOTCHAS.md](GOTCHAS.md)）。下は画面から手動で J-Quants 収集を回すときのフロー。
 

@@ -436,7 +436,7 @@ VIEW の BS 3 列と market_cap → compute_net_cash / compute_nc_ratio
   <p>業種ごとに独立して OLS 回帰を実行し、Ohlson モデル拡張型で<strong>株価（円/株）</strong>を推定する。業種内でモデルを構築することで、業種間の P/E・P/B 構造差の影響を排除する。</p>
 
   <div class="warn-box">
-    <strong>次元整合性の構造的強制（CLAUDE.md 制約）:</strong>
+    <strong>次元整合性の構造的強制（設計上の制約）:</strong>
     目的変数は <code>stock_price [円/株]</code> 単一に固定、説明変数は per-share [円/株] のみ。
     UI/API レベルで他の組み合わせを選べないようにすることで、係数 β を「implied 倍率」として経済的に解釈可能な状態に保つ。
   </div>
