@@ -10,6 +10,7 @@
 | `REFACTORING.md` | DB 一本化・XBRL 生データ保存の設計書 ＋ 付録: コード品質改善 (Phase 2) | ✅ 完了 |
 | `DEPLOYMENT_HISTORY.md` | DEPLOYMENT.md から移した完了済みの経緯（ローカル PG の初回セットアップ結果・ミラーの旧定常手順と予行演習・Supabase 正本時代のバックアップ運用・`vacuum-maintenance.yml` の設計記録・Supabase の Egress と容量設計の実測・バッチ暦とワークフロー早見表の旧記述・CF 補完と bs_inventory バックフィルの完了状態・#503 で停止した workflow と代替の対応表・workflow 早見表の旧表・依存の脆弱性検査の検出記録・探索の運用の経緯・Egress の計測と歯止めの解説・容量設計の当時の構想）。#844・#1291・#1292 | 📦 記録 |
 | `MODELS_HISTORY.md` | MODELS.md 末尾の改訂履歴の表（2026-05-14〜2026-10-07）。以後の変更の記録は git log と ADR。#844 | 📦 記録 |
+| `GOTCHAS_HISTORY.md` | GOTCHAS.md「DB・運用上の注意」を再現条件と回避手順に縮める前の文（経緯・実測値・事例の社名）。#1294 | 📦 記録 |
 | `reviews/2026-06-26-m2-macro-gbdt-review.md` | 集中コードレビュー: M-2（マクロ×財務 GBDT）。「リーク無し」の評価は ADR-0014 で訂正済み（ラベルの前方重複を見落としていた） | 📦 記録 |
 | `reviews/2026-06-27-web-api-auth-input-validation-review.md` | 集中コードレビュー: Web API 層（認証・入力検証・SQL 安全性） | 📦 記録 |
 | `reviews/2026-06-28-csv-export-output-safety-review.md` | 集中コードレビュー: データエクスポート出力の安全性（CSV 出力・リソース上限） | 📦 記録 |
