@@ -89,6 +89,10 @@ SOURCES = (
      "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1331.htm"),
     ("国税庁 No.1463 株式等を譲渡したときの課税（申告分離課税）",
      "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1463.htm"),
+    ("国税庁 No.1476 特定口座制度（源泉徴収口座内の配当等と譲渡損失の通算）",
+     "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1476.htm"),
+    ("国税庁 No.1474 上場株式等に係る譲渡損失の損益通算及び繰越控除",
+     "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1474.htm"),
     ("国税庁 No.1535 NISA（非課税口座）の概要",
      "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1535.htm"),
     ("金融庁 NISA を知る", "https://www.fsa.go.jp/policy/nisa2/know/"),
@@ -666,14 +670,21 @@ def account_summary(holdings: Sequence[Holding], assets: Mapping) -> dict:
 def realized_netting(realized: Realized, holdings: Sequence[Holding]) -> dict:
     """今年の確定損益 R と特定口座の含み損 L の損益通算。源泉徴収された税のうち、L を確定すると戻る見込み。
 
-    戻る見込み = 徴収された譲渡益税 − (R + L) にかかる税の見込み（0 未満は 0）。一般口座の含み損は特定口座の
-    源泉徴収と自動では相殺されないので L に入れない。通算しきれない損と配当の相殺は数えない。
+    譲渡益税の戻る見込み = 徴収された譲渡益税 − (R + L) にかかる税の見込み（0 未満は 0）。
+    R + L が損なら、その損は同じ口座で受け取った配当 D と年末に相殺され、D から損を引いた額に税がかかる
+    （国税庁 No.1476）。配当の税の戻る見込み = 徴収された配当の税 − その税の見込み。R + L が益なら配当の税は
+    戻らない（徴収の端数で見込みを下回っても 0 とする）。一般口座の含み損は特定口座の源泉徴収と自動では相殺
+    されないので L に入れない。配当とも相殺しきれない損の繰越（確定申告・No.1474）は数えない。
     """
+    r, d = realized.sale_pnl, realized.dividends
     loss = sum(h.pnl for h in holdings if h.account == ACCOUNT_TAXABLE and h.pnl < 0)
-    netted = realized.sale_pnl + loss
+    netted = r + loss
     tax_after = _tax(netted)
+    div_tax_after = _tax(d + netted) if netted < 0 else None
+    sale_refund = max(realized.sale_tax - tax_after, 0)
+    div_refund = max(realized.div_tax - div_tax_after, 0) if div_tax_after is not None else 0
     return {
-        "pnl": realized.sale_pnl,
+        "pnl": r,
         "sells": realized.sells,
         "start": realized.start,
         "end": realized.end,
@@ -681,10 +692,14 @@ def realized_netting(realized: Realized, holdings: Sequence[Holding]) -> dict:
         "loss": loss,
         "netted": netted,
         "tax_after": tax_after,
-        "refund": max(realized.sale_tax - tax_after, 0),
-        # 確定損益が損のとき、その分までは含み益を確定しても税がかからない
-        "room": -realized.sale_pnl if realized.sale_pnl < 0 else 0,
-        "dividends": realized.dividends,
+        "refund": sale_refund,
+        "div_refund": div_refund,
+        "refund_total": sale_refund + div_refund,
+        # 確定損益が損のとき、年末に配当と相殺される分を除いた残りまでは、含み益を確定しても税が増えない
+        "room": max(-r - d, 0) if r < 0 else 0,
+        # 確定損益の損が配当に食われて、税が増えずに確定できる含み益が無い
+        "room_used_by_dividends": r < 0 and -r <= d,
+        "dividends": d,
         "div_tax": realized.div_tax,
     }
 
@@ -914,8 +929,17 @@ def _realized_block(r: Optional[dict]) -> str:
     if r is None:
         return ("<p>今年すでに確定した損益は入っていません（特定口座の譲渡損益の明細を <code>--realized</code> で"
                 "渡すと、ここに損益通算の数字が出ます）。</p>")
-    room = (f'<p>今年の確定損益は損なので、<b>含み益をあと {_yen(r["room"])} 円確定するまでは税がかかりません</b>'
-            "（同じ年の損と相殺されるため）。</p>" if r["room"] else "")
+    if r["room"]:
+        by_div = (f'。損は年末に特定口座で受け取った配当（{_yen(r["dividends"])} 円）とも相殺されるので、'
+                  "その分を除いた額です" if r["dividends"] else "")
+        room = (f'<p>今年の確定損益は損なので、<b>含み益をあと {_yen(r["room"])} 円確定するまでは税が増えません</b>'
+                f"（同じ年の損と相殺されるため{by_div}）。</p>")
+    elif r["room_used_by_dividends"]:
+        room = ("<p>今年の確定損益は損ですが、その損は年末に特定口座で受け取った配当"
+                f'（{_yen(r["dividends"])} 円）と相殺されて配当の税が戻る予定です。<b>含み益を確定すると、'
+                "その分だけ戻る税が減ります</b>（税が増えずに確定できる含み益はありません）。</p>")
+    else:
+        room = ""
     return (
         f'<h3>今年の確定損益との損益通算（受渡日 {_e(r["start"].isoformat())}〜{_e(r["end"].isoformat())}・'
         f'売り {r["sells"]} 件）</h3>'
@@ -925,13 +949,16 @@ def _realized_block(r: Optional[dict]) -> str:
         f'<div class="card"><div class="k">特定口座の含み損の合計（L）</div><div class="v">{_signed(r["loss"])}</div></div>'
         f'<div class="card"><div class="k">含み損を全部確定した場合の損益（R + L）</div><div class="v">{_signed(r["netted"])}</div></div>'
         f'<div class="card"><div class="k">そのときの税の見込み</div><div class="v">{_yen(r["tax_after"])}</div></div>'
-        f'<div class="card"><div class="k">戻る見込み（徴収された税 − 税の見込み）</div><div class="v">{_yen(r["refund"])}</div></div>'
+        f'<div class="card"><div class="k">譲渡益税の戻る見込み（徴収された税 − 税の見込み）</div><div class="v">{_yen(r["refund"])}</div></div>'
+        f'<div class="card"><div class="k">配当の税の戻る見込み（年末の相殺で）</div><div class="v">{_yen(r["div_refund"])}</div></div>'
+        f'<div class="card"><div class="k">戻る見込みの合計</div><div class="v">{_yen(r["refund_total"])}</div></div>'
         "</div>"
         + room
         + '<p class="muted">一般口座の含み損は特定口座の源泉徴収と自動では相殺されないので L に入れていない。'
-        f'R + L が損になった分と、特定口座で受け取った配当（税引き前 {_yen(r["dividends"])} 円・徴収 '
-        f'{_yen(r["div_tax"])} 円）の相殺は数えていない。税の見込みは 20.315% をかけた値で、実際の徴収額とは'
-        "取引ごとの端数の分だけずれる。</p>"
+        f'R + L が損になると、その損は特定口座で受け取った配当（税引き前 {_yen(r["dividends"])} 円・徴収 '
+        f'{_yen(r["div_tax"])} 円）と年末に相殺され、配当から損を引いた額に税がかかる（国税庁 No.1476・確定申告は'
+        "要らない）。配当とも相殺しきれない損は、確定申告をすれば翌年以後 3 年間繰り越せる（国税庁 No.1474）が、"
+        "ここでは数えていない。税の見込みは 20.315% をかけた値で、実際の徴収額とは取引ごとの端数の分だけずれる。</p>"
     )
 
 
@@ -1139,7 +1166,7 @@ def summary_lines(report: dict) -> list:
         lines.append("  realized: none")
     else:
         lines.append(f'  realized: sells={r["sells"]} pnl={r["pnl"]:+,} tax_withheld={r["tax_withheld"]:,} '
-                     f'netted={r["netted"]:+,} refund={r["refund"]:,}')
+                     f'netted={r["netted"]:+,} refund={r["refund"]:,} div_refund={r["div_refund"]:,}')
     return lines
 
 

@@ -423,6 +423,9 @@ class TestViews:
         r = _report(realized=_realized())["taxable"]["realized"]
         assert (r["pnl"], r["tax_withheld"], r["loss"], r["netted"]) == (8000, 1625, -10000, -2000)
         assert (r["tax_after"], r["refund"], r["room"], r["sells"]) == (0, 1625, 0, 3)
+        # 残った損 2000 は配当 1000 を上回るので、配当の税 203 も全部戻る
+        assert (r["div_refund"], r["refund_total"]) == (203, 1625 + 203)
+
 
     def test_realized_netting_keeps_tax_on_the_rest(self):
         realized = M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=50000,
@@ -474,6 +477,49 @@ class TestViews:
         assert c["top5_pct"] == pytest.approx((750000 + 240000 + 190000 + 120000 + 100000) / 1_548_150 * 100)
 
 
+def _statement(sale_pnl, dividends, div_tax, sale_tax=0):
+    return M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=sale_pnl,
+                      sale_tax=sale_tax, dividends=dividends, div_tax=div_tax)
+
+
+class TestDividendOffset:
+    """譲渡損が残ると、同じ特定口座の配当と年末に相殺され、配当の税が戻る（国税庁 No.1476・#1310）。
+
+    検体の特定口座の含み損 L は -10000（2222 だけ）。
+    """
+
+    def test_no_refund_when_the_sale_side_stays_positive(self):
+        # R + L = +10000 → 配当の税は戻らない（徴収の端数で見込みを上回っていても 0）
+        r = M.realized_netting(_statement(20000, 50000, 10200), _parsed().holdings)
+        assert r["netted"] == 10000 and r["div_refund"] == 0
+        assert r["refund_total"] == r["refund"]
+
+    def test_partial_refund_when_the_loss_is_smaller_than_dividends(self):
+        # R + L = -4000、配当 50000 → 46000 に税がかかり、徴収 10157 との差が戻る
+        r = M.realized_netting(_statement(6000, 50000, 10157), _parsed().holdings)
+        assert r["netted"] == -4000
+        assert r["div_refund"] == 10157 - int(46000 * M.TAX_RATE)
+
+    def test_full_refund_when_the_loss_exceeds_dividends(self):
+        r = M.realized_netting(_statement(-30000, 5000, 1015), _parsed().holdings)
+        assert r["netted"] == -40000 and r["div_refund"] == 1015
+
+    def test_room_excludes_the_part_offset_by_dividends(self):
+        r = M.realized_netting(_statement(-30000, 5000, 1015), _parsed().holdings)
+        assert r["room"] == 25000 and not r["room_used_by_dividends"]
+        eaten = M.realized_netting(_statement(-3000, 5000, 1015), _parsed().holdings)
+        assert eaten["room"] == 0 and eaten["room_used_by_dividends"]
+
+    def test_html_explains_the_dividend_offset(self):
+        page = M.render_html(_report(realized=_statement(-30000, 5000, 1015)))
+        assert "あと 25,000 円確定するまでは税が増えません" in page and "配当（5,000 円）とも相殺" in page
+        assert "配当の税の戻る見込み" in page and "No.1476" in page and "数えていない" in page
+        eaten = M.render_html(_report(realized=_statement(-3000, 5000, 1015)))
+        assert "その分だけ戻る税が減ります" in eaten
+        assert "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1476.htm" in page
+
+
+
 class TestOldNisaExpiry:
     def test_expiry_from_buy_year(self):
         assert M.old_nisa_expiry(2022) == date(2026, 12, 31)
@@ -515,7 +561,8 @@ class TestRender:
         assert "譲渡損益の明細: r.csv" in page
         loss = M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=-5000,
                           sale_tax=0, dividends=0, div_tax=0)
-        assert "あと 5,000 円確定するまでは税がかかりません" in M.render_html(_report(realized=loss))
+        page = M.render_html(_report(realized=loss))
+        assert "あと 5,000 円確定するまでは税が増えません</b>（同じ年の損と相殺されるため）" in page
         assert "--realized" in M.render_html(_report())
 
     def test_lifetime_left_is_not_this_years_room(self):
