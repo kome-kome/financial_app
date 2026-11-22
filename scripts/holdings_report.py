@@ -67,6 +67,9 @@ EXIT_DB = 1       # DB から補足を読めない（`--no-db` で飛ばせる�
 TAX_RATE = 0.20315
 # 2024 年からの NISA の非課税保有限度額（簿価で計算し、売れば翌年以降に枠が戻る）。
 #   https://www.fsa.go.jp/policy/nisa2/know/
+# 売った分の簿価は売った年のうちは枠に戻らず、年間投資枠は受渡日の年で使う（2026-11-23 に確認）。
+#   https://www.jsda.or.jp/nisa/faq/
+# レポートの生涯枠は今の保有の取得金額の合計なので、今年売った分があると、今年使える額より多く出る（#1313）。
 NISA_LIFETIME_LIMIT = 18_000_000
 NISA_GROWTH_LIFETIME_LIMIT = 12_000_000
 # NISA 口座の損失は「ないものとみなされる」（他の口座と損益通算・繰越控除できない）。
@@ -89,6 +92,7 @@ SOURCES = (
     ("国税庁 No.1535 NISA（非課税口座）の概要",
      "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1535.htm"),
     ("金融庁 NISA を知る", "https://www.fsa.go.jp/policy/nisa2/know/"),
+    ("日本証券業協会 NISA の Q&A", "https://www.jsda.or.jp/nisa/faq/"),
     ("金融庁 2023 年までの NISA", "https://www.fsa.go.jp/policy/nisa2/till2023/"),
 )
 
@@ -995,12 +999,15 @@ def _section_nisa(n: dict) -> str:
         "</div>"
         f'<p class="muted">配当は個別株の直近期の配当利回りから出した概算。REIT・ETF の分配金と利回りが無い保有 '
         f'{len(n["div_missing"])} 件は含まない。</p>'
-        "<h3>生涯枠の使用（簿価）</h3>"
-        + _table(["枠", "使用（取得額の合計）", "上限", "残り"], [
+        "<h3>生涯枠の使用（簿価の目安）</h3>"
+        + _table(["枠", "使用（今の保有の取得額の合計）", "上限", "翌年以降の残りの目安"], [
             ["非課税保有限度額（両枠の合計）", _yen(n["used_total"]), _yen(NISA_LIFETIME_LIMIT), _yen(n["left_total"])],
             ["うち成長投資枠", _yen(n["used_growth"]), _yen(NISA_GROWTH_LIFETIME_LIMIT), _yen(n["left_growth"])],
         ])
-        + "<p class=\"muted\">CSV の取得金額を簿価とみなした値。年間の枠（つみたて 120 万円・成長 240 万円）は買付日が要るので出していない。</p>"
+        + "<p>今の保有の取得金額の合計を簿価とみなした値です。NISA で売った分の簿価は翌年以降に枠へ戻るので"
+        "（日本証券業協会 NISA の Q&A）、今年売った分があると、<b>今年使える額はこの「残り」より少なくなります</b>。"
+        "今年使える額と年間の枠（つみたて 120 万円・成長 240 万円・受渡日の年で使う）は、証券会社の NISA の画面で"
+        "確かめてください。</p>"
     )
 
 

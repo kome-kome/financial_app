@@ -518,6 +518,16 @@ class TestRender:
         assert "あと 5,000 円確定するまでは税がかかりません" in M.render_html(_report(realized=loss))
         assert "--realized" in M.render_html(_report())
 
+    def test_lifetime_left_is_not_this_years_room(self):
+        """生涯枠の「残り」は今の保有の簿価からの目安で、今年売った分は翌年まで戻らないと書く（#1313）。"""
+        page = M.render_html(_report())
+        assert "翌年以降の残りの目安" in page and "使用（今の保有の取得額の合計）" in page
+        assert "今年使える額はこの「残り」より少なくなります" in page
+        assert "買付日が要るので出していない" not in page
+        n = _report()["nisa"]
+        assert f'{n["left_total"]:,}' in page                    # 数字は変えない
+        assert "https://www.jsda.or.jp/nisa/faq/" in page
+
 
 class TestCli:
     def _setup(self, tmp_path, monkeypatch):
