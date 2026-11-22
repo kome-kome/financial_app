@@ -305,4 +305,10 @@ scikit-learn の導入が承認され、統計解析の質を向上させる改�
 - `scripts/event_study_disclosure_surprise.py`（#323 フェーズ0）: 開示サプライズ m_pm1（純利益率の予想対比）と 4 週先リターンの rank-IC は 0.031（弱い有意）。
 - `scripts/event_study_multivariate_xgboost.py`（同フェーズ1）: 多変量 XGBoost での強化、インデックス相対 target の ablation（#337・「弱い肯定」）、断面/自己履歴特徴量×target 軸マトリクス（#336）。
 - 元の #323（決算開示イベント駆動モデル）は not planned で閉じ、起動元も無くなったので退役した。取り出すときは `git log --diff-filter=D --oneline -- scripts/event_study_multivariate_xgboost.py` で削除コミットを探し、`git show <削除コミット>^:scripts/<ファイル名>` で読む。
-- 2 本の退役で `feature_disclosure.py` の呼び出し元は無くなった（扱いは別 Issue）。
+- 2 本の退役で `feature_disclosure.py` の呼び出し元は無くなった（#1290 で退役・下の項）。
+
+### [退役] 会社予想の特徴量化層 `feature_disclosure.py`（#322 改善案3・2026-11-22 / #1290）
+- 中身: `statement_disclosure`（J-Quants `/fins/summary`）から、J-Quants ファンダメンタルズ分析チャレンジ 2 位の公開モデルを移植した特徴量を作る。`r_*`＝実績の単四半期化（累計の差）、`f_*`＝会社予想の通期値（年度内据え置き）、`m_*`＝予想対比サプライズ（実績 − 前回開示時点の予想）、`d_f_*`＝予想の修正幅、`pm*`/`cost*`＝利益率・費用率。全社1パスの高速版 `build_disclosure_features_batch`（#340）と、テスト `tests/test_feature_disclosure.py` を併せて消した。
+- 退役の理由: 唯一の予定消費者 #323 は not planned、検証用の 2 本も上の項で退役し、import する箇所が無くなった。開示データは常に `today − 84日` が天井（J-Quants 無料プランの 12 週遅れ）で、当日の売買判断には使えない。
+- **収集（`statement_disclosure`）は止めていない**。発行済株式数の J-Quants 経路（`ShOutFY` → `companies.issued_shares`）と、夜間の TTM 合成の会計基準判定（`ttm_composite._load_basis`）が読む。
+- 取り出すときは `git log --diff-filter=D --oneline -- feature_disclosure.py` で削除コミットを探し、`git show <削除コミット>^:feature_disclosure.py`（テストは `tests/test_feature_disclosure.py`）で読む。取り出したら `database.StatementDisclosure` の今の列と突き合わせ、テストを回し直してから使うこと（退役後に列が変わっていると黙って合わない）。使い道の候補は ADR-0051 の案C（TTM と排他でない追加特徴量）。

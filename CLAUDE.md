@@ -72,7 +72,7 @@
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（Yahoo/J-Quants）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（period_type='H1'）。**H1 判定は DEI `Q2`/`HY` の両方**（新式は `HY` を名乗る）。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
-| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`→`statement_disclosure`）。**本番の API / プラグイン経路からは使われていない**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`→`statement_disclosure`）。**予想の中身は分析に使っていないが収集は止めない**（株数の J-Quants 経路と TTM の会計基準判定が読む）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/api/system/info`・`/heartbeat`）。REST ルート実体は `routers/` へ委譲（`/health` も `routers/auth.py`） |
 | `routers/` | REST ルーター6本（`auth` / `collect` / `market` / `analysis` / `morning` / `portfolio`）。エンドポイント定義の実体 |
 | `portfolio_ledger.py` | 売買の記録（`trade_ledger`）から保有・損益・対 TOPIX の期間リターンを導出（#1222）。**記録は追記のみ（訂正は取消の行）／実際の売買をコード・テスト・文書へ書き写さない（public）／分割は記録の行で直し、公式の係数で自動補正しない** |

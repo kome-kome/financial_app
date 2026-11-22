@@ -31,7 +31,7 @@ from database import Base, ViewBase
 ROOT = Path(__file__).resolve().parent.parent
 
 # スキャン対象（非再帰の *.py）。
-#  - ルート直下: database.py / backtest.py / collector_*.py / feature_disclosure.py が居る
+#  - ルート直下: database.py / backtest.py / collector_*.py / ttm_composite.py が居る
 #  - plugins/  : 分析モデル本体。夜間バッチとユーザー操作の両方で走る
 #  - routers/  : Render のリクエスト経路（CSV/スクリーニング等が VIEW を広く引く）
 # 除外:
@@ -228,10 +228,6 @@ FULL_ROW_LOADS: dict[str, str] = {
     # （読むのは edinet_code/mu＋R3 ゲートの r1_prime だけ）。ここに残るのは別性質のもの。
     "database.py::get_latest_factor_premia::RecommendFactorPremium":
         "exempt: 1ラン＝ファクタ数（10行程度）。行数が銘柄数にも時間にも比例せず絞る利得が無い",
-
-    # ── G. 消費列が定義上の全列 ──
-    "feature_disclosure.py::load_disclosure_features::StatementDisclosure":
-        "exempt: 直後に __table__.columns を回して全列を dict 化する＝消費列が定義上の全列。1社分へ絞り済み",
 }
 
 

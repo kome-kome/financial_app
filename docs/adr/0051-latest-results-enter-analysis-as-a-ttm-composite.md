@@ -553,6 +553,10 @@ VIEW を触らずに済むが、**「最新業績で評価する」という当�
 `statement_disclosure` 自身が 4.7ヶ月古く、供給が止まっている点は同じ。**採らない**——
 ただし TTM とは排他ではないので、供給が戻った後の追加特徴量として別途検討できる。
 
+（2026-11-22 追記）器だった `feature_disclosure.py` は、呼び出し元が無くなったので #1290 で退役した。
+案C を検討するときは `docs/archive/IMPROVEMENTS.md` の手順で git の履歴から取り出す。収集（`statement_disclosure`）は
+発行済株式数と本 ADR の TTM 合成（会計基準の判定）が読むので続けている。
+
 ### 案D: `WHERE period_type='annual'` を単純に外す
 
 VIEW の窓関数が壊れる（Context 参照）。**採らない。**
