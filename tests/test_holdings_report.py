@@ -96,6 +96,48 @@ YUTAI = """﻿code,name,has_yutai,min_shares,record_months,content,est_value_yen
 FUND = "fund:架空インデックス 全世界株式(オール)"
 AS_OF = date(2026, 11, 22)
 
+# 特定口座の譲渡損益の明細。見出し・期間の行（列名の行頭の空白を含む）・合計の見出し・注記・列名・
+# 銘柄コードの後ろの空白・`株` 付きの数量・`--`・税の行の形は 2026-11-22 の実際の書き出しから写した。
+# 銘柄・日付・金額は作り物。売り 3 件（+10000・-2000・0）と配当 1 件、税は 徴収 2031 − 還付 406 = 1625。
+REALIZED = """
+特定口座損益明細
+
+ 受渡開始年月日,受渡終了年月日,明細数,明細指定開始,明細指定終了
+"2026年01月01日","2026年12月31日","4","1","4"
+
+譲渡益税徴収額合計
+1625
+
+損益金額合計
+8000
+
+配当所得税徴収額合計
+203
+
+配当金額等合計 (税引き前)
+1000
+
+（注）明細数および合計金額はご指定された期間の合計です。
+
+銘柄コード,銘柄,譲渡益取消区分,約定日,数量,取引,受渡日,売却/決済金額,費用,取得/新規年月日,取得/新規金額,損益金額/徴収額,地方税
+"1111     ","架空食品"," ","2026/02/02",100株,"現物売","2026/02/04",120000,--,"2025/05/01",110000,+10000
+譲渡益税徴収額,,,,,,"2026/02/04",,,,,2031,500
+"2222     ","架空電機"," ","2026/03/02",100株,"現物売","2026/03/04",48000,--,"2026/01/05",50000,-2000
+譲渡益税還付金,,,,,,"2026/03/04",,,,,406,100
+"5555     ","架空機械"," ","2026/06/01",100株,"株式配当金","2026/06/03",--,--,"----/--/--",--,+1000
+配当所得税徴収額,,,,,,"2026/06/03",,,,,203,50
+"130A     ","架空新興"," ","2026/07/01",300株,"現物売","2026/07/03",30000,--,"2026/02/01",30000,--
+
+
+
+"""
+
+OLD_NISA_YEARS = "﻿code,buy_year\n5555,2022\n"
+
+
+def _realized(text: str = REALIZED, year: int = 2026):
+    return M.parse_realized_csv(text.encode("cp932"), year)
+
 
 def _bytes(text: str = SAMPLE) -> bytes:
     return text.encode("cp932")
@@ -117,10 +159,10 @@ def _info():
     )
 
 
-def _report(info=None, yutai=None):
+def _report(info=None, yutai=None, **kw):
     return M.build_report(_parsed(), _info() if info is None else info,
                           M.parse_yutai_csv(YUTAI) if yutai is None else yutai, AS_OF,
-                          db_used=info is None, source="sample.csv")
+                          db_used=info is None, source="sample.csv", **kw)
 
 
 class TestParse:
@@ -214,6 +256,89 @@ class TestYutai:
             M.parse_yutai_csv("code,name\n1111,架空\n")
 
 
+class TestRealized:
+    def test_reads_totals_and_rows(self):
+        r = _realized()
+        assert (r.start, r.end) == (date(2026, 1, 1), date(2026, 12, 31))
+        assert (r.sale_pnl, r.sale_tax, r.dividends, r.div_tax) == (8000, 1625, 1000, 203)
+        assert r.sells == 3 and len(r.rows) == 4
+        zero = next(x for x in r.rows if x.code == "130A")          # 損益の `--` は 0
+        assert (zero.amount, zero.quantity, zero.trade) == (0, 300.0, M.TRADE_SELL)
+        div = next(x for x in r.rows if x.trade == M.TRADE_DIVIDEND)
+        assert (div.code, div.amount, div.settle_date) == ("5555", 1000, date(2026, 6, 3))
+
+    def test_sample_keeps_the_leading_space_and_padded_codes(self):
+        assert "\n 受渡開始年月日," in REALIZED and '"1111     ",' in REALIZED
+
+    @pytest.mark.parametrize("old, new, msg", [
+        ("損益金額合計\n8000", "損益金額合計\n8001", "損益金額合計"),
+        ("譲渡益税徴収額合計\n1625", "譲渡益税徴収額合計\n2031", "譲渡益税徴収額合計"),     # 還付を引いていない
+        ("配当金額等合計 (税引き前)\n1000", "配当金額等合計 (税引き前)\n999", "配当金額等合計"),
+        ('"4","1","4"', '"5","1","5"', "明細数"),
+    ])
+    def test_totals_must_match_the_rows(self, old, new, msg):
+        bad = REALIZED.replace(old, new)
+        assert bad != REALIZED
+        with pytest.raises(M.HoldingsCsvError, match=msg):
+            _realized(bad)
+
+    def test_partial_export_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="全件"):
+            _realized(REALIZED.replace('"4","1","4"', '"4","1","2"'))
+
+    def test_period_must_start_on_january_first_of_the_year(self):
+        with pytest.raises(M.HoldingsCsvError, match="1 月 1 日"):
+            _realized(year=2027)
+        with pytest.raises(M.HoldingsCsvError, match="1 月 1 日"):
+            _realized(REALIZED.replace('"2026年01月01日"', '"2026年04月01日"'))
+
+    def test_row_of_another_year_raises(self):
+        bad = REALIZED.replace('"2026/02/04",120000', '"2025/12/26",120000')
+        assert bad != REALIZED
+        with pytest.raises(M.HoldingsCsvError, match="2026 年でない"):
+            _realized(bad)
+
+    def test_unknown_trade_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="知らない取引"):
+            _realized(REALIZED.replace('"現物売","2026/03/04"', '"信用返済売","2026/03/04"'))
+
+    def test_unknown_tax_row_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="列の数"):
+            _realized(REALIZED.replace("譲渡益税還付金,", "譲渡益税戻し,"))
+
+    def test_cancelled_transfer_flag_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="譲渡益取消区分"):
+            _realized(REALIZED.replace('"架空電機"," "', '"架空電機","取消"'))
+
+    def test_changed_header_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="列名の行"):
+            _realized(REALIZED.replace("売却/決済金額,費用", "売却金額,費用"))
+
+    def test_holdings_csv_is_not_a_statement(self):
+        with pytest.raises(M.HoldingsCsvError, match="特定口座損益明細"):
+            _realized(SAMPLE)
+
+    def test_not_cp932_raises(self):
+        with pytest.raises(M.HoldingsCsvError, match="cp932"):
+            M.parse_realized_csv(b"\x82", 2026)
+
+
+class TestOldNisaYears:
+    def test_reads_years_with_bom(self):
+        assert M.parse_old_nisa_years_csv(OLD_NISA_YEARS) == {"5555": 2022}
+
+    @pytest.mark.parametrize("text, msg", [
+        ("code,buy_year\n5555,2024\n", "2014〜2023"),
+        ("code,buy_year\n5555,2022\n5555,2023\n", "2 回"),
+        ("code,year\n5555,2022\n", "buy_year"),
+        ("code,buy_year\n55,2022\n", "証券コード"),
+        ("code,buy_year\n5555,\n", "数値でない"),
+    ])
+    def test_bad_rows_raise(self, text, msg):
+        with pytest.raises(M.HoldingsCsvError, match=msg):
+            M.parse_old_nisa_years_csv(text)
+
+
 class TestAssetType:
     def test_segments(self):
         p = _parsed()
@@ -290,6 +415,56 @@ class TestViews:
         assert rows["6666"]["yutai"] == M.YUTAI_YES
         assert o["expiries"] == [date(2026, 12, 31), date(2027, 12, 31)]
 
+    def test_taxable_without_statement_has_no_netting(self):
+        assert _report()["taxable"]["realized"] is None
+
+    def test_realized_netting_with_gain(self):
+        # R = 8000、特定口座の含み損 L = -10000（2222）→ R + L = -2000 なので税の見込みは 0、徴収分 1625 が全部戻る
+        r = _report(realized=_realized())["taxable"]["realized"]
+        assert (r["pnl"], r["tax_withheld"], r["loss"], r["netted"]) == (8000, 1625, -10000, -2000)
+        assert (r["tax_after"], r["refund"], r["room"], r["sells"]) == (0, 1625, 0, 3)
+
+    def test_realized_netting_keeps_tax_on_the_rest(self):
+        realized = M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=50000,
+                              sale_tax=10157, dividends=0, div_tax=0)
+        r = _report(realized=realized)["taxable"]["realized"]
+        assert r["netted"] == 40000 and r["tax_after"] == int(40000 * M.TAX_RATE)
+        assert r["refund"] == 10157 - int(40000 * M.TAX_RATE)
+
+    def test_realized_loss_leaves_room_for_gains(self):
+        realized = M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=-5000,
+                              sale_tax=0, dividends=0, div_tax=0)
+        r = _report(realized=realized)["taxable"]["realized"]
+        assert (r["room"], r["tax_after"], r["refund"]) == (5000, 0, 0)
+
+    def test_general_account_losses_are_not_netted(self):
+        p = _parsed()
+        moved = [M.Holding(**{**h.__dict__, "account": M.ACCOUNT_GENERAL}) if h.code == "2222" else h
+                 for h in p.holdings]
+        r = M.realized_netting(_realized(), moved)
+        assert (r["loss"], r["netted"]) == (0, 8000)
+
+    def test_old_nisa_expiry_from_the_table(self):
+        o = _report(buy_years={"5555": 2022, "9999": 2023})["old_nisa"]
+        assert [r["holding"].code for r in o["rows"]] == ["5555", "6666"]     # 終わる日の近い順・不明は後ろ
+        first, second = o["rows"]
+        assert (first["buy_year"], first["expiry"], first["days_left"]) == (2022, date(2026, 12, 31), 39)
+        assert (second["buy_year"], second["expiry"], second["days_left"]) == (None, None, None)
+        assert o["unknown"] == 1 and o["expiries"] == [date(2026, 12, 31), date(2027, 12, 31)]
+        assert o["not_held"] == ["9999"] and o["years_given"] == 2
+
+    def test_old_nisa_without_unknowns_lists_no_candidates(self):
+        o = _report(buy_years={"5555": 2023, "6666": 2022})["old_nisa"]
+        assert [r["holding"].code for r in o["rows"]] == ["6666", "5555"]
+        assert o["unknown"] == 0 and o["expiries"] == []
+
+    def test_old_nisa_past_expiry_is_negative(self):
+        report = M.build_report(_parsed(), {}, {}, date(2027, 1, 5), db_used=False, source="s.csv",
+                                buy_years={"5555": 2022})
+        row = next(r for r in report["old_nisa"]["rows"] if r["holding"].code == "5555")
+        assert row["days_left"] == -5
+        assert "終了済み" in M.render_html(report)
+
     def test_cross_view_merges_the_same_security(self):
         c = _report()["cross"]
         multi = {g["key"]: g for g in c["multi"]}
@@ -323,9 +498,25 @@ class TestRender:
         assert "<script>x</script>" not in page and "&lt;script&gt;" in page
 
     def test_summary_is_ascii_and_has_no_names(self):
-        lines = M.summary_lines(_report())
-        assert all(line.isascii() for line in lines)
-        assert not any("架空" in line for line in lines)
+        for report in (_report(), _report(realized=_realized(), buy_years={"5555": 2022})):
+            lines = M.summary_lines(report)
+            assert all(line.isascii() for line in lines)
+            assert not any("架空" in line for line in lines)
+
+    def test_summary_counts_expiries_and_realized(self):
+        out = "\n".join(M.summary_lines(_report(realized=_realized(), buy_years={"5555": 2022})))
+        assert "known=1 unknown=1 nearest_expiry=2026-12-31" in out
+        assert "realized: sells=3 pnl=+8,000 tax_withheld=1,625" in out
+        assert "realized: none" in "\n".join(M.summary_lines(_report()))
+
+    def test_html_shows_netting_and_expiries(self):
+        page = M.render_html(_report(realized=_realized(), buy_years={"5555": 2022}, realized_source="r.csv"))
+        assert "今年の確定損益との損益通算" in page and "2026-12-31" in page and "39 日" in page
+        assert "譲渡損益の明細: r.csv" in page
+        loss = M.Realized(start=date(2026, 1, 1), end=date(2026, 12, 31), rows=(), sale_pnl=-5000,
+                          sale_tax=0, dividends=0, div_tax=0)
+        assert "あと 5,000 円確定するまでは税がかかりません" in M.render_html(_report(realized=loss))
+        assert "--realized" in M.render_html(_report())
 
 
 class TestCli:
@@ -373,6 +564,46 @@ class TestCli:
         _, csv_path, work = self._setup(tmp_path, monkeypatch)
         monkeypatch.chdir(work)
         assert M.main(["--csv", str(csv_path), "--no-db", "--yutai", str(work / "none.csv")]) == M.EXIT_NG
+
+    def test_statement_and_years(self, tmp_path, monkeypatch, capsys):
+        data, csv_path, work = self._setup(tmp_path, monkeypatch)
+        realized = data / "raw" / "realized.csv"
+        realized.write_bytes(REALIZED.encode("cp932"))
+        years = tmp_path / "years.csv"
+        years.write_text(OLD_NISA_YEARS, encoding="utf-8")
+        monkeypatch.chdir(work)
+        assert M.main(["--csv", str(csv_path), "--realized", str(realized), "--old-nisa-years", str(years),
+                       "--no-db", "--as-of", "2026-11-22"]) == 0
+        page = (data / "reports" / "holdings_20261122.html").read_text(encoding="utf-8")
+        assert "今年の確定損益との損益通算" in page and "2026-12-31" in page
+        out = capsys.readouterr().out
+        assert "realized: sells=3" in out and "known=1 unknown=1" in out
+
+    def test_default_years_table_is_read(self, tmp_path, monkeypatch, capsys):
+        data, csv_path, work = self._setup(tmp_path, monkeypatch)
+        (data / "old_nisa_years.csv").write_text("code,buy_year\n5555,2022\n6666,2023\n", encoding="utf-8")
+        monkeypatch.chdir(work)
+        assert M.main(["--csv", str(csv_path), "--no-db", "--as-of", "2026-11-22"]) == 0
+        assert "known=2 unknown=0" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("args, msg", [
+        (["--as-of", "2027-01-10"], "1 月 1 日"),                  # 去年の明細を今年の数字にしない
+        (["--as-of", "2026-11-22", "--old-nisa-years", "none.csv"], "none.csv"),
+    ])
+    def test_bad_statement_or_years_is_exit_ng(self, tmp_path, monkeypatch, capsys, args, msg):
+        data, csv_path, work = self._setup(tmp_path, monkeypatch)
+        realized = data / "raw" / "realized.csv"
+        realized.write_bytes(REALIZED.encode("cp932"))
+        monkeypatch.chdir(work)
+        assert M.main(["--csv", str(csv_path), "--realized", str(realized), "--no-db", *args]) == M.EXIT_NG
+        assert msg in capsys.readouterr().err
+
+    def test_refuses_inside_the_statement_folder(self, tmp_path, monkeypatch):
+        _, csv_path, work = self._setup(tmp_path, monkeypatch)
+        realized = work / "realized.csv"
+        realized.write_bytes(REALIZED.encode("cp932"))
+        monkeypatch.chdir(work)
+        assert M.main(["--csv", str(csv_path), "--realized", str(realized), "--no-db"]) == M.EXIT_NG
 
 
 def test_runs_under_isolated_mode():

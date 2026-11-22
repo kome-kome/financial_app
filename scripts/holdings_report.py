@@ -4,21 +4,31 @@
 特定口座・新NISA（成長投資枠・つみたて投資枠）・旧NISA・口座横断の 4 つの見方で数字を並べる。
 **売買の助言は出さない**——出すのは数字と、利用者の方針（NISA に優待株を入れない）に合っているかの印だけ。
 
+任意で 2 つを足せる（#1307）。特定口座の譲渡損益の明細（`--realized`・cp932）を渡すと、今年すでに確定した
+損益と含み損を合わせた損益通算の数字を出す。旧NISA の買付年の表（`--old-nisa-years`・既定は
+`.portfolio/old_nisa_years.csv` があれば読む）があると、銘柄ごとに非課税期間の終わる日と残りの日数を出す
+（保有一覧にも取引履歴の書き出しにも、旧NISA の買付年が入らないため。取引履歴は直近 2 年分しか出ない）。
+
 ## 何を照合するか（黙って捨てない）
 
 1. 区分の見出しが既知であること（知らない口座・商品の区分は raise）
 2. 列名の行が既知の並びであること、明細の列の数がそれと同じであること
 3. 明細ごとに 評価額 − 取得金額 = 評価損益 であること
 4. 区分ごとに 明細の評価額・評価損益の和 = その区分の「合計」行 であること
+5. 譲渡損益の明細: 期間が基準日の年の 1 月 1 日からであること・全件の書き出しであること・知らない取引と
+   税の区分が無いこと・受渡日がその年であること・明細の件数と 4 つの合計（損益・譲渡益税・配当・配当所得税）が
+   明細の和と合うこと
+6. 買付年の表: 買付年が 2014〜2023 年であること・同じ銘柄が 2 行無いこと（保有に無い行は捨てずに出す）
 
 ## 置き場（リポジトリが PUBLIC）
 
-保有の CSV・優待一覧・レポートは `.portfolio/`（`.gitignore`）に置き、コミットしない。テストの値は
-すべて作り物。DB へは**書かない**。読むのは資産の種類（JPX の市場区分）・業種・配当利回りの補足だけで、
+保有の CSV・明細・優待一覧・買付年の表・レポートは `.portfolio/`（`.gitignore`）に置き、コミットしない。
+テストの値はすべて作り物。DB へは**書かない**。読むのは資産の種類（JPX の市場区分）・業種・配当利回りの補足だけで、
 `--no-db` で飛ばせる（そのときは「未取得」と出す）。
 
 実行（リポジトリの直下で）:
     python -I scripts/holdings_report.py --csv .portfolio/raw/<書き出し>.csv
+        [--realized .portfolio/raw/<明細>.csv] [--old-nisa-years .portfolio/old_nisa_years.csv]
         [--yutai .portfolio/yutai.csv] [--as-of YYYY-MM-DD] [--no-db] [--out <path>]
 
 `-I`（カレントフォルダから Python のモジュールを読まない）でも動くよう、先頭で自分のリポジトリを
@@ -63,8 +73,11 @@ NISA_GROWTH_LIFETIME_LIMIT = 12_000_000
 #   https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1535.htm
 # 2023 年までの一般NISA: 非課税期間 5 年・買付は 2014〜2023 年・新しい NISA へは移せない。
 #   https://www.fsa.go.jp/policy/nisa2/till2023/
-# 期間が終わって課税口座へ移ったときの取得価額（移したときの時価とされる）は、上の公式ページでは
-# 確かめられなかった。レポートは「今の株価で期間が終わった場合」として近似で出し、そう書く。
+# 期間が終わって課税口座へ移ったときの取得価額は、上の公式ページでは確かめられなかった。利用中の証券会社の
+# 案内（2026-11-22 に画面で確認）は「翌年の初めに課税口座へ払い出し、期間の最後の年の最終営業日の時価で受け入れる」。
+# レポートは「今の株価で期間が終わった場合」として近似で出し、そう書く。
+# 同じ銘柄を 2 つの年に買って一部を売ったときは古い年の分から減る扱い（複数の証券会社の FAQ。法令の条文は
+# 確かめていない）。買付年の表は 1 銘柄 1 行なので、2 つの年に分かれる銘柄は書けず、候補の表示に残る。
 OLD_NISA_YEARS = 5
 OLD_NISA_FIRST_BUY_YEAR = 2014
 OLD_NISA_LAST_BUY_YEAR = 2023
@@ -145,6 +158,35 @@ YUTAI_REQUIRED = ("code", "has_yutai")
 YUTAI_COLUMNS = ("code", "name", "has_yutai", "min_shares", "record_months", "content", "est_value_yen",
                  "source_url", "checked_on", "confirmed")
 
+# ── 特定口座の譲渡損益の明細（cp932・2026-11-22 の書き出しから写した） ─────────
+# 見出し・期間・4 つの合計・注記・列名の行・明細の順に並ぶ。明細は売り・配当の行（地方税の列が無く 12 列）と、
+# 税の行（1 列目が税の区分で 13 列）が混ざる。
+REALIZED_TITLE = "特定口座損益明細"
+REALIZED_META_COLUMNS = ("受渡開始年月日", "受渡終了年月日", "明細数", "明細指定開始", "明細指定終了")
+REALIZED_TOTALS = {               # 合計の見出し → 鍵
+    "譲渡益税徴収額合計": "sale_tax",
+    "損益金額合計": "sale_pnl",
+    "配当所得税徴収額合計": "div_tax",
+    "配当金額等合計 (税引き前)": "dividends",
+}
+REALIZED_NOTE_PREFIX = "（注）"
+REALIZED_COLUMNS = ("銘柄コード", "銘柄", "譲渡益取消区分", "約定日", "数量", "取引", "受渡日", "売却/決済金額",
+                    "費用", "取得/新規年月日", "取得/新規金額", "損益金額/徴収額", "地方税")
+TRADE_SELL, TRADE_DIVIDEND = "現物売", "株式配当金"
+TRADE_TOTAL = {TRADE_SELL: "sale_pnl", TRADE_DIVIDEND: "dividends"}
+# 税の行の 1 列目 → (合計の鍵, 符号)。配当所得税還付金は 2026-11-22 の書き出しに無く、譲渡益税と対の名前で置いた
+TAX_ROWS = {
+    "譲渡益税徴収額": ("sale_tax", 1),
+    "譲渡益税還付金": ("sale_tax", -1),
+    "配当所得税徴収額": ("div_tax", 1),
+    "配当所得税還付金": ("div_tax", -1),
+}
+REALIZED_NONE = "--"              # 値の無い欄（損益が 0 の売りの損益など）
+_JP_DATE = re.compile(r"^(\d{4})年(\d{2})月(\d{2})日$")
+
+# ── 旧NISA の買付年の表（`.portfolio/old_nisa_years.csv`・UTF-8・手で書く） ──────
+OLD_NISA_YEARS_COLUMNS = ("code", "buy_year")
+
 
 class HoldingsCsvError(ValueError):
     """CSV・優待一覧が読めない、または照合に合わない。"""
@@ -189,6 +231,31 @@ class Yutai:
     source_url: str
     checked_on: str
     confirmed: bool           # 利用者が確かめた（confirmed 列が空でない）
+
+
+@dataclass(frozen=True)
+class RealizedRow:
+    trade: str                # TRADE_SELL / TRADE_DIVIDEND
+    code: str
+    trade_date: date
+    settle_date: date
+    quantity: float
+    amount: int               # 売りは損益金額、配当は配当金額（税引き前）
+
+
+@dataclass(frozen=True)
+class Realized:
+    start: date
+    end: date
+    rows: tuple
+    sale_pnl: int             # 確定した損益の合計
+    sale_tax: int             # 源泉徴収された譲渡益税（徴収 − 還付）
+    dividends: int            # 配当金額の合計（税引き前）
+    div_tax: int              # 源泉徴収された配当所得税（徴収 − 還付）
+
+    @property
+    def sells(self) -> int:
+        return sum(1 for r in self.rows if r.trade == TRADE_SELL)
 
 
 @dataclass(frozen=True)
@@ -369,6 +436,129 @@ def parse_yutai_csv(text: str) -> dict:
     return out
 
 
+def _jp_date(raw: str, what: str) -> date:
+    m = _JP_DATE.match(raw)
+    if m is None:
+        raise HoldingsCsvError(f"{what} が YYYY年MM月DD日 の形でない: {raw!r}")
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _slash_date(raw: str, what: str) -> date:
+    try:
+        return datetime.strptime(raw, "%Y/%m/%d").date()
+    except ValueError:
+        raise HoldingsCsvError(f"{what} が YYYY/MM/DD の形でない: {raw!r}") from None
+
+
+def _realized_header(rows: list, year: int) -> tuple:
+    """見出し・期間・合計を読み、(開始日, 終了日, 明細数, 合計, 列名の行の位置) を返す。"""
+    if len(rows) < 3 or rows[0] != [REALIZED_TITLE] or tuple(rows[1]) != REALIZED_META_COLUMNS:
+        raise HoldingsCsvError(f"明細: 先頭が {REALIZED_TITLE!r} と期間の列名の行でない（{rows[:2]!r}）")
+    meta = rows[2]
+    if len(meta) != len(REALIZED_META_COLUMNS):
+        raise HoldingsCsvError(f"明細: 期間の行の列の数が {len(meta)}（期待は {len(REALIZED_META_COLUMNS)}）")
+    start = _jp_date(meta[0], "明細の受渡開始年月日")
+    end = _jp_date(meta[1], "明細の受渡終了年月日")
+    count, first, last = (_int(v, f"明細の{n}") for v, n in zip(meta[2:], REALIZED_META_COLUMNS[2:]))
+    if start != date(year, 1, 1) or end.year != year:
+        raise HoldingsCsvError(f"明細: 期間 {start}〜{end} が {year} 年の 1 月 1 日からでない"
+                               "（損益通算は暦年で区切られるので、その年の確定損益にならない）")
+    if (first, last) != (1, count):
+        raise HoldingsCsvError(f"明細: 全 {count} 件のうち {first}〜{last} 件目だけの書き出し（全件を書き出す）")
+    totals: dict = {}
+    i = 3
+    while i < len(rows) and tuple(rows[i]) != REALIZED_COLUMNS:
+        row = rows[i]
+        if len(row) == 1 and row[0] in REALIZED_TOTALS and i + 1 < len(rows) and len(rows[i + 1]) == 1:
+            key = REALIZED_TOTALS[row[0]]
+            if key in totals:
+                raise HoldingsCsvError(f"明細: {row[0]} が 2 回出てきた")
+            totals[key] = _int(rows[i + 1][0], f"明細の{row[0]}")
+            i += 2
+        elif len(row) == 1 and row[0].startswith(REALIZED_NOTE_PREFIX):
+            i += 1
+        else:
+            raise HoldingsCsvError(f"明細の {i + 1} 行目（空行を除く）: 合計か列名の行のはずが {row[:3]!r}")
+    if i == len(rows):
+        raise HoldingsCsvError(f"明細: 列名の行 {REALIZED_COLUMNS!r} が無い")
+    missing = [k for k, v in REALIZED_TOTALS.items() if v not in totals]
+    if missing:
+        raise HoldingsCsvError(f"明細: 合計 {missing} が無い")
+    return start, end, count, totals, i
+
+
+def parse_realized_csv(data: bytes, year: int) -> Realized:
+    """特定口座の譲渡損益の明細（cp932）を読む。`year` の 1 月 1 日からの全件で、明細の和が 4 つの合計と合うこと。"""
+    try:
+        text = data.decode("cp932")
+    except UnicodeDecodeError as e:
+        raise HoldingsCsvError(f"明細: cp932 として読めない（{e}）") from None
+    rows = [[c.strip() for c in r] for r in csv.reader(io.StringIO(text))]
+    rows = [r for r in rows if any(r)]          # 空行は区切りでしかない
+    start, end, count, totals, head = _realized_header(rows, year)
+    sums = dict.fromkeys(REALIZED_TOTALS.values(), 0)
+    details: list = []
+    for n, row in enumerate(rows[head + 1:], start=head + 2):
+        where = f"明細の {n} 行目（空行を除く）"
+        tax = TAX_ROWS.get(row[0])
+        width = len(REALIZED_COLUMNS) if tax else len(REALIZED_COLUMNS) - 1
+        if len(row) != width:
+            raise HoldingsCsvError(f"{where}: 列の数が {len(row)}（期待は {width}）: {row[:1]!r}")
+        c = dict(zip(REALIZED_COLUMNS, row))
+        settle = _slash_date(c["受渡日"], f"{where} の受渡日")
+        if settle.year != year:
+            raise HoldingsCsvError(f"{where}: 受渡日 {settle} が {year} 年でない")
+        if tax:
+            key, sign = tax
+            sums[key] += sign * _int(c["損益金額/徴収額"], f"{where} の{row[0]}")
+            continue
+        trade = c["取引"]
+        if trade not in TRADE_TOTAL:
+            raise HoldingsCsvError(f"{where}: 知らない取引の区分 {trade!r}（{sorted(TRADE_TOTAL)}）・"
+                                   f"または知らない税の区分 {row[0]!r}（{sorted(TAX_ROWS)}）")
+        if c["譲渡益取消区分"]:
+            raise HoldingsCsvError(f"{where}: 譲渡益取消区分が空でない行（{c['譲渡益取消区分']!r}）は読み方を知らない")
+        try:
+            code = normalize_sec_code(c["銘柄コード"])
+        except ValueError as e:
+            raise HoldingsCsvError(f"{where}: {e}") from None
+        raw = c["損益金額/徴収額"]
+        amount = 0 if raw == REALIZED_NONE else _int(raw, f"{where} の損益金額")
+        details.append(RealizedRow(
+            trade=trade, code=code, trade_date=_slash_date(c["約定日"], f"{where} の約定日"), settle_date=settle,
+            quantity=_float(c["数量"].removesuffix("株"), f"{where} の数量"), amount=amount))
+        sums[TRADE_TOTAL[trade]] += amount
+    if len(details) != count:
+        raise HoldingsCsvError(f"明細: 売り・配当の行が {len(details)} 件（明細数は {count}）")
+    for label, key in REALIZED_TOTALS.items():
+        if sums[key] != totals[key]:
+            raise HoldingsCsvError(f"明細: 明細の和 {sums[key]} が {label} {totals[key]} と違う")
+    return Realized(start=start, end=end, rows=tuple(details), sale_pnl=totals["sale_pnl"],
+                    sale_tax=totals["sale_tax"], dividends=totals["dividends"], div_tax=totals["div_tax"])
+
+
+def parse_old_nisa_years_csv(text: str) -> dict:
+    """旧NISA の買付年の表（UTF-8・BOM 可・列 code,buy_year）を `{証券コード: 買付年}` にする。"""
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
+    missing = [c for c in OLD_NISA_YEARS_COLUMNS if c not in (reader.fieldnames or [])]
+    if missing:
+        raise HoldingsCsvError(f"旧NISA の買付年の表に列 {missing} が無い（列: {OLD_NISA_YEARS_COLUMNS}）")
+    out: dict = {}
+    for n, r in enumerate(reader, start=2):
+        where = f"旧NISA の買付年の表の {n} 行目"
+        try:
+            code = normalize_sec_code(r["code"])
+        except ValueError as e:
+            raise HoldingsCsvError(f"{where}: {e}") from None
+        year = _int(r["buy_year"] or "", f"{where} の buy_year")
+        if not OLD_NISA_FIRST_BUY_YEAR <= year <= OLD_NISA_LAST_BUY_YEAR:
+            raise HoldingsCsvError(f"{where}: buy_year は {OLD_NISA_FIRST_BUY_YEAR}〜{OLD_NISA_LAST_BUY_YEAR}（{year}）")
+        if code in out:
+            raise HoldingsCsvError(f"{where}: {code} が 2 回出てきた（2 つの年に分かれる銘柄はこの表に書けない）")
+        out[code] = year
+    return out
+
+
 def asset_type_of(holding: Holding, segment: Optional[str]) -> str:
     """資産の種類。投信の欄は投資信託、株式の欄は JPX の市場区分で分ける（区分が無ければ不明）。"""
     if holding.kind == KIND_FUND:
@@ -469,8 +659,35 @@ def account_summary(holdings: Sequence[Holding], assets: Mapping) -> dict:
     return {"rows": rows, "subtotals": subtotals, "total": total}
 
 
-def taxable_view(holdings: Sequence[Holding], info: Mapping, yutai: Mapping) -> dict:
-    """特定口座・一般口座: 含み益にかかる税の見込み・含み損・配当にかかる税・優待の株数。"""
+def realized_netting(realized: Realized, holdings: Sequence[Holding]) -> dict:
+    """今年の確定損益 R と特定口座の含み損 L の損益通算。源泉徴収された税のうち、L を確定すると戻る見込み。
+
+    戻る見込み = 徴収された譲渡益税 − (R + L) にかかる税の見込み（0 未満は 0）。一般口座の含み損は特定口座の
+    源泉徴収と自動では相殺されないので L に入れない。通算しきれない損と配当の相殺は数えない。
+    """
+    loss = sum(h.pnl for h in holdings if h.account == ACCOUNT_TAXABLE and h.pnl < 0)
+    netted = realized.sale_pnl + loss
+    tax_after = _tax(netted)
+    return {
+        "pnl": realized.sale_pnl,
+        "sells": realized.sells,
+        "start": realized.start,
+        "end": realized.end,
+        "tax_withheld": realized.sale_tax,
+        "loss": loss,
+        "netted": netted,
+        "tax_after": tax_after,
+        "refund": max(realized.sale_tax - tax_after, 0),
+        # 確定損益が損のとき、その分までは含み益を確定しても税がかからない
+        "room": -realized.sale_pnl if realized.sale_pnl < 0 else 0,
+        "dividends": realized.dividends,
+        "div_tax": realized.div_tax,
+    }
+
+
+def taxable_view(holdings: Sequence[Holding], info: Mapping, yutai: Mapping,
+                 realized: Optional[Realized] = None) -> dict:
+    """特定口座・一般口座: 含み益にかかる税の見込み・含み損・配当にかかる税・優待の株数・確定損益との通算。"""
     hs = [h for h in holdings if h.account in TAXABLE_ACCOUNTS]
     qty_all = _qty_by_key(holdings)
     gains = sum(h.pnl for h in hs if h.pnl > 0)
@@ -492,6 +709,7 @@ def taxable_view(holdings: Sequence[Holding], info: Mapping, yutai: Mapping) -> 
         "div_tax": _tax(div_total),
         "div_missing": div_missing,
         "yutai_rows": yutai_rows,
+        "realized": realized_netting(realized, hs) if realized is not None else None,
     }
 
 
@@ -541,21 +759,36 @@ def nisa_view(holdings: Sequence[Holding], info: Mapping, yutai: Mapping, assets
     }
 
 
-def old_nisa_view(holdings: Sequence[Holding], yutai: Mapping, as_of: date) -> dict:
-    """旧NISA: 今の株価で非課税期間が終わった場合の税の影響と、終わる日の候補。"""
+def old_nisa_view(holdings: Sequence[Holding], yutai: Mapping, as_of: date,
+                  buy_years: Optional[Mapping] = None) -> dict:
+    """旧NISA: 銘柄ごとの非課税期間の終わる日（買付年の表から）と、今の株価で終わった場合の税の影響。"""
+    buy_years = buy_years or {}
+    hs = [h for h in holdings if h.account == ACCOUNT_OLD_NISA]
     rows = []
-    for h in (h for h in holdings if h.account == ACCOUNT_OLD_NISA):
+    for h in hs:
         y = yutai.get(h.code) if h.code else None
+        year = buy_years.get(h.code) if h.code else None
+        end = old_nisa_expiry(year) if year is not None else None
         rows.append({
             "holding": h,
+            "buy_year": year,
+            "expiry": end,
+            "days_left": (end - as_of).days if end is not None else None,
             "gain": h.pnl >= 0,
             # 益: 非課税のまま確定する益にかからずに済む税 / 損: 元の取得単価まで戻ったときにかかる税
             "tax_effect": _tax(abs(h.pnl)),
             "yutai": y.status if y else None,
         })
+    rows.sort(key=lambda r: (r["expiry"] is None, r["expiry"] or date.max, r["holding"].key))
+    unknown = sum(1 for r in rows if r["expiry"] is None)
+    held = {h.code for h in hs if h.code}
     return {
         "rows": rows,
-        "expiries": possible_old_nisa_expiries(as_of),
+        "unknown": unknown,
+        # 候補の日付は、買付年が分からない銘柄があるときだけ出す
+        "expiries": possible_old_nisa_expiries(as_of) if unknown else [],
+        "years_given": len(buy_years),
+        "not_held": sorted(c for c in buy_years if c not in held),
         "gain_total": sum(r["holding"].pnl for r in rows if r["gain"]),
         "loss_total": sum(r["holding"].pnl for r in rows if not r["gain"]),
     }
@@ -595,20 +828,22 @@ def cross_view(holdings: Sequence[Holding], info: Mapping, assets: Mapping) -> d
 
 
 def build_report(parsed: ParsedHoldings, info: Mapping, yutai: Mapping, as_of: date, *,
-                 db_used: bool, source: str) -> dict:
+                 db_used: bool, source: str, realized: Optional[Realized] = None,
+                 realized_source: Optional[str] = None, buy_years: Optional[Mapping] = None) -> dict:
     holdings = list(parsed.holdings)
     assets = _assets(holdings, info)
     return {
         "as_of": as_of,
         "source": source,
+        "realized_source": realized_source,
         "db_used": db_used,
         "yutai_count": len(yutai),
         "yutai_confirmed": sum(1 for y in yutai.values() if y.confirmed),
         "holdings": holdings,
         "summary": account_summary(holdings, assets),
-        "taxable": taxable_view(holdings, info, yutai),
+        "taxable": taxable_view(holdings, info, yutai, realized),
         "nisa": nisa_view(holdings, info, yutai, assets),
-        "old_nisa": old_nisa_view(holdings, yutai, as_of),
+        "old_nisa": old_nisa_view(holdings, yutai, as_of, buy_years),
         "cross": cross_view(holdings, info, assets),
     }
 
@@ -671,9 +906,35 @@ def _section_summary(s: dict) -> str:
             + _table(["口座", "資産の種類", "件数", "取得額", "評価額", "含み損益", "損益率"], rows, num_from=2))
 
 
+def _realized_block(r: Optional[dict]) -> str:
+    if r is None:
+        return ("<p>今年すでに確定した損益は入っていません（特定口座の譲渡損益の明細を <code>--realized</code> で"
+                "渡すと、ここに損益通算の数字が出ます）。</p>")
+    room = (f'<p>今年の確定損益は損なので、<b>含み益をあと {_yen(r["room"])} 円確定するまでは税がかかりません</b>'
+            "（同じ年の損と相殺されるため）。</p>" if r["room"] else "")
+    return (
+        f'<h3>今年の確定損益との損益通算（受渡日 {_e(r["start"].isoformat())}〜{_e(r["end"].isoformat())}・'
+        f'売り {r["sells"]} 件）</h3>'
+        '<div class="cards">'
+        f'<div class="card"><div class="k">今年の確定損益（R）</div><div class="v">{_signed(r["pnl"])}</div></div>'
+        f'<div class="card"><div class="k">源泉徴収された譲渡益税（明細の値）</div><div class="v">{_yen(r["tax_withheld"])}</div></div>'
+        f'<div class="card"><div class="k">特定口座の含み損の合計（L）</div><div class="v">{_signed(r["loss"])}</div></div>'
+        f'<div class="card"><div class="k">含み損を全部確定した場合の損益（R + L）</div><div class="v">{_signed(r["netted"])}</div></div>'
+        f'<div class="card"><div class="k">そのときの税の見込み</div><div class="v">{_yen(r["tax_after"])}</div></div>'
+        f'<div class="card"><div class="k">戻る見込み（徴収された税 − 税の見込み）</div><div class="v">{_yen(r["refund"])}</div></div>'
+        "</div>"
+        + room
+        + '<p class="muted">一般口座の含み損は特定口座の源泉徴収と自動では相殺されないので L に入れていない。'
+        f'R + L が損になった分と、特定口座で受け取った配当（税引き前 {_yen(r["dividends"])} 円・徴収 '
+        f'{_yen(r["div_tax"])} 円）の相殺は数えていない。税の見込みは 20.315% をかけた値で、実際の徴収額とは'
+        "取引ごとの端数の分だけずれる。</p>"
+    )
+
+
 def _section_taxable(t: dict) -> str:
     if not t["holdings"]:
-        return "<h2>2. 特定口座・一般口座</h2><p class=\"muted\">保有なし</p>"
+        return ("<h2>2. 特定口座・一般口座</h2><p class=\"muted\">保有なし</p>"
+                + (_realized_block(t["realized"]) if t["realized"] else ""))
     loss = [[_label(h), _qty(h.quantity), _yen(h.cost), _yen(h.value), _signed(h.pnl)] for h in t["loss_rows"]]
     yt = [[_label(r["holding"]), _qty(r["qty_here"]), _qty(r["qty_all"]), _qty(r["yutai"].min_shares),
            _e(r["yutai"].record_months), _e(r["yutai"].content), "済" if r["yutai"].confirmed else "未"]
@@ -681,7 +942,7 @@ def _section_taxable(t: dict) -> str:
     return (
         "<h2>2. 特定口座・一般口座（課税）</h2>"
         "<p>売ると、利益に税（20.315%）がかかります。同じ年のうちなら、損の出た銘柄の損と相殺できます"
-        "（損益通算）。今年すでに確定した損益は CSV に無いので、ここには入っていません。</p>"
+        "（損益通算）。下のカードは今の保有だけの数字です。</p>"
         '<div class="cards">'
         f'<div class="card"><div class="k">含み益の合計</div><div class="v">{_signed(t["gains"])}</div></div>'
         f'<div class="card"><div class="k">含み損の合計</div><div class="v">{_signed(t["losses"])}</div></div>'
@@ -690,7 +951,8 @@ def _section_taxable(t: dict) -> str:
         f'<div class="card"><div class="k">配当の年額（概算）とその税</div><div class="v">{_yen(t["div_total"])} / {_yen(t["div_tax"])}</div></div>'
         "</div>"
         f'<p class="muted">配当は直近期の配当利回り（期末株価基準）× 評価額の概算。利回りが無い保有 {len(t["div_missing"])} 件は含まない。</p>'
-        "<h3>含み損の銘柄</h3>"
+        + _realized_block(t["realized"])
+        + "<h3>含み損の銘柄</h3>"
         + _table(["銘柄", "株数", "取得額", "評価額", "含み損益"], loss)
         + "<h3>優待のある銘柄と株数</h3>"
         "<p class=\"muted\">同じ証券会社の口座は株主として合算されることが多いので、この口座の株数と全口座の合計を並べる"
@@ -742,23 +1004,44 @@ def _section_nisa(n: dict) -> str:
     )
 
 
+def _days_left(d: Optional[int]) -> str:
+    if d is None:
+        return "—"
+    return f"{d:,} 日" if d >= 0 else "終了済み（買付年を確かめる）"
+
+
 def _section_old_nisa(o: dict) -> str:
     if not o["rows"]:
         return "<h2>4. 旧NISA</h2><p class=\"muted\">保有なし</p>"
-    ends = "・".join(d.isoformat() for d in o["expiries"]) or "（候補なし）"
-    rows = [[_label(r["holding"]), _qty(r["holding"].quantity), _price(r["holding"].avg_cost),
-             _price(r["holding"].price), _signed(r["holding"].pnl),
+    rows = [[_label(r["holding"]), _qty(r["holding"].quantity), _e(r["buy_year"] or "不明"),
+             _e(r["expiry"].isoformat() if r["expiry"] else "—"), _days_left(r["days_left"]),
+             _price(r["holding"].avg_cost), _price(r["holding"].price), _signed(r["holding"].pnl),
              ("かからずに済む税 " if r["gain"] else "戻ったときにかかる税 ") + _yen(r["tax_effect"]),
              _e(r["yutai"] or "—")] for r in o["rows"]]
+    if o["unknown"]:
+        ends = "・".join(d.isoformat() for d in o["expiries"]) or "（候補なし）"
+        unknown = (f'<p>買付年が分からない {o["unknown"]} 銘柄の、終わる日の候補: <b>{_e(ends)}</b>。買付年は'
+                   " <code>.portfolio/old_nisa_years.csv</code> に <code>code,buy_year</code> の形で書くと出ます"
+                   "（保有一覧にも取引履歴にも旧NISA の買付年が入らないため）。</p>")
+    else:
+        unknown = ""
+    not_held = (f'<p class="muted">買付年の表にあって旧NISA の保有に無い証券コード: {_e("・".join(o["not_held"]))}'
+                "（売った・期間が終わって移った銘柄なら、表から消してよい）。</p>" if o["not_held"] else "")
     return (
         "<h2>4. 旧NISA（2023 年までの一般NISA）</h2>"
-        f"<p>非課税期間が終わる日の候補: <b>{_e(ends)}</b>（買付年が CSV に無いため。2022 年に買った分は 2026-12-31、"
-        "2023 年に買った分は 2027-12-31）。新しい NISA へは移せず、終わると課税口座へ移ります（金融庁）。</p>"
-        "<p>移ったあとの取得単価は、移したときの株価に置き換わるとされています（公式ページの記述はこのレポートの作成時に"
-        "確かめられていないので、証券会社の案内で確かめてください）。下の表は<b>今の株価で期間が終わった場合</b>の近似です。"
-        "含み益の銘柄は益が非課税のまま確定し、含み損の銘柄は元の取得単価まで戻った分にも税がかかります。</p>"
-        + _table(["銘柄", "株数", "取得単価", "現在値", "含み損益", "期間が終わった場合の税の影響", "優待"], rows)
+        "<p>非課税期間は買った年を含めて 5 年で、2022 年に買った分は 2026-12-31、2023 年に買った分は 2027-12-31 に"
+        "終わります。新しい NISA へは移せず、終わると課税口座へ移ります（金融庁）。表は終わる日の近い順です。</p>"
+        + unknown
+        + "<p>移ったあとの取得単価は、利用中の証券会社の案内（2026-11-22 に確認）では、期間の最後の年の最終営業日の"
+        "時価になり、翌年の初めに課税口座へ払い出されます（国の公式ページでは確かめていません）。下の表は"
+        "<b>今の株価で期間が終わった場合</b>の近似です。含み益の銘柄は益が非課税のまま確定し、含み損の銘柄は元の"
+        "取得単価まで戻った分にも税がかかります。</p>"
+        + _table(["銘柄", "株数", "買付年", "終わる日", "残り", "取得単価", "現在値", "含み損益",
+                  "期間が終わった場合の税の影響", "優待"], rows)
         + f'<p>含み益の合計 {_signed(o["gain_total"])} ／ 含み損の合計 {_signed(o["loss_total"])}</p>'
+        + not_held
+        + '<p class="muted">同じ銘柄を 2 つの年に買って一部を売った場合は、古い年の分から減る扱いが一般的です'
+        "（証券会社の FAQ）。買付年の表は 1 銘柄 1 行なので、2 つの年に分かれる銘柄は書かず、候補の表示のままにします。</p>"
     )
 
 
@@ -802,13 +1085,17 @@ def render_html(report: dict) -> str:
     srcs = "".join(f'<li>{_e(t)}: <a href="{_e(u)}">{_e(u)}</a></li>' for t, u in SOURCES)
     yutai = (f'{report["yutai_count"]} 銘柄（うち確認済み {report["yutai_confirmed"]}）'
              if report["yutai_count"] else "読み込んでいない")
+    realized = report["realized_source"] or "読み込んでいない"
+    years = report["old_nisa"]["years_given"]
+    years = f"{years} 銘柄" if years else "読み込んでいない"
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>保有の口座別レポート {_e(report["as_of"].isoformat())}</title><style>{_CSS}</style></head><body><main>'
         "<h1>保有の口座別レポート</h1>"
         f'<p class="muted">基準日 {_e(report["as_of"].isoformat())} ／ 入力 {_e(report["source"])} ／ '
-        f'DB の補足（資産の種類・業種・配当利回り）: {"あり" if report["db_used"] else "なし（未取得）"} ／ 優待一覧: {_e(yutai)}</p>'
+        f'DB の補足（資産の種類・業種・配当利回り）: {"あり" if report["db_used"] else "なし（未取得）"} ／ 優待一覧: {_e(yutai)} ／ '
+        f'譲渡損益の明細: {_e(realized)} ／ 旧NISA の買付年の表: {_e(years)}</p>'
         '<div class="note"><b>これは売買の助言ではありません。</b>数字と、方針（NISA に優待株を入れない）に合っているかの'
         "印だけを並べています。税は 20.315% をかけた見込み（円未満切り捨て）で、配当利回りは直近期の期末株価を基準にした"
         "概算です。優待の情報は Web の下書きを含むので、「確認」が「未」の行は確かめてから使ってください。</div>"
@@ -836,8 +1123,16 @@ def summary_lines(report: dict) -> list:
     lines.append(f'  nisa: yutai_flagged={len(n["flagged"])} unconfirmed={len(n["unconfirmed"])} '
                  f'losses={len(n["loss_rows"])}')
     o = report["old_nisa"]
-    lines.append(f'  old_nisa: holdings={len(o["rows"])} expiry_candidates='
-                 f'{",".join(d.isoformat() for d in o["expiries"]) or "-"}')
+    nearest = next((r["expiry"].isoformat() for r in o["rows"] if r["expiry"]), "-")
+    lines.append(f'  old_nisa: holdings={len(o["rows"])} known={len(o["rows"]) - o["unknown"]} '
+                 f'unknown={o["unknown"]} nearest_expiry={nearest} not_held={len(o["not_held"])} '
+                 f'expiry_candidates={",".join(d.isoformat() for d in o["expiries"]) or "-"}')
+    r = report["taxable"]["realized"]
+    if r is None:
+        lines.append("  realized: none")
+    else:
+        lines.append(f'  realized: sells={r["sells"]} pnl={r["pnl"]:+,} tax_withheld={r["tax_withheld"]:,} '
+                     f'netted={r["netted"]:+,} refund={r["refund"]:,}')
     return lines
 
 
@@ -898,6 +1193,9 @@ def _inside(path: Path, root: Path) -> bool:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="保有証券一覧 CSV を口座の種類ごとに分析し、HTML のレポートを書く")
     ap.add_argument("--csv", required=True, help="保有証券一覧の書き出し（cp932）")
+    ap.add_argument("--realized", help="特定口座の譲渡損益の明細（cp932・基準日の年の 1 月 1 日からの全件）")
+    ap.add_argument("--old-nisa-years",
+                    help="旧NISA の買付年の表（UTF-8・列 code,buy_year）。既定: .portfolio/old_nisa_years.csv があれば読む")
     ap.add_argument("--yutai", help="優待一覧（UTF-8）。既定: .portfolio/yutai.csv があれば読む")
     ap.add_argument("--as-of", type=date.fromisoformat, help="基準日 YYYY-MM-DD（既定: 今日）")
     ap.add_argument("--no-db", action="store_true", help="DB を読まない（資産の種類・業種・配当利回りは未取得）")
@@ -907,17 +1205,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
     csv_path = Path(args.csv)
+    realized_path = Path(args.realized) if args.realized else None
     cwd = Path.cwd()
-    for folder in (DEFAULT_DIR, csv_path.resolve().parent):
+    folders = [DEFAULT_DIR, csv_path.resolve().parent] + ([realized_path.resolve().parent] if realized_path else [])
+    for folder in folders:
         if _inside(cwd, folder):
             print(f"[holdings_report] NG: 資料のフォルダの中から実行しない（cwd={cwd}）", file=sys.stderr)
             return EXIT_NG
     as_of = args.as_of or date.today()
     yutai_path = Path(args.yutai) if args.yutai else DEFAULT_DIR / "yutai.csv"
+    years_path = Path(args.old_nisa_years) if args.old_nisa_years else DEFAULT_DIR / "old_nisa_years.csv"
     try:
         parsed = parse_holdings_csv(csv_path.read_bytes())
         yutai = (parse_yutai_csv(yutai_path.read_text(encoding="utf-8-sig"))
                  if args.yutai or yutai_path.is_file() else {})
+        realized = parse_realized_csv(realized_path.read_bytes(), as_of.year) if realized_path else None
+        buy_years = (parse_old_nisa_years_csv(years_path.read_text(encoding="utf-8-sig"))
+                     if args.old_nisa_years or years_path.is_file() else {})
     except (HoldingsCsvError, OSError) as e:
         print(f"[holdings_report] NG: {e}", file=sys.stderr)
         return EXIT_NG
@@ -932,7 +1236,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[holdings_report] NG: DB から補足を読めない（--no-db で飛ばせる）: {type(e).__name__}: {first}",
                   file=sys.stderr)
             return EXIT_DB
-    report = build_report(parsed, info, yutai, as_of, db_used=not args.no_db, source=csv_path.name)
+    report = build_report(parsed, info, yutai, as_of, db_used=not args.no_db, source=csv_path.name,
+                          realized=realized, realized_source=realized_path.name if realized_path else None,
+                          buy_years=buy_years)
     out = Path(args.out) if args.out else DEFAULT_DIR / "reports" / f"holdings_{as_of:%Y%m%d}.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_html(report), encoding="utf-8")
