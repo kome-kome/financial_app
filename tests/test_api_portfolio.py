@@ -120,6 +120,16 @@ class TestSellCandidates:
         assert captured == [("sell_ranking", {
             "holdings": "1111, @1000.0, 2026-01-05\n2222, @2000.5, 2026-01-05"})]
 
+    def test_alphanumeric_holding_is_not_dropped(self, captured):
+        """記録が受け付けた英字入りのコードを、売り判定の入口が「解釈できなかった入力」へ回さない（#1306）。"""
+        from plugins.sell_ranking import parse_holdings
+        client.post("/api/portfolio/ledger", json=dict(BUY, sec_code="9z9z"))
+        d = client.get("/api/portfolio/sell-candidates").json()
+        assert d["n_holdings"] == 1
+        holdings = captured[0][1]["holdings"]
+        parsed, invalid = parse_holdings(holdings)
+        assert invalid == [] and [p["sec_code"] for p in parsed] == ["9Z9Z"]
+
     def test_a_missing_dependency_is_a_reason_not_an_error(self, monkeypatch):
         """M-6 の μ̂ が未保存でも朝の画面を 4xx で壊さない（理由を返す）。"""
         import plugins as plugin_registry

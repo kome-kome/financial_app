@@ -135,6 +135,7 @@ sink は **ContextVar**。`execute` のシグネチャは `(params, db)` に固�
 - 下位の切り方は `macro_snapshots.in_layer_short_side` と同じ（昇順の先頭 m // 5）。m < 5 は売りなし（切り上げ規則は未測定なので足さない）。
 - `depends_on=["macro_enet"]`（S2 は M-6 の実行が同じ夜に作り、倒れる先も M-6 の μ̂）。μ̂ が永続化されていなければ runner が 400。as-of は `get_producer_asof`（M-6 の代表値。S2 の日付がこれと違えば下の規則で倒れる）。
 - **並びのキーの出どころ `SELL_KEY_SOURCE`**: 既定は `SELL_KEY_S2`（`"sell_quantile"`・ADR-0076・#1201）で、`database.get_sell_quantile_scores` の S2 の予測（`q20`）で並べる（`choose_sell_keys`）。`MU_SOURCE`（`"macro_enet"`）へ戻すと M-6 の μ̂ で並べ、S2 の表を読まない（ADR-0071 の形。戻すときも ADR を添える）。**画面のパラメータにはしない**（ADR-0071 決定 4）。S2 の表が空（未保存・全社同値の回・Render の断面）か、S2 の `snapshot_date` が M-6 の代表値と違えば**保有全体**を μ̂ で並べ、理由を応答の `sell_key_fallback` に出す（保有ごとに混ぜない＝下側の分位と平均は尺度が違う）。実際に使った出どころは `sell_key_source`。S2 で並べた回も表示する `mu` は M-6 のままで、行に `q20` を足す。画面（`analysis.js`・`morning.js`）は並びに使った値の列と、倒した理由を出す。
+- **保有の証券コードは売買の記録と同じ `portfolio_ledger.normalize_sec_code` で読む**（#1306）。英字入りのコード（2024 年以降の上場）も通し、大文字へそろえて 3 桁は 0 を補う。規則を書き写すと、記録が受け付けた保有が売り判定の「解釈できなかった入力」へ回る（#1306 の前はそうなっていた）。
 - **転送列は `SELL_SELECT_COLS`（表示と損益フォールバックの 8 列）**（#482）。指標は読まない。
 - **週次は `week_start >= today − 400日`＋500社チャンク＋3列**（#482）。トレンド（13週リターン・52週高値からの下落）と損益は**参考表示のみ**で並びにも札にも使わない。
   - `recommend.compute_momentum_z` の `row_number() OVER` と `macro_snapshots.load_weekly_prices_chunked` は流用できない（系列そのものが要る・対象が全社固定）。
