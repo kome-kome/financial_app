@@ -107,6 +107,78 @@ DBテーブル定義・upsert。主要テーブル（Company / FinancialRecord /
 
 種別: バックエンド ／ 依存先: PostgreSQL
 
+### 上場状態と今買える母集団
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+- **上場状態（`is_active`/`delisted_date`、Issue #315）**: `companies` を LEFT JOIN して VIEW へ合成。
+  `collect_stock_price_history_jquants`（夜間の J-Quants catchup・`_pipeline_incremental.py`）が J-Quants `/equities/master`
+  （現在の上場銘柄集合・実測4,446銘柄）と突合し `sync_active_status()`（database.py）で自動更新する。
+  v1 の `/markets/listed/info` は **v2 に存在せず**、#425 の v2 移行以降この同期は停止していた（#462）。
+  マスタは東証銘柄だけを載せるので、**札証・福証の単独上場（`yahoo_suffix` 解決済み・#555）は株価で判定する**（#779）:
+  最終足が `PRICE_STALE_ALERT_BDAYS` 以内で、マスタの as-of より後に出来高>0 の足がある社は delisted にせず、
+  delisted なら復帰させる（戻り値 `price_alive`）。東証の社はマスタ突合と #463 の `protected` だけで判定する。
+  「今買える銘柄」を選ぶプラグイン（recommend / gap_analysis / net_cash_analysis）と
+  sell_ranking の**標準化の基準となる母集団**は `database.tradable_filters(db)` で対象を絞るが、
+  **backtest は今の上場状態ではフィルタしない**（as-of の start_date 時点の候補を「現在」の上場状態で絞ると
+  生存者バイアスを逆向きに持ち込むため）。代わりに `backtest.tradable_at_start` が、開始日の時点で分かっていた
+  事実だけで「開始日に買えた社」へ絞る（開始日の `ASOF_PRICE_WINDOW_DAYS` 日前〜開始日に週次の終値がある社・#1242。
+  外した数は応答の `n_untradable_at_start`）。**同じ窓の最後の終値で、株価を使う列を開始日の値へ作り直す**（#1248）:
+  as-of の行の `market_cap`・`div_yield` は毎晩の収集が今の株価で上書きし、`gap_ratio` は毎晩の回帰が今の株価で
+  作るので、そのまま順位を付けると「開始日から今までに値下がりした社ほど割安に見える」（6 か月前の開始日で、保存
+  された株価が開始日の終値から 3% 超ずれる行が 82%）。時価総額・配当利回りは毎晩の収集と同じ
+  `_compute_market_values` へ開始日の終値を渡して VIEW と同じ分割補正（`COLUMN_DIRECTION`）を当て、gap_ratio は
+  開始日 1 日分の業種別回帰（`sector_gap_asof.gaps_on`）で作り直す。時価総額の下限もこの値で掛ける。
+  sell_ranking のユーザー入力の保有銘柄自体は
+  除外せず情報表示のみ（`is_active` を行の属性として返す）。
+- **価格が止まった社の除外（Issue #605）**: `is_active` だけでは足りない。`/equities/master` の
+  as-of は「今日−84日」（J-Quants のエンバーゴ）で、**廃止の反映が最大12週遅れる**。
+  実測（2026-09-04）では値の付かない29社が `is_active=True` のまま残り、`regression_results`
+  29社 / `macro_beta_loadings` 28社 / `macro_enet_scores` 6社へ入って μ̂ 付きで推奨候補に
+  並んでいた（#315 の生存者バイアスの裏返し＝ゾンビ銘柄）。`delisted_date` の実測は
+  「as-of が停止日を追い越した日」と一致し、毎日1〜5社ずつ落ちる待ち行列になっている。
+  マスタは自分の as-of より後のことを証言できない（#463 が逆向きで書いたのと同じ制約）が、
+  **価格が止まったという事実は今日わかる**ので、判定を「マスタ収載」から「価格が生きている」へ
+  寄せた。閾値は `PRICE_STALE_ALERT_BDAYS`（=10営業日）を再利用する——`price_freshness` が
+  「この結果で発注しない」と言う線と別に持つと片方だけ動いたときに黙ってずれる。WARN(=5)は
+  連休や一時取得失敗で生きた銘柄を落とす危険が最も高い（#555 と同型の静かな欠測）。
+  価格行を1本も持たない銘柄は落とさない（判定できるのは「止まった」であって「無い」ではない）。
+  4経路が同じ `tradable_filters` を共有することは `tests/test_tradable_universe.py` が AST で
+  縛る——1箇所だけ直すと「推奨には出ないが売却候補には出る」形で静かに食い違う。
+- **計算の母集団も同じ判定を共有する（Issue #780）**: #605 が直したのは表示母集団だけで、計算には
+  廃止・停止の社が残っていた。次の3つも `tradable_filters` を共有する（同じく AST で縛る）。
+  - **sector_ols の当日回帰**（既定・`year` 指定）: `financial_records`＋`companies` の JOIN を読むので、
+    `tradable_filters(db, is_active=Company.is_active, edinet_code=FinancialRecord.edinet_code)` と列を
+    渡して掛ける。実測（2026-10-02）で廃止25社・停止17社が最終株価のまま回帰に入り、整理銘柄の暴落価格
+    （`stock_price=1.0` → gap +47,963%）が業種の係数と α を通じて現役社の gap を動かしていた。外すと
+    現役社の gap は全体で順位相関 0.991・中央値 0.79pt 動き、ridge の α が切り替わった4業種
+    （輸送用機器 100→1000 ほか）で最大 1,092pt 動いた（α が平坦な谷で跳ぶ問題は #761）。
+    **時点再現（`all_years=True`・`sector_gap_asof`）には掛けない**——「その月末に週次の足を持つ社」で
+    もともと廃止社を含まず、今日の上場状態で絞ると生存者バイアスになる。今回の変更で本番の当日回帰が
+    学習パネルの母集団に揃った（だから `PREPROCESS_VERSION` は上げていない）。外した社の
+    `regression_results` の既存行は消さない（表示は `tradable_filters` が隠す）。これに対し、**読んだのに
+    回帰に入らなかった上場中の社**（採用列の空欄・業種が `min_samples` 割れ等）の行は消す（#905・ADR-0066）
+    ——隠す仕組みが無いので、前回までの乖離率が乖離分析と推奨に出続けるため。
+  - **sell_ranking の `mu` / `neg_r_macro` の標準化基準**: producer の全行ではなく universe にいる社の μ̂。
+    M-6 では 1,719行のうち77行が外れ、標準偏差が 0.0642 → 0.0559 になった。
+  - **producer の代表 as-of**（M-2・M-3・M-6・M-4）: μ̂ の行は全社ぶん保存したまま（読み手が各自の
+    母集団で絞る）、as-of だけを `macro_snapshots.tradable_snapshot_asof` で今買える社から作る。社ごとの
+    スナップ日は保存しないので絞れるのは保存時だけ。除く社は `database.non_tradable_codes`
+    （`tradable_filters` の否定）。全社が落ちたら全社で代表させる（「未蓄積」ではなく古さを見せる）。
+  - `macro_beta_loadings`（M-1 の学習データ）には掛けない（階層ベイズのプーリングは過去の社を要する・#315）。
+- **分析タブの結果表も同じ判定を通す（Issue #806）**: #605・#780 は推奨系と計算の母集団を揃えたが、
+  **M 系の `execute` が返す `results` そのもの**が読み手であることは扱われていなかった。M 系の「現在」の
+  μ̂ は社ごとに最終週次バーで作るので、株価が止まった社は止まった日付のまま並ぶ。線形の M-6 では
+  その日付のマクロ値が全社共通の定数として μ̂ を押し上げ、実測（2026-10-04）で上位10が全部・上位30の
+  23社が廃止社だった（最終バーの月ごとの M-6 μ̂ 平均は 2025-06 の +0.187 から 2026-10 の −0.225 へ
+  ほぼ単調に下がる。木の M-2 は外挿しないので段差が出ない）。OOF rank-IC が検証したのは同じ月の中の
+  順位なので、日付の違う社を混ぜた表は検証の外にある。M-1/M-2/M-3/M-4/M-6 は**永続化の後に**
+  `macro_snapshots.tradable_results` で表だけを絞り（保存する μ̂ は全社のまま）、内訳
+  `untradable_excluded`（上場廃止 / 価格停止。`database.non_tradable_breakdown` が `non_tradable_codes`
+  に理由の札を付ける）を画面へ1行出す（`analysis.js::_showUntradableNote`。結果本体は λ 変更で
+  描き直されるので注記は本体の外に置く）。M-3 は絞ってから `top_n` を取り、α/β 経路も表示する社に付ける。
+  呼び出しは `tests/test_tradable_universe.py::TestResultsUseTradableResults` が AST で縛る。
+
 ## `db_egress.py`
 
 **Egress 台帳とサーキットブレーカ**（#478・[ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)）。`database.py` が import 時に `install(engine)` で `after_cursor_execute` リスナを1本張り、全プロセス（GHA バッチ・ローカル CLI・Render）で「どのテーブルから何行・何列を引いたか」を記録する。結果は消費しないので既存挙動に干渉しない。プロセス終了時に `[egress] summary` を標準エラーへ1行、**既定で `.egress/ledger.jsonl`** へ1行 append（帰属は `FINAPP_JOB`・無効化は `FINAPP_EGRESS_LEDGER=0`）。**歯止めは2軸**（#478・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)）＝①行数/MB のプロセス予算を超えると `EgressBudgetExceeded`（局所解除は `egress_budget()` CM・全体解除は `FINAPP_EGRESS_ENFORCE=0`）、②**請求サイクル累計**を `app_settings.egress_cycle_bytes` に持ち warn 80% / block 95%（プロセス予算 400MB では「1日12プロセスで 4.8GB」が素通りする＝2026-08 の超過はこの形だった）。累計を DB に置くのは**ローカル CLI と GHA が同じカウンタを見られる唯一の場所**だから。ミラー接続（`_is_local`）と **pytest 実行中は積まない**（後者を怠ると全テストが本番へ接続し atexit が本番へ書き込む）。**`database` を import しない**（逆向き依存を作らない）。なお**列スコープの静的検査には使えない**（`_Bucket` は n_cols を保持せず SQLite は rowcount=-1）ため、そちらは `tests/test_column_scoping.py` の AST 検査が担う
@@ -179,6 +251,12 @@ DBテーブル定義・upsert。主要テーブル（Company / FinancialRecord /
 
 種別: バックエンド ／ 依存先: EDINET API, EDINET コードリスト, JPX, collector_utils
 
+### `jpx_listing_snapshots` の表
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+**`jpx_listing_snapshots`（#1004・親 #1001）**: 東証上場銘柄一覧（data_j）の月次断面を (源 × 時点 × 証券コード) で積む。JPX は過去版を配らないので、取り逃した月は永久に欠ける。書き手は `collector_master.record_jpx_listing_snapshot` だけで、夜間 Phase 5 の `update_industry_from_jpx` が**業種用に取ったのと同じダウンロード**から、業種の更新の後に呼ぶ（失敗は WARNING＝業種は止めない）。列は見出しの名前で引き（`collector_utils.JPX_SNAPSHOT_COLUMNS`）、市場・商品区分・33業種区分・規模コード・規模区分は生値のまま。`edinet_code` は書き込み時点の企業表で解決する（ETF 等は NULL のまま残す）。書く前の健全性（行数・規模区分の語彙・'-' 以外の件数・日付が1種類）が外れたら書かない。同じ時点は上書きせず `last_seen_at` だけ進め、中身が違えば WARNING と差の件数を出す。**可視判定は `first_seen_at`**（`database.jpx_listing_snapshot_at`）。前進は `batch_freshness.PRODUCERS` が2本で見る（取得＝毎晩の `last_seen_at`・時点＝`as_of_date` が月の最長31日＋公表遅れ `JPX_LISTING_PUBLICATION_LAG_DAYS` を超えて止まっていないか）。断面の記録の後、`collector_master.update_company_market` が最新の断面から `companies.market`（最新の表示用）を変わった社だけ埋める（#1015・別名表 `JPX_MARKET_ALIASES`・年度の行は埋めない）。
+
 ## `collector_prices.py`
 
 株価収集（Yahoo / J-Quants。stooq は個別銘柄の株価履歴収集 `/api/collect/history/{start,stop,status,stream}` とマクロのフォールバックごと撤去済み＝どの実行環境からもボット検証で CSV が取れない・#736）＋市場データ更新＋マクロ指標収集。株価は夜間バッチ（`_pipeline_incremental.py`）の Yahoo 欠損補完 → J-Quants catchup（公式値への置き換え）で入る。**`financial_records` への株価・PER/PBR/時価総額の反映は `update_market_data_from_history` に一本化**（#428。旧 `update_market_data`＝stooq へ全社逐次リクエストする経路は削除。GUI `/api/collect/market-data`・CLI `--market` も同関数を呼ぶ）。`MACRO_SERIES` で為替・金利・指数・コモディティ・ボラ、`FRED_SERIES` で FRED 11系列（米クレジット/インフレ＋#381 非ICE信用代替 `BAA_SPREAD`＝`BAA10Y` Baa−10Y＋#250 日本実体経済3種＋#404 政策不確実性2種（`US_EPU`＝`USEPUINDXD`・`US_EQUITY_EPU`＝`WLEMUINDXD`・Baker-Bloom-Davis EPU・日次1985〜・日本版 `JPNEPUINDXM` は 2016-04 凍結のため不採用）。`HY_OAS`/`IG_OAS` は FRED の ICE BofA 3年窓制限で 2023-06 以降のみ＝strict の既定からは除外・選択肢としては残置・ADR-0016）、`BOJ_SERIES` で日銀 API（M2 月次＋短観DI の各バリアント・四半期・認証不要）、`OECD_SERIES` で OECD SDMX API 1系列（`JP_CLI`＝日本 Composite Leading Indicator・振幅調整済・認証不要・ADR-0009・#283）、`ESRI_SERIES` で内閣府ESRI直接CSV配布4系列（`JP_GDP_PRIVATE_CONSUMPTION`個人消費・`JP_GDP_RESIDENTIAL_INV`住宅投資・`JP_GDP_CAPEX`設備投資・`JP_GDP_PUBLIC_INV`公共投資・認証不要・1994Q1〜最新を含む単一CSVを直近4四半期×速報2種のURLプロービングで取得・#286）、`IMF_SERIES` で IMF WEO 見通し2系列（`JP_WEO_GDP_FCAST`実質GDP成長率見通し・`JP_WEO_CPI_FCAST`インフレ率見通し・いずれも翌年予測・認証不要・唯一のforward-lookingチャネル・バックフィルは `WEOhistorical.xlsx`（point-in-timeパネル・vintage先読みバイアス回避）、継続収集は現行dataflowをtrade_date=収集日で固定・ADR-0011・#284）、`ESTAT_SERIES` で e-Stat API 3系列（全国CPI総合/コア・東京CPI）、`ESTAT_INDEX_SERIES` で e-Stat 鉱工業指数2系列（`JP_IIP`生産・`JP_IIP_INVENTORY`在庫・#253のFRED凍結代替・#281）、`GDELT_SERIES` で GDELT DOC 2.0 API 3系列（`JP_NEWS_TONE`／`JP_NEWS_ECON_TONE`＝ニュース平均トーン・`JP_NEWS_ECON_VOL`＝報道量%・認証不要・2017-01-01〜・全期間を1リクエストで日次取得・レート制限1req/5sで**超過時も HTTP 200＋プレーンテキスト**のため本文JSON判定でリトライ・ADR-0024・#406）、`WIKIMEDIA_SERIES` で Wikimedia Pageviews API 2系列（`JP_WIKI_MARKET_ATTN`／`JP_WIKI_MACRO_ATTN`＝ja.wikipedia 記事バスケットの日次閲覧数合算・認証不要だが User-Agent に連絡先必須・2015-07-01〜・欠測日は0埋めせず除外）を定義。**`MOF_SERIES`** で財務省「国債金利情報」CSV 1系列（`JP10Y_MOF`＝日次の日本10年金利・認証不要・PDL1.0・1986-07〜・cp932/和暦・`parse_mof_jgb_csv`。**初回は全期間版 `jgbcm_all.csv`＋当月版 `jgbcm.csv`、以降は当月版のみ**＝全期間版は月次更新で当月分を持たない・#458/ADR-0029）（e-Stat 系はいずれも `ESTAT_API_KEY` 要。GDELT/Wikimedia は**マクロ集約のみ＝銘柄別日次は370MB/年で無料枠に入らないため採らない**）。公表ラグは各系列の `lag_days` で `trade_date` をシフトして先読みバイアスを防ぐ。TOPIX は指数 ^TPX 配信停止のため ETF 1306.T で収集（#250）。**週次株価の段差（分割の遡及調整もれ）検出・修復**（#465）: `detect_price_scale_breaks`（契約窓を1リクエストで学習 → weekly に実在する `trade_date` から月次で突合日を選定 → `AdjC` と `weekly.close_last` を突合）と `repair_price_scale_breaks`（該当銘柄だけ Yahoo で全履歴を取り直し `record_prices_batch` へ通し、同じ突合日で検算）。CLI は `--repair-price-breaks`（既定 dry-run・`--persist` で書込・`PRICE_BREAK_MAX_REPAIR` 超過で中止）。5桁コード→4桁の縮約は `is_common_stock_code` で**普通株を優先**（日次収集の dedup と突合の両方が同じ規則を使う）。**毎晩の鮮度確保 `fill_recent_stock_price_gap_yahoo(gap_days=0)` の対象判定は `last_closed_session`（閉場済みの最新 JST 営業日）**＝ランナーの UTC 日付と比べると JST 日曜/月曜の早朝に全社が空振り対象になる（#474・本番実測 4,437社→735社）。**そのうち 454社は価格を1件も持たない `is_active=False` の社**で、`should_retry_priceless_delisted` により `DELISTED_RETRY_INTERVAL_DAYS=7` 日に1回だけ試す（恒久除外にすると #463 の誤 delisted 判定を拾い直せない・#475）。**株価履歴を持つ廃止社**（`is_active=False`・サフィックス未解決・最終株価が `DELISTED_STALE_DAYS=30` 日より前）も同じ間隔で試す（#556・実測 263社が毎晩 404 を返していた。最終株価の古さを条件に入れるので、一度履歴を得た新規上場は巻き込まない）。Yahoo の HTTP 失敗は `yahoo_http_stats()` で数え、4xx は 404 を内訳として分けて出す（`4xx=N（うち404=M）`）。基準セッションより後の `trade_date`（Yahoo が場中に返す進行中バー）は取り込まない。J-Quants catchup は受け取った日次バーのうち `AdjFactor != 1`（普通株のみ）を**価格行の選別より前に** `jquants_adj_factor_events` へ upsert する（#661・API 呼び出しは増えない・保存失敗は戻り値 `adj_factor_events=None` で価格収集の結果は返す）。分割補正係数 F の洗い替え（`rebuild_split_adjustment_factors`）と公式イベント・スピンオフの判定は企業イベント台帳（`corporate_actions.py`）が持つ（#746・ADR-0062）。Yahoo の株価の書き手は DB の直前値と100倍以上離れた値を書かず（gap-fill は離れたバーだけ捨てる・弾いた社は `app_settings.yahoo_scale_rejections` に「社＋基準日」で記録して新規だけ WARNING）、夜間の末尾で株価表全体の100倍段差を走査する（`scan_price_scale_steps`・#765・4-2 節）
@@ -202,6 +280,20 @@ DBテーブル定義・upsert。主要テーブル（Company / FinancialRecord /
 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。**`recommend_factor_premia.py` はこのテーブルに依存せず、`fin_features` は `financial_metrics` VIEW の `z_*`（`plugins/recommend.py::METRICS`）から取る**（#576 で CLAUDE.md から移設）。決算短信サマリーの生データ（実績 Sales/OP/OdP/NP/EPS・当期予想 FSales/FOP/FOdP/FNP/FEPS・翌期予想 NxFSales〜NxFEPS・DiscDate/DiscTime/DocType・**株式数 ShOutFY/TrShFY**）を `statement_disclosure`（PK=disc_no・disc_no はJ-Quants開示番号でグローバルに一意）へそのまま蓄積。**`companies.issued_shares` の J-Quants 経路もここが唯一の入口**（#462・v2 の `/equities/master` は株式数を持たないため。主経路は XBRL で、`_update_issued_shares` は NULL のみ補完）。無料プラン制約は株価と同一設計（`JQUANTS_BACKFILL_DAYS`＝730日遡及、`JQUANTS_DISCLOSURE_DELAY_DAYS`＝84日＝12週固定の配信遅延・実測）
 
 種別: バックエンド ／ 依存先: J-Quants, collector_utils, collector_prices, database.py
+
+### `statement_disclosure` の表
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
+`/fins/summary` から蓄積する生データ）は**会社予想の中身を分析に使っていないが、収集は止めない**。
+読み手は2つある: ①収集の途中で `ShOutFY` を拾い `companies.issued_shares` を更新する
+（発行済株式数の J-Quants 経路の唯一の入口・`collector_prices._update_issued_shares`・#462）
+②夜間の TTM 合成が会計基準と連結・単体の別を読む（`ttm_composite._load_basis`・ADR-0051）。
+**`disc_date` は常に `today − 84日` が天井**（`JQUANTS_DISCLOSURE_DELAY_DAYS`＝無料プランの
+構造的上限）で、収集頻度を上げても前進しない＝齢を「壊れている」と誤診しないこと（#424 子4）。
+予想対比サプライズの特徴量化層 `feature_disclosure.py` は、唯一の予定消費者 #323 が not planned で
+閉じ、呼び出し元も無くなったので #1290 で退役した（取り出し方は `docs/archive/IMPROVEMENTS.md`）。
 
 ## `collector_interim.py`
 
@@ -305,17 +397,60 @@ M-1/M-2/M-3 ハイパーパラメータ自動探索（ADR-0007・Issue #264/#291
 
 種別: ローカル月次バッチ / ユーティリティ ／ 依存先: database.py, plugins/tuning.py, tuning_cycle.py
 
+### producer/consumer の補助テーブルと `plugin_tuned_params` の射影
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+**producer/consumer 系の補助テーブル**: `macro_beta_meta`/`macro_beta_loadings`（ADR-0002・
+`macro_beta_inference.py` が月次バッチで書き込み、`plugins/macro_risk_return.py` が読む）、
+`recommend_factor_premia`（ADR-0008・`recommend_factor_premia.py` が書き込み、
+`plugins/recommend.py::resolve_weights()` が「統計的最適化」プリセットとして読む）、
+`plugin_tuned_params`（ADR-0007・`hyperparameter_search.py` が書き込み、
+`GET /api/plugins/{name}/tuned` が読む。**保存値は「そのとき探索した空間」の記録**なので、
+読む側が `project_tuned_params()` で現在の探索空間へ射影してから返す——`base_params` の
+キーはその値で上書き、dims にある軸は保存値のまま、どちらにも無いキーは落として
+`params_schema` の既定へ倒す。生値は `params_as_tuned`、扱いが変わったキーは
+`stale_params` に載せ、画面が注記として出す。**射影が無いと、探索から外した軸の古い値が
+「🔧 自動調整済み」として推奨され続ける**＝M-1 のモメンタムが実際にそうなっていた。
+**射影が見るのは探索空間の形だけで、パネルの世代は別の目で見る**（#711・ADR-0047）——
+`current_panel_fingerprint()` が `hyperparameter_search._data_fingerprint()`（規則の唯一の源・
+TTL 60秒のキャッシュで1ページ読込3回を1回へまとめる）を呼び、保存時の `data_fingerprint`
+と比べた結果を `panel_changed`（True=違う / False=同じ / None=判定不能）として返す。
+画面は **False と積極的に言えたときだけ**自動プリフィルする＝指紋を持たない古い行も、
+指紋を読めなかった回も、自動適用しない。**パネルは毎晩伸びるので自動適用は事実上ほぼ
+止まる**が、バッジと「調整済みの値に戻す」ボタンは残るので手動適用の導線は生きている。
+これが無いと、いま探索中の軸に残った古い値が素通りする——M-1 の `max_features=5`
+（2026-09-02・分割補正前のパネル）は rank-IC +0.0052・fold 間 std 0（予測値が月内で
+全銘柄同じ）だったのにプリフィルされ続けた。その後 #791 で `max_features` を探索軸から
+外して `base_params` に本番既定 20 を固定したので、この値は今は射影が 20 へ倒す
+（軸が無くなった M-1 の探索は μ̂ の永続化のための1候補で完走する）。
+ADR-0050・#604）は、いずれも「重い推論/探索バッチが結果だけを
+永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
+と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
+
 ## `nightly_scores.py`
 
 夜間スコア更新バッチ（Issue #432/#443・親 #423）。**起動は `scripts/run_nightly.py` の `scores` ステップ**（#503 で `daily-incremental` の cron が止まり、`nightly-scores.yml` の `workflow_run` チェーンは親ごと発火しなくなった＝手動起動の口だけ残る）。`NIGHTLY_MODELS`（`sector_ols` → `regression_results` の `predicted_market_cap`/`gap_ratio`、`macro_enet`＝M-6 → `macro_enet_scores` の μ̂ と、同じ実行が解く `sell_quantile_scores` の S2＝`sell_ranking` の既定の並びのキー・ADR-0076）を `plugins.execute_plugin` 経由で順に回す。`NIGHTLY_PARAMS` は `params_schema` の default から変えるキーだけを持つ（`sector_ols` は `regularization=ridge`／M-6 はエントリ無し＝ADR-0021/0022 の実測と同一の既定構成で回す）。**1モデルの失敗は他を巻き込まず**、全実行後に失敗があれば非ゼロ終了（→ `notify-failure.yml` が Issue 起票）。実行ごとに `VERIFIERS` が DB を直接クエリし、プロセス開始時刻より新しい書き込みがあることを確認する（例外なし＝コミット済みとしない）。**producer が失敗しても止まらない作りで一緒に書く表は `SIDE_OUTPUT_CHECKS` が点検する**（#1237）＝M-6 の S2 は、応答の学習・保存の失敗・結果の欠落・M-6 の表との行数や基準日の食い違いを非ゼロ終了の理由 `macro_enet:sell_quantile` にする（μ̂ は巻き戻さない・全社同値の晩は失敗にしない）。μ̂ テーブル（`*_scores`）は M-2/M-3/M-4/M-6 で列構成が同型かつ全置換のため、verifier は `_make_score_table_verifier` ファクトリ1本で足りる。全モデルを `shared_snapshot_cache()` で包み、`load_data`（週次127万行）/`preload_macro`/`build_snapshots` をモデル間で共有する（包まないと Supabase Egress がモデル数に比例・#443）。**M-2 は非搭載**（既定 mu_source ではなく、月次 tune の `--persist-scores` 経路が μ̂ を更新するため）、**M-4 も非搭載**（基底を全部回すのに M-6 単体を上回らない・ADR-0022）。あわせて **`HEAVY_AUTOMATION`＝`heavy=True` なプラグインの自動実行レジストリ**（ADR-0031・#423 子6）を持つ。値はワークフローファイル名か `exempt: <理由>` で、未登録の heavy・実在しないワークフロー名・そのモデルを回さないワークフロー・空理由の exempt は `tests/test_nightly_scores.py::TestHeavyAutomationRegistry` が CI で落とす（「heavy を足したが自動実行が無い」は failure にならず `notify-failure` で拾えないため。#432/#443/#423 子5 で3回発生）。**登録があること ≠ 動いていること**で、鮮度監視は `/api/morning` の as-of・夜間バッチの `macro_health` ステップ・**成果物側は `batch_freshness.PRODUCERS`（#504）**が担う。**計算した診断値は捨てずに `nightly_model_diagnostics` へ積む**（#726・ADR-0061）＝`DIAG_EXTRACTORS` がモデルごとの allowlist で抜き出し、`_json_safe` で NaN を None にして書く。文脈として git HEAD / dirty（夜間は作業ツリーをそのまま import する）と `PREPROCESS_VERSION` を添える。ridge α が候補の**上端**に張り付いた夜（と M-6 の最終 α がパスの端の夜）は WARN を出すだけで起票しない（**ridge の下端は INFO**＝罰なしと同等で対処できない・#728 の実測）。書き込みの失敗は PRODUCERS では見ない（同じ障害に Issue が2枚立つ）——`NIGHTLY_MODELS` の全部に抽出器があることは `TestDiagnosticsRegistry` が縛る
 
 種別: GitHub Actions / ユーティリティ ／ 依存先: database.py, plugins/__init__.py, plugins/sector_ols.py, plugins/macro_enet.py, plugins/macro_snapshots.py
 
+### `nightly_model_diagnostics` の表
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+**`nightly_model_diagnostics`（#726・[ADR-0061](adr/0061-nightly-keeps-the-diagnostics-it-already-computes.md)）**: 夜間の producer が毎晩計算して捨てていた診断値（`sector_ols` の業種別 ridge α・R²・VIF 警告、`macro_enet` の CV が選んだ α / l1_ratio と α パスの端・OOF 成績・係数）を run_id × model で1行ずつ**追記**する。書き手は `nightly_scores.py` だけで、μ̂ / gap_ratio の検証が済んだ後に書き、直接クエリで確かめる（書けなければ `<model>:diagnostics` で非ゼロ終了）。入れるのは `DIAG_EXTRACTORS` の allowlist だけ（社別の行・社名は入れない）。**本番のスコアも起票もこれを読まない**——読み手は `python -m scripts.nightly_diag_report` だけ。
+
 ## `prediction_snapshots.py`
 
 **本番予測の月次の写し**（#1005・親 #1001）。`nightly_scores.py` が全モデルの後に `snapshot_month` を呼び、当月分が無い源（全 mu_source と sector_ols の gap と S2・#1208）だけを `prediction_snapshots` へ写す（写すだけ・新しい推定はしない・追記のみ）。空・読めない源は失敗として返し（S2 の空だけは見送り）、接続先がローカルでなければ写さない。手で写すのは `python -m prediction_snapshots`（`--dry-run` で行数だけ）。実測（2026-10-21）: enet 3,169・gbdt 1,704・dlm 3,598・M-1 3,839・gap 3,634 行＝月約 1.6 万行
 
 種別: ユーティリティ ／ 依存先: database.py, plugins/__init__.py, collector_utils.py（JST）
+
+### `prediction_snapshots` の表
+
+（[ARCHITECTURE.md](ARCHITECTURE.md) §3 の前置きから移した・#1300）
+
+**`prediction_snapshots`（#1005・親 #1001）**: 全置換で最新しか持たない `*_scores`（μ̂）と `regression_results`（gap_ratio）を、月に1回その時点の値のまま (写した日 × 源 × 社) で**追記**する。源は永続化している全ての mu_source（`macro_enet` / `macro_gbdt` / `macro_dlm` / `macro_risk_return`）と `sector_ols` の gap と売り専用の候補 S2（源 `sell_quantile`・値は `mu` 列に q20・M-6 と断面の日付がそろう夜だけ写す・#1208）（退役した M-4 は除く）。書き手は `prediction_snapshots.snapshot_month` だけで、夜間バッチ（`nightly_scores.py`）が全モデルの後に呼び、**源ごとに当月分が無いときだけ**写す（初回の夜に失敗しても翌晩に取り直す）。読む入口は画面・売りランキングと同じ（`read_producer_scores`・各社の最新年度の `financial_metrics.gap_ratio`）で、新しい推定はしない。空・読めない源は `prediction_snapshots:<源>` で非ゼロ終了（**S2 の空だけは見送り**＝予測が全社同値の夜は表が空で全置換されるので失敗にせず、翌晩また試す・`EMPTY_IS_NORMAL`）、接続先がローカルでなければ写さない（行はローカル正本だけ）。表は `init_db()` を待たず書き込み側でも `checkfirst` で作る。手で写すときは `python -m prediction_snapshots`（`--dry-run` で行数だけ）。前進は `batch_freshness.PRODUCERS`（源ごとの最新の写しの最古・月の最長31日＋夜間の窓）が見る（見る源は `prediction_snapshots.WATCHED_SOURCES`＝S2 を除く。仕様どおり空の月に起票しないため・#1208）。答え合わせは `scripts/measure_live_oos.py`（#1157・読むだけ）で、52 週の起点は写した日（`data_asof` ではない）。
 
 ## `macro_health.py`
 
