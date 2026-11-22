@@ -72,3 +72,6 @@ pwfile
 
 # JPX の指数の一覧と、その正規化 CSV（無断転載不可・リポジトリは PUBLIC・#1003・ADR-0068）
 /.index_lists/
+
+# 保有証券一覧 CSV・優待一覧・口座別レポート（実際の保有・リポジトリは PUBLIC・scripts/holdings_report.py）
+/.portfolio/
