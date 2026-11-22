@@ -13,6 +13,7 @@
 | [MODELS.md](docs/MODELS.md) | 分析モデル解説＋モデル固有の制約 | 分析モデル変更時 |
 | [PLUGIN_REFERENCE.md](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（内部契約・producer・heavy・実測値）。理論は MODELS.md が正本 | プラグイン実装を触るとき |
 | [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス（役割・守ること・実測値） | バッチ・スクリプトを触るとき |
+| [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md) | 直下のモジュール・画面・workflow の実装リファレンス（§10 の長い行の詳細） | それらを触るとき |
 | [M-1](docs/M1_MACRO_MODEL_GUIDE.md)・[M-2](docs/M2_MACRO_GBDT_GUIDE.md)・[M-3](docs/M3_STATE_SPACE_GUIDE.md) の副読本 | M-1・M-2・M-3 の初心者向け副読本。予備知識ゼロから設計思想を解説。正式版は MODELS.md §9・§11・§12 | 各モデルの考え方を噛み砕いて把握したいとき |
 | [SKILLS_AND_AGENTS.md](docs/SKILLS_AND_AGENTS.md) | スキル／エージェントの索引マニュアル | スラッシュコマンドや調査エージェントを使うとき |
 | [FUTURE_TASKS.md](docs/FUTURE_TASKS.md) | **Issue 運用ガイド＋設計制約**（残タスクの正本は GitHub Issues。本書はタスク実体を持たない）。完了項目は `docs/archive/IMPROVEMENTS.md` へ集約 | リファクタ着手・改善項目の参照時 |
@@ -55,24 +56,24 @@
 | ファイル | 役割 |
 |---|---|
 | `database.py` | テーブル定義・upsert・派生指標（成長率・Zスコア等）を都度算出する `financial_metrics` VIEW の定義 |
-| `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。**歯止めはプロセス予算と請求サイクル累計の2軸**（片方へ戻さない）。集計は `python -m scripts.egress_report`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `db_egress.py` | Egress 台帳＋サーキットブレーカ（ADR-0034/0037）。**歯止めはプロセス予算と請求サイクル累計の2軸**（片方へ戻さない）。集計は `python -m scripts.egress_report`。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#db_egresspy) |
 | `scripts/batch_common.py` | ローカル駆動バッチの共通骨格＝**「走らなかったことを検知する」仕組みの唯一の源**。**子の出力はログへ直結する／生の接続文字列は出さない／Σ予算＋マージン ≤ 窓／予算は締切（`FINAPP_STEP_DEADLINE_UTC`）として子へ渡し、予算の無いステップでは消す**（ADR-0054）。詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsbatch_commonpy) |
-| `batch_freshness.py` | 足跡（`*_last_run`）と成果物の前進（`PRODUCERS`）を**測る**層。watchdog と `/api/morning` が共有する。**producer は watchdog の起票にだけ出す**（`collect()` / `summarize()` を触らない）。`macro_beta` は **live の行だけ**数える。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `batch_freshness.py` | 足跡（`*_last_run`）と成果物の前進（`PRODUCERS`）を**測る**層。watchdog と `/api/morning` が共有する。**producer は watchdog の起票にだけ出す**（`collect()` / `summarize()` を触らない）。`macro_beta` は **live の行だけ**数える。**API から `scripts/check_batch_freshness.py` を import しない**（import 時に接続先を書き換える）。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#batch_freshnesspy) |
 | `scripts/check_batch_freshness.py` | **バッチ鮮度 watchdog**（ADR-0042）。**閾値は `cadence` と `run_*.WINDOW_MIN` から導出し、実測から逆算しない・書き写さない／バッチの判定は `*_last_run` のみ／成果物の固着は `PRODUCERS` で別に起票する／通知経路（`gh`）は健全な回にも確かめる／ok へ戻った起票は自動で閉じる（コメントを付けると止まる）**。exit 0/2/3。詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptscheck_batch_freshnesspy) |
 | `scripts/mirror_*.py` | ミラーの pull / sync / verify（共有基盤 `mirror_common.py`）。**pull / sync は定常運転では使わない**（`verify` はバックアップ復元先の突合用）。規則は設計制約、詳細は [SCRIPTS_REFERENCE.md](docs/SCRIPTS_REFERENCE.md#scriptsmirror_commonpy) |
-| `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（規則は設計制約）。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `weekly_price_cache.py` | 週次株価の run 間差分ロードキャッシュ（規則は設計制約）。緊急停止は `FINAPP_WEEKLY_CACHE=0`。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#weekly_price_cachepy) |
 | `corporate_actions.py` | 企業イベント台帳（F の検出器・登録表・TTM の分割窓・ADR-0062）。**一晩1回作り F の表と TTM へ同じものを渡す／本番から `scripts/` を import しない** |
 | `index_events.py` | 指数イベント台帳（TOPIX の移行措置・新規採用を公表日 as-of で時点再現・ADR-0068）。**F・TTM・`tradable_filters` へ流さない／一覧はリポジトリへ入れない（`.index_lists/`）** |
-| `ttm_composite.py` | TTM 行（直近12か月）の合成（ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期と並べる（規則は設計制約）。**純関数ブロックは database・scripts を import しない**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `sector_gap_asof.py` | **時点再現の gap_ratio**（ADR-0057）。学習パネル（`build_period_panel`）とバックテストの開始日（`gaps_on`・#1248）が使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F／回帰の設定は `NIGHTLY_PARAMS` を借りる／ridge の α は LOO で選ぶ（KFold へ戻さない・ADR-0058）**。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `ttm_composite.py` | TTM 行（直近12か月）の合成（ADR-0051）。夜間に `ttm_financial_records` を全置換し、`financial_metrics_with_ttm` VIEW が通期と並べる（規則は設計制約）。**純関数ブロックは database・scripts を import しない**。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#ttm_compositepy) |
+| `sector_gap_asof.py` | **時点再現の gap_ratio**（ADR-0057）。学習パネル（`build_period_panel`）とバックテストの開始日（`gaps_on`・#1248）が使う。**`regression_results` へ書かない／株価は `financial_records.stock_price` を読まず月末の週次終値×F／回帰の設定は `NIGHTLY_PARAMS` を借りる／ridge の α は LOO で選ぶ（KFold へ戻さない・ADR-0058）**。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#sector_gap_asofpy) |
+| `sysmem.py` | 常駐メモリ／物理メモリ実測の**唯一の源**。**ctypes を書き写さない／psutil は入れない／測るのはプロセスツリーの合計**（単体 pid は静かに誤る）。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#sysmempy) |
 | `collector.py` | オーケストレータ＋後方互換の再エクスポート層＋CLI（実体は下記6分割） |
 | `collector_utils.py` | 収集系共通の設定定数・ロガー。**`EDINET_BASE` は `api.edinet-fsa.go.jp`**（旧 `disclosure.` へ戻さない）。**例外文字列は `redact_secrets()` で API キーを消す**／**「走ったが全部失敗した」を失敗として現す**。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_master.py` | 企業/業種マスタ収集（EDINET コードリスト・JPX 業種）。**JPX の Excel URL は一覧ページから解決する**（定数へ書き戻さない）／**xlsx 経路は数値コードを `int` で返す**（`float` だけ見ない）。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
 | `collector_financials.py` | XBRL 財務収集・パース・CF/PL-BS 補完・全件収集 |
 | `collector_prices.py` | 株価（Yahoo/J-Quants）・市場データ更新・マクロ収集 |
 | `collector_interim.py` | 半期(H1)財務収集（period_type='H1'）。**H1 判定は DEI `Q2`/`HY` の両方**（新式は `HY` を名乗る）。詳細は [GOTCHAS.md](docs/GOTCHAS.md) |
-| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`→`statement_disclosure`）。**予想の中身は分析に使っていないが収集は止めない**（株数の J-Quants 経路と TTM の会計基準判定が読む）。詳細は [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`→`statement_disclosure`）。**予想の中身は分析に使っていないが収集は止めない**（株数の J-Quants 経路と TTM の会計基準判定が読む）。詳細は [MODULE_REFERENCE.md](docs/MODULE_REFERENCE.md#collector_disclosurespy) |
 | `api.py` | FastAPI アプリ本体（HTMLページ配信・認証/CORSミドルウェア・`/api/system/info`・`/heartbeat`）。REST ルート実体は `routers/` へ委譲（`/health` も `routers/auth.py`） |
 | `routers/` | REST ルーター6本（`auth` / `collect` / `market` / `analysis` / `morning` / `portfolio`）。エンドポイント定義の実体 |
 | `portfolio_ledger.py` | 売買の記録（`trade_ledger`）から保有・損益・対 TOPIX の期間リターンを導出（#1222）。**記録は追記のみ（訂正は取消の行）／実際の売買をコード・テスト・文書へ書き写さない（public）／分割は記録の行で直し、公式の係数で自動補正しない** |

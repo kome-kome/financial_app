@@ -107,6 +107,7 @@ uvicorn api:app --reload
 | [`docs/M3_STATE_SPACE_GUIDE.md`](docs/M3_STATE_SPACE_GUIDE.md) | M-3 の初心者向け副読本（MODELS.md §12 の設計思想と章立てに追随） |
 | [`docs/PLUGIN_REFERENCE.md`](docs/PLUGIN_REFERENCE.md) | `plugins/` 各ファイルの実装リファレンス（理論は MODELS.md） |
 | [`docs/SCRIPTS_REFERENCE.md`](docs/SCRIPTS_REFERENCE.md) | `scripts/` と起動用 `*.ps1` の実装リファレンス |
+| [`docs/MODULE_REFERENCE.md`](docs/MODULE_REFERENCE.md) | リポジトリ直下のモジュール・画面・workflow の実装リファレンス |
 | [`docs/GOTCHAS.md`](docs/GOTCHAS.md) | 既知のハマりどころ（再現条件と回避手順） |
 | [`CONTEXT.md`](CONTEXT.md) | ドメイン用語集 |
 | [`docs/adr/`](docs/adr/README.md) | 設計判断の記録（ADR） |
