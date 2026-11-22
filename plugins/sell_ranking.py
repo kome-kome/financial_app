@@ -26,6 +26,8 @@ import re
 from collections import namedtuple
 from typing import Any
 
+from portfolio_ledger import normalize_sec_code
+
 from .base import AnalysisPlugin
 
 
@@ -67,7 +69,10 @@ def parse_holdings(text: str) -> tuple[list[dict], list[str]]:
     """保有入力テキストを構造化する。
 
     1 行 = `証券コード[, @取得単価][, 購入日]`。区切りはカンマ/空白いずれも可。
-      例: "7203, @1500, 2024-03-10" / "6758 @12000" / "9984"
+      例: "7203, @1500, 2024-03-10" / "6758 @12000" / "9984" / "130A"
+    証券コードは売買の記録と同じ `portfolio_ledger.normalize_sec_code` で読む（数字 4 桁か、2024 年以降の
+    英字入りの 4 文字。大文字へそろえ、3 桁は 0 を補う・#1306）。記録の保有を渡したときに英字入りの
+    コードが「解釈できなかった入力」へ回らないよう、規則を書き写さずに関数を共有する。
     取得単価は `@1500` でも `1500` でも可。`YYYY-MM-DD` 形式のトークンは購入日とみなす。
 
     Returns: (parsed, invalid)
@@ -82,8 +87,9 @@ def parse_holdings(text: str) -> tuple[list[dict], list[str]]:
         if not line or line.startswith("#"):
             continue
         tokens = re.split(r"[,\s]+", line)
-        code = tokens[0].strip().lstrip("#")
-        if not re.fullmatch(r"\d{3,4}", code):
+        try:
+            code = normalize_sec_code(tokens[0].strip().lstrip("#"))
+        except ValueError:
             invalid.append(line)
             continue
         if code in seen:        # 重複行はスキップ（先勝ち）

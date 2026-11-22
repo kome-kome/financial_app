@@ -142,6 +142,26 @@ class TestParseHoldings:
         assert [p["sec_code"] for p in parsed] == ["7203"]
         assert invalid == []
 
+    def test_alphanumeric_code_is_parsed(self):
+        """2024 年以降の英字入りのコードを売買の記録と同じ規則で読む（#1306・コードは作り物）。"""
+        parsed, invalid = parse_holdings("9Z9Z, @1500, 2026-01-05\n9z8y")
+        assert [p["sec_code"] for p in parsed] == ["9Z9Z", "9Z8Y"]   # 小文字は大文字へ
+        assert parsed[0]["avg_cost"] == 1500.0 and parsed[0]["buy_date"] == "2026-01-05"
+        assert invalid == []
+
+    def test_same_rule_as_the_ledger(self):
+        """判定の規則を書き写さず、記録の `normalize_sec_code` と同じ答えになる（3 桁は 0 を補う）。"""
+        import portfolio_ledger as pl
+        for raw in ("7203", "9z9z", "123"):
+            parsed, invalid = parse_holdings(raw)
+            assert invalid == [] and parsed[0]["sec_code"] == pl.normalize_sec_code(raw)
+        for raw in ("AAPL", "12345", "Z123"):
+            assert parse_holdings(raw) == ([], [raw])
+
+    def test_duplicate_detected_after_normalizing(self):
+        parsed, _ = parse_holdings("9z9z, @1000\n9Z9Z, @2000")
+        assert len(parsed) == 1 and parsed[0]["avg_cost"] == 1000.0   # 先勝ち
+
 
 # ── 純粋: _compute_trend（参考表示）─────────────────────────────────────────
 
@@ -253,6 +273,15 @@ class TestExecute:
         assert res["not_found"] == ["9999"]
         assert res["invalid"] == ["NOPE"]
         assert res["count"] == 1
+
+    def test_alphanumeric_holding_is_found(self, db, make_metric):
+        """英字入りのコードの保有も判定に入る（`invalid` にも `not_found` にも回らない・#1306）。"""
+        db.add_all([make_metric(edinet_code="E9Z9Z", sec_code="9Z9Z", company_name="作り物", year=2023),
+                    *_universe(make_metric, 3)])
+        db.commit()
+        res = _run({"holdings": "9z9z, @1000\n1001"}, db)
+        assert res["invalid"] == [] and res["not_found"] == []
+        assert {r["sec_code"] for r in res["results"]} == {"9Z9Z", "1001"}
 
     def test_pnl_from_avg_cost(self, db, make_metric):
         db.add(make_metric(edinet_code="E0001", sec_code="1001", stock_price=1200.0))
