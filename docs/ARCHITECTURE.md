@@ -285,12 +285,14 @@ graph TD
 > ADR-0050・#604）は、いずれも「重い推論/探索バッチが結果だけを
 > 永続化し、軽量なAPI/プラグインが読む」producer/consumer 分離パターン（`regression_results`
 > と同型）。`statement_disclosure`（Issue #322・`collector_disclosures.py` が J-Quants
-> `/fins/summary` から蓄積する生データ）は `feature_disclosure.py` が特徴量化して読む。
+> `/fins/summary` から蓄積する生データ）は**会社予想の中身を分析に使っていないが、収集は止めない**。
+> 読み手は2つある: ①収集の途中で `ShOutFY` を拾い `companies.issued_shares` を更新する
+> （発行済株式数の J-Quants 経路の唯一の入口・`collector_prices._update_issued_shares`・#462）
+> ②夜間の TTM 合成が会計基準と連結・単体の別を読む（`ttm_composite._load_basis`・ADR-0051）。
 > **`disc_date` は常に `today − 84日` が天井**（`JQUANTS_DISCLOSURE_DELAY_DAYS`＝無料プランの
 > 構造的上限）で、収集頻度を上げても前進しない＝齢を「壊れている」と誤診しないこと（#424 子4）。
-> なお `feature_disclosure.py` の呼び出し元は無い（検証用の `scripts/event_study_*.py` 2本は #1287 で退役）。
-> **本番の API / プラグイン経路からは読まれていない**（唯一の予定消費者 #323 が wontfix
-> クローズしたため。ADR-0033）。
+> 予想対比サプライズの特徴量化層 `feature_disclosure.py` は、唯一の予定消費者 #323 が not planned で
+> 閉じ、呼び出し元も無くなったので #1290 で退役した（取り出し方は `docs/archive/IMPROVEMENTS.md`）。
 
 ```mermaid
 erDiagram
@@ -1586,7 +1588,6 @@ graph TB
 | `sector_gap_asof.py` | バックエンド | **学習パネル用の時点再現の gap_ratio**（#626・[ADR-0057](adr/0057-past-gap-ratio-is-reconstructed-as-of-each-month.md)）。`recommend_factor_premia.build_period_panel(with_gap_ratio=True)` と、バックテストの開始日 1 日分の `gaps_on`（#1248・決算日がその日の 45 日前以前の各社の最新の 1 行だけを読む＝全年度を読まない）が使う。月末ごとに「その月末に見えていた各社の最新の通期行（期末＋45日・`_find_applicable_fin`）」と「その月末の週次終値（`month_end_indices` の足＝`build_snapshots` と共有）× 分割補正係数 F」で`SectorOLSPlugin.predict_gaps`（保存しない経路）を回し、`{(edinet_code, ym): gap_ratio}` を返す。**`regression_results` へは書かない**（画面・バックテスト・鮮度表示に混ざらない）。**株価は `financial_records.stock_price` を読まない**——過去行には「その年度が最新だった頃に毎晩上書きされた現在株価」＝最大1年先の値が残っており（期末±3% に入るのは 2023年度 70%・2024年度 65%）、年度ごとに回すと先読みになる。回帰の母集団はその月末に株価がある全社（パネルの標本＝52週先リターンがある社ではない＝生存バイアスを入れない）。回帰の設定は `nightly_scores.NIGHTLY_PARAMS` を唯一の源にする。**行は edinet_code 順に固定**（回帰は並びに依存しない＝ridge の α は LOO・#697・[ADR-0058](adr/0058-ridge-alpha-is-chosen-by-loo.md)。固定は浮動小数の加算順まで揃えてパネルをビット単位で再現するため）。上半分は DB を引かない純関数 | plugins/sector_ols.py, plugins/macro_snapshots.py, nightly_scores.py, database.py |
 | `collector_disclosures.py` | バックエンド | 会社予想（ガイダンス）開示収集（J-Quants `/fins/summary`・Issue #322）。**`recommend_factor_premia.py` はこのテーブルに依存せず、`fin_features` は `financial_metrics` VIEW の `z_*`（`plugins/recommend.py::METRICS`）から取る**（#576 で CLAUDE.md から移設）。決算短信サマリーの生データ（実績 Sales/OP/OdP/NP/EPS・当期予想 FSales/FOP/FOdP/FNP/FEPS・翌期予想 NxFSales〜NxFEPS・DiscDate/DiscTime/DocType・**株式数 ShOutFY/TrShFY**）を `statement_disclosure`（PK=disc_no・disc_no はJ-Quants開示番号でグローバルに一意）へそのまま蓄積。**`companies.issued_shares` の J-Quants 経路もここが唯一の入口**（#462・v2 の `/equities/master` は株式数を持たないため。主経路は XBRL で、`_update_issued_shares` は NULL のみ補完）。無料プラン制約は株価と同一設計（`JQUANTS_BACKFILL_DAYS`＝730日遡及、`JQUANTS_DISCLOSURE_DELAY_DAYS`＝84日＝12週固定の配信遅延・実測） | J-Quants, collector_utils, collector_prices, database.py |
 | `collector_interim.py` | バックエンド | 半期(H1)財務収集（Issue #219② フェーズB）。EDINET 半期報告書（新式 formCode=043A00/docType160）と旧四半期報告書（043000/docType140）の **Q2(中間=H1累計)** を収集し `financial_records` に `period_type='H1'` で保存。**通期(annual)収集とは独立**・低レベルヘルパ（`fetch_xbrl_csv`/`parse_xbrl_csv`/`calc_derived`/`upsert_financial`）を再利用。新旧いずれも P/L・CF は context `CurrentYTDDuration`(H1累計)・BS は `CurrentQuarterInstant` で既存パーサが無改修で抽出。真の H1 期末は DEI `CurrentPeriodEndDateDEI`（metadata periodEnd は新式でFY末を返すため不使用）、H1 判定は DEI `TypeOfCurrentPeriodDEI` が `Q2` または `HY`（旧四半期の Q1/Q3 を除外。2025年提出の新式半期報告書は `HY` を名乗り、context も `InterimDuration`。半期報告書＝docType 160 が H1 と名乗らなければ `failed_dei_type` として失敗に数える・#647）。旧四半期は metadata periodEnd 月で事前選別しダウンロード数を削減（`build_fy_end_month_map`/`prefilter_interim_docs`）。CLI `python collector.py --interim --years N`（常に差分）・手動WF `collect-interim.yml` | EDINET API, collector_utils, collector_financials, database.py |
-| `feature_disclosure.py` | バックエンド | **呼び出し元なし**（検証用の `scripts/event_study_*.py` 2本を #1287 で退役）。`statement_disclosure` の予想対比サプライズ等の特徴量化（Issue #322 改善案3・UKI型モデル移植 `build_disclosure_features`/`build_disclosure_features_batch`/`dedupe_disclosures`/`load_disclosure_features`）。`build_disclosure_features_batch` は全社を1パスの `groupby(edinet_code)` でベクトル化した高速版（per-company 版と値 bit 一致・検証スクリプト反復用・Issue #340）。実績(`r_*`)は `cur_per_en` 変化点で単四半期化（1Qは累積=単四半期）、水準の予想(`f_*`)は `cur_fy_en`（年度）単位でのみ更新し年度内据え置き、比率(`pm*`/`cost*`)はその開示時点の生の予想値を使用（水準特徴量とは別扱い）。`m_*`＝実績単四半期−前回開示時点の予想、`d_f_*`＝予想系列の前回開示比差分。`EarnForecastRevision`/`DividendForecastRevision`系は基準系列から除外・同一期間重複はkeep-last。**roe/roa/turn/equity_ratio/cf_ratio系はスコープ外**（`/fins/summary`に四半期BS/CFが無く、四半期粒度データはJ-Quants有料化とセットの#219待ち）。モデルへの組み込み（イベント駆動予測モデル等）は別Issue #323 | database.py（`StatementDisclosure`）, pandas |
 | `data_quality.py` | バックエンド | データ品質チェック（NULL率・外れ値・収録状況） | database.py, api.py（import元） |
 | `plugins/base.py` | バックエンド | 分析プラグインの抽象基底クラス（`heavy`／`hidden`（退役＝`/api/plugins` から除外・ADR-0044）／`ui_order`／`produced_output`／`writes`（画面から実行したときに置き換わる保存済みの表。heavy は宣言必須で、書かないなら `()`。実行前の確認ダイアログに出す・`tests/test_batch_activity.py::TestHeavyDeclaresWrites`）の共通契約）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsbasepy) | — |
 | `plugins/__init__.py` | バックエンド | プラグインを自動スキャン・レジストリ管理。`execute_plugin(plugin, raw, db)` が起動の単一入口。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#plugins__init__py) | plugins/*.py |

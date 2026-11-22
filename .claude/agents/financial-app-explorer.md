@@ -19,7 +19,7 @@ model: haiku
 | `collector_master.py` | 企業/業種マスタ収集 |
 | `collector_financials.py` | XBRL財務収集・パース・CF/PL-BS補完。`build_xbrl_map()` で XBRL_MAP 逆引き生成 |
 | `collector_prices.py` | 株価・市場・マクロ収集 |
-| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集。本番の API / プラグイン経路からは使われていない |
+| `collector_disclosures.py` | 会社予想（ガイダンス）開示収集。予想の中身は分析に使っていないが収集は止めない（株数の J-Quants 経路と TTM の会計基準判定が読む） |
 | `collector_interim.py` | 半期(H1)財務収集 |
 | `api.py` | FastAPI アプリ本体（HTML 配信・認証/CORS ミドルウェア）。REST ルートの実体は `routers/` |
 | `routers/` | REST ルーター6本（`auth` / `collect` / `market` / `analysis` / `morning` / `portfolio`） |
