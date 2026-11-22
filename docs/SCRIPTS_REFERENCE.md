@@ -28,6 +28,7 @@
 | [`scripts/egress_report.py`](#scriptsegress_reportpy) | ユーティリティ |
 | [`scripts/_cache.py`](#scripts_cachepy) | ユーティリティ |
 | [`scripts/import_index_list.py`](#scriptsimport_index_listpy) | ユーティリティ |
+| [`scripts/holdings_report.py`](#scriptsholdings_reportpy) | ユーティリティ |
 | [`scripts/prereg.py`](#scriptspreregpy) | ユーティリティ |
 | [`scripts/measure_embargo_impact.py`](#scriptsmeasure_embargo_impactpy) | 検証（実験） |
 | [`scripts/measure_strict_binding.py`](#scriptsmeasure_strict_bindingpy) | 検証（実験） |
@@ -153,6 +154,12 @@
 指数イベント台帳（`index_events.py`・用語は CONTEXT.md「指数イベント台帳」・#1003・ADR-0068）の一覧を取り込む。`python -I scripts/import_index_list.py --all`（またはキーを並べる。`--root` で一覧の置き場・`--pdftotext` で実行ファイルを指定）で、`.index_lists/raw/` の JPX の一覧 PDF を `pdftotext -enc UTF-8 -table` で取り出し、`sec_code,kind` の正規化 CSV（`.index_lists/<公表>.csv`）を書く。新しい公表は、資料を置いて登録表（`index_events.REVIEWS`）へ 1 項目足し、出た sha256 を書き込んでから取り込み直す。守ること: **元資料の sha256 を先に照合する**（どの資料かを固定する）／**節ごとの通し番号の連続・件数・新規追加の市場区分を登録表と照合する**（取り出しの崩れを止める）／**正規化 CSV の sha256 が登録表と違えば書かない**（既存の CSV を壊さない）／**資料のフォルダの中から実行しない**（cwd が `--root` の中なら終了コード 2）／**一覧も CSV もコミットしない**（無断転載不可・`.gitignore`）。`python -I` でも `index_events` を読めるよう、先頭で自分のリポジトリを `sys.path` に足す。poppler 版の `pdftotext` は `-table` を持たないので失敗として止まる。実測（2026-10-21）: 3 本で 2,387 / 493 / 482 行が公表値と完全一致、所要は数秒。**TOPIX 以外の指数の一覧**（交絡の記述用・`index_events.CONFOUNDER_LISTS`・#1065）も同じ CLI で取り込む（`--all` は両方の登録表）。左右 2 列の表（グロース 250 の定期選定の追加・除外）は sections を `{"left": 種別, "right": 種別}` にすると、見出し行の 2 つ目の `コード` の位置で列を分けて読む（通し番号が無いので件数と重複だけを照合・`*` の直後がコードでない注記行で読み終える）。実測（2026-10-29）: 31 / 52 が公表値と一致
 
 種別: ユーティリティ ／ 依存先: index_events.py、pdftotext（Git for Windows 同梱・Xpdf 4.00）
+
+## `scripts/holdings_report.py`
+
+証券会社の「保有証券一覧」CSV（cp932・区分ごとに「合計」と「明細」が並ぶ書き出し）を口座の種類ごとに分析し、1 枚の HTML レポートを書く。`python -I scripts/holdings_report.py --csv .portfolio/raw/<書き出し>.csv`（`--yutai` で優待一覧・`--as-of` で基準日・`--no-db` で DB を読まない・`--out` で書き先。既定の書き先は `.portfolio/reports/holdings_<基準日>.html`）。見方は 4 つ: **特定口座**（含み益にかかる税の見込みを「利益の銘柄だけ売る」「全部売って相殺する」の 2 通り・含み損・配当にかかる税・優待の必要株数と保有株数）／**新NISA**（優待のある銘柄に一律で印・未確認の銘柄・含み損（他口座と通算できない）・非課税で浮く税の見込み・生涯枠の簿価での使用）／**旧NISA**（今の株価で非課税期間が終わった場合の税の影響と、終わる日の候補）／**口座横断**（同じ銘柄の合算・資産の種類と業種の比率・上位の集中度）。資産の種類は `jpx_listing_snapshots.market_segment`、業種は `companies.industry`、配当利回りは最新年度の `financial_metrics.div_yield`（期末株価基準の概算）から読む。優待一覧（`.portfolio/yutai.csv`・UTF-8）の列は `code,name,has_yutai(あり/なし/不明),min_shares,record_months,content,est_value_yen,source_url,checked_on,confirmed`（`confirmed` が空でなければ確認済み）。守ること: **売買の助言を出さない**（数字と方針の印だけ）／**区分の見出し・列名・明細ごとの 評価額−取得金額=評価損益・区分ごとの合計行との一致を照合し、合わなければ終了コード 2**（知らない口座の区分を黙って捨てない）／**DB へ書かない**（DB が読めなければ終了コード 1 で止め、黙って「未取得」にしない）／**資料のフォルダの中から実行しない**（cwd が `.portfolio/` か CSV のフォルダの中なら終了コード 2）／**CSV・優待一覧・レポートをコミットしない**（実際の保有・`.gitignore`。テストの値はすべて作り物）／**標準出力は ASCII の要約だけ**（銘柄名は HTML にだけ書く）。税率・枠の定数と出典 URL（国税庁 No.1331・1463・1535、金融庁 NISA）はファイル冒頭。旧NISA の払出し時の取得価額（移したときの時価）は公式ページで確かめられなかったので、レポートはそう書いて今の株価で近似する。口座区分は売買の記録表（`trade_ledger`）に無く、この CLI は記録表と突き合わせない。
+
+種別: ユーティリティ ／ 依存先: portfolio_ledger.py（`normalize_sec_code`）、database.py（遅延 import・読むだけ）
 
 ## `scripts/prereg.py`
 
