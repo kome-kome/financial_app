@@ -532,7 +532,7 @@ Render ダッシュボードで管理。
 
 #### Egress（転送量）の計測と歯止め
 
-設計の正本は [ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)（台帳とプロセス予算）・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)（請求サイクル累計）・ARCHITECTURE.md §10 の `db_egress.py` の行。Supabase が正本だった頃の詳しい解説は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#egress-の計測と歯止めの解説1292-まで) へ移した。今は Render の閲覧と `egress-health` だけが Supabase を読む（ローカル正本の読取は Egress を使わない）。
+設計の正本は [ADR-0034](adr/0034-client-side-egress-ledger-and-circuit-breaker.md)（台帳とプロセス予算）・[ADR-0037](adr/0037-egress-cycle-budget-is-a-second-axis.md)（請求サイクル累計）・[MODULE_REFERENCE.md](MODULE_REFERENCE.md#db_egresspy) の `db_egress.py` の節。Supabase が正本だった頃の詳しい解説は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#egress-の計測と歯止めの解説1292-まで) へ移した。今は Render の閲覧と `egress-health` だけが Supabase を読む（ローカル正本の読取は Egress を使わない）。
 
 | 軸 | 何を守るか | 置き場所 | 閾値 |
 |---|---|---|---|

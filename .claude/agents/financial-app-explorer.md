@@ -36,6 +36,7 @@ model: haiku
 - `docs/MODELS.md` — 分析モデル理論
 - `docs/PLUGIN_REFERENCE.md` — `plugins/` 各ファイルの実装リファレンス
 - `docs/SCRIPTS_REFERENCE.md` — `scripts/` と起動用 `*.ps1` の実装リファレンス
+- `docs/MODULE_REFERENCE.md` — リポジトリ直下のモジュール・画面・workflow の実装リファレンス
 - `docs/GOTCHAS.md` — XBRL/CF/capex/時刻/業種/認証のハマりどころ
 - `docs/DEPLOYMENT.md` — Render運用・外部サービス制約（GitHub Actions/Supabase/J-Quants）
 - `CONTEXT.md` — ドメイン用語集
