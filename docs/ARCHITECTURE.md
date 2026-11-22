@@ -174,7 +174,7 @@ graph TD
 
 ## 3. データベース設計（ER図）
 
-> テーブルの構造と主要カラム、テーブル間の関係を示します。
+> テーブルの主キー・外部キーと、テーブル間の関係を示します。列の定義と説明は `database.py` の各クラスが正本です（図の下の対応表）。
 > `||--o{` は「1対多」（1社に対して複数の財務レコードが存在する）を意味します。
 > `macro_data` は企業に紐づかない独立テーブル（マクロ環境データ）です。
 >
@@ -297,374 +297,128 @@ graph TD
 ```mermaid
 erDiagram
     companies {
-        int       id            PK  "自動採番ID"
-        string    edinet_code   UK  "EDINETコード（E00001など）"
-        string    sec_code          "証券コード（4桁 例:7203）"
-        string    name              "会社名"
-        string    industry          "業種（TSE33業種。JPX が正本・空欄だけ EDINET 提出者業種で補完）"
-        string    market            "市場区分（プライム/スタンダード/グロース）"
-        int       fiscal_month      "決算月（3=3月決算など）"
-        string    accounting_standard "会計基準（JGAAP/IFRS/US-GAAP）"
-        bool      is_active         "上場中フラグ（既定true。J-Quants /equities/master突合で自動更新。地方単独上場は株価で判定・#779）"
-        date      delisted_date     "is_active=false へ遷移した日（再上場等で復帰時はnullへ戻す）"
-        string    yahoo_suffix      "解決済みYahooティッカーのサフィックス（.S=札証/.F=福証）。nullは未解決＝.T（#555）"
-        string    yahoo_probe_bucket "プローブの棄却理由 mismatch/empty/placeholder/not_found。採用済みと未プローブはnull（#560）"
-        datetime  created_at        "登録日時"
-        datetime  updated_at        "更新日時"
+        int    id          PK
+        string edinet_code UK
     }
 
     financial_records {
-        int     id                  PK "自動採番ID"
-        string  edinet_code         FK "企業への紐付け"
-        string  sec_code               "証券コード"
-        int     year                   "決算年度（例:2024）"
-        string  period_end             "決算期末日（YYYY-MM-DD）"
-        string  doc_id                 "EDINET書類管理番号"
-        string  accounting_standard    "会計基準"
-        string  period_type            "開示粒度 annual/H1/Q1-3（既定annual・#219②）"
-        date    filing_date            "提出日（point-in-time基準・#219②）"
-        float   pl_revenue             "売上高（円）"
-        float   pl_cost_of_sales      "売上原価（円）"
-        float   pl_gross_profit       "売上総利益（円）"
-        float   pl_sga                "販売費及び一般管理費（円）"
-        float   pl_operating_profit   "営業利益（円）"
-        float   pl_nonoperating_income "営業外損益純額=経常-営業（円）"
-        float   pl_net_income          "純利益（円）"
-        float   pl_eps                 "EPS 1株利益（円）"
-        float   pl_ebitda              "EBITDA=営業利益+減価償却費（計算値・円）"
-        float   pl_rd_expenses         "研究開発費（円・C2）"
-        float   pl_depreciation        "減価償却費及び償却費（円・C2・EBITDA入力）"
-        float   pl_extraordinary_income "特別利益（円・C2・JGAAP概念）"
-        float   pl_extraordinary_loss  "特別損失（円・C2・JGAAP概念）"
-        float   bs_total_assets        "総資産（円）"
-        float   bs_receivables         "売上債権（円・契約資産やその他の債権を含む書類あり・#904）"
-        float   bs_inventory           "棚卸資産（円）"
-        float   bs_buildings           "建物及び構築物（純額・円）"
-        float   bs_machinery           "機械装置（純額・円）"
-        float   bs_ppe_total           "有形固定資産合計（純額・円・C2・内訳整合用）"
-        float   bs_intangible_assets   "無形固定資産（円）"
-        float   bs_investments_other_assets "投資その他の資産合計（円・C2）"
-        float   bs_payables            "買掛金（円）"
-        float   bs_bonds_payable       "社債（円）"
-        float   bs_current_portion_long_term_debt "1年内返済予定の長期借入金（円・#925）"
-        float   bs_commercial_paper    "コマーシャル・ペーパー（円・#925）"
-        float   bs_current_portion_bonds_payable "1年内償還予定の社債（円・#925）"
-        float   bs_paid_in_capital     "資本金（円）"
-        float   bs_retained_earnings   "利益剰余金（円）"
-        float   bs_total_equity        "純資産（円）"
-        float   bs_bps                 "BPS 1株純資産（円）"
-        float   bs_investment_securities "投資有価証券（円・清原式NC用）"
-        float   cf_operating_cf        "営業キャッシュフロー（円）"
-        float   cf_free_cf             "フリーCF=営業CF+投資CF（円）"
-        float   stock_price            "株価（収集時点スナップショット）"
-        float   market_cap             "時価総額（百万円・収集時点）※単位注意"
-        float   per                    "PER（収集時点スナップショット）"
-        float   pbr                    "PBR（収集時点スナップショット）"
-        float   employees              "従業員数（連結・非財務・C2）"
-        float   issued_shares          "期末発行済株式総数（表示・参考・C2）"
-        datetime created_at            "登録日時"
-        datetime updated_at            "更新日時"
+        int    id          PK
+        string edinet_code FK
     }
 
     regression_results {
-        string  edinet_code         PK "企業（複合PK）"
-        int     year                PK "決算年度（複合PK）"
-        string  period_end          PK "決算期末日（複合PK・空文字許容）"
-        float   predicted_market_cap   "OLS予測時価総額（百万円）"
-        float   gap_ratio              "乖離率（%）=(予測-実際)/実際"
-        string  model                  "ols / ridge"
-        string  sector                 "学習に使った業種"
-        datetime computed_at           "計算日時"
+        string edinet_code PK
+        int    year        PK
+        string period_end  PK
     }
 
     split_adjustment_factors {
-        string  edinet_code   PK "企業（複合PK）"
-        int     year          PK "決算年度（複合PK）"
-        float   factor           "累積 F。per/pbr/market_cap は ×F、div_yield/nc_ratio は ÷F"
-        float   shares_lag       "期末後分割の年の行の株数の遅れ（既定 1.0）。market_cap/nc_ratio/predicted_market_cap に掛ける・#753。sector_ols は issued_shares に掛ける・#758"
-        float   dps_lag          "期末後分割の年の行の配当の遅れ（既定 1.0）。div_yield を割る・#753。sector_ols は dps を割る・#758"
-        int     n_events         "F に寄与した企業イベント数（この年より後のものだけ）"
-        string  kinds            "寄与イベントの種別（split / composite / reverse / spinoff・昇順カンマ区切り。spinoff は登録表から・#740）"
-        datetime computed_at     "全置換した日時"
+        string edinet_code PK
+        int    year        PK
     }
 
     ttm_financial_records {
-        int     id            PK "自動採番"
-        string  edinet_code      "企業（(edinet_code, year) で一意）"
-        int     year             "今期 H1 の年度"
-        date    period_end       "今期 H1 の期末日（学習パネルの as-of はここ＋45日）"
-        date    filing_date      "今期 H1 の提出日"
-        date    prev_annual_period_end "材料: 前期の通期の期末日"
-        date    prev_h1_period_end     "材料: 前期の H1 の期末日"
-        float   split_factor     "今期 H1 の提出日より後に起きたイベントの積（VIEW が掛ける）"
-        float   bs_xxx           "ストック: 今期 H1 の期末値（欠けた列は前期通期から引き継ぐ）"
-        float   pl_xxx           "フロー: 前期通期 − 前期H1 + 今期H1"
-        float   cf_xxx           "同上"
-        datetime computed_at     "全置換した日時"
+        int id PK
     }
 
     jquants_adj_factor_events {
-        string  edinet_code   PK "企業（複合PK）"
-        string  event_date    PK "公式の企業イベント日 YYYY-MM-DD（複合PK）"
-        float   adj_factor       "過去株価に掛ける係数（1:2 分割は 0.5・F とは向きが逆）"
-        string  jq_code          "J-Quants 5桁コード（普通株＝末尾0だけ）"
-        datetime first_seen_at   "初めて残した日時"
-        datetime last_seen_at    "最後に観測した日時"
+        string edinet_code PK
+        string event_date  PK
     }
 
     jquants_adj_factor_coverage {
-        string  edinet_code    PK "企業（複合PK）"
-        string  first_bar_date PK "受け取った最初の日次バー YYYY-MM-DD（複合PK）"
-        string  last_bar_date  PK "受け取った最後の日次バー YYYY-MM-DD（複合PK）"
-        int     n_bars            "区間内のバー本数"
-        string  jq_code           "取得に使った5桁コード"
-        datetime fetched_at       "取得日時"
+        string edinet_code    PK
+        string first_bar_date PK
+        string last_bar_date  PK
     }
 
     macro_gbdt_scores {
-        string  edinet_code   PK "企業（最新スナップショットのみ・全置換）"
-        float   mu               "M-2 予測 52週先対数リターン μ̂（producer・ADR-0004）"
-        float   r1_prime         "確実性軸=コンフォーマル区間半幅（R3ゲート用・None可・ADR-0020）"
-        string  snapshot_date    "銘柄別スナップ日の代表値=中央値 YYYY-MM-DD（#417）"
-        string  snapshot_date_min "最古の銘柄のスナップ日（#417）"
-        int     n_stale          "代表値より古いスナップ日を持つ銘柄数（#417）"
-        datetime created_at      "計算日時"
+        string edinet_code PK
     }
 
     macro_dlm_scores {
-        string  edinet_code   PK "企業（最新スナップショットのみ・全置換）"
-        float   mu               "M-3 年率化アルファ μ̂（producer・#238）"
-        string  snapshot_date    "銘柄別最終週の代表値=中央値 YYYY-MM-DD（#417）"
-        string  snapshot_date_min "最古の銘柄の最終週（#417）"
-        int     n_stale          "代表値より古い銘柄数（#417）"
-        datetime created_at      "計算日時"
+        string edinet_code PK
     }
 
     macro_ensemble_scores {
-        string  edinet_code   PK "企業（最新スナップショットのみ・全置換）"
-        float   mu               "M-4 統合μ̂（M-1+M-2 スタッキング・ADR-0015）"
-        string  snapshot_date    "銘柄別スナップ日の代表値=中央値 YYYY-MM-DD（#417）"
-        string  snapshot_date_min "最古の銘柄のスナップ日（#417）"
-        int     n_stale          "代表値より古いスナップ日を持つ銘柄数（#417）"
-        datetime created_at      "計算日時"
+        string edinet_code PK
     }
 
     macro_enet_scores {
-        string  edinet_code   PK "企業（最新スナップショットのみ・全置換）"
-        float   mu               "M-6 予測 52週先対数リターン μ̂（producer・#396/ADR-0021）"
-        float   r1_prime         "確実性軸=コンフォーマル区間半幅（R3ゲート用・None可・ADR-0020）"
-        string  snapshot_date    "銘柄別スナップ日の代表値=中央値 YYYY-MM-DD（#417）"
-        string  snapshot_date_min "最古の銘柄のスナップ日（#417）"
-        int     n_stale          "代表値より古いスナップ日を持つ銘柄数（#417）"
-        datetime created_at      "計算日時"
+        string edinet_code PK
     }
 
     sell_quantile_scores {
-        string  edinet_code   PK "企業（最新スナップショットのみ・全置換。全社同値の回は空）"
-        float   q20              "売り専用の予測 S2＝52週先リターンの下側20%点（M-6 の実行が同じパネルで解く・#1202）。sell_ranking の既定の並びのキー（ADR-0076）"
-        string  snapshot_date    "M-6 と同じ代表値（sell_ranking が M-6 と食い違えば M-6 へ倒す）"
-        string  snapshot_date_min "最古の銘柄のスナップ日"
-        int     n_stale          "代表値より古いスナップ日を持つ銘柄数"
-        datetime created_at      "計算日時"
+        string edinet_code PK
     }
 
     macro_beta_meta {
-        int      id               PK "自動採番ID"
-        string   run_id           UK "推論ランID（UNIQUE）"
-        string   snapshot_date        "推論実行日 YYYY-MM-DD"
-        json     selected_factors     "選択された共有マクロ因子（pooled BIC・ADR-0002）"
-        json     factor_cov           "因子共分散Σ_macro（R_macro算出用）"
-        json     hyperparams          "推論ハイパラ（draws/tune/target_accept等・収束診断含む。極値を出した母数と変数別の分位も #600/#609）。data_asof＝μ̂ の as-of（パネルの最終週次バーの代表値・最古・古い銘柄数・#781）"
-        string   status               "収束ゲートの結果（live=producerが読む / quarantined=保全のみ・NULLは列導入前でlive扱い・#609）"
-        datetime created_at           "登録日時"
+        int    id     PK
+        string run_id UK
     }
 
     macro_beta_loadings {
-        int      id             PK "自動採番ID"
-        string   run_id             "推論ランID（macro_beta_meta と対応・FK的関係）"
-        string   edinet_code        "企業（インデックス）"
-        string   factor_name        "マクロ因子名 or \"_intercept\"（銘柄切片）"
-        float    loading_mean       "事後平均β（μ=intercept+Σβ_f·macro_f の係数・ADR-0002）"
-        float    loading_se         "事後SE（R1'確実性軸の素）"
-        datetime created_at         "登録日時"
+        int id PK
     }
 
     recommend_factor_premia {
-        int      id             PK "自動採番ID"
-        string   run_id             "算出ランID"
-        string   factor_name        "recommend.METRICS の1つ（z_roe等）"
-        float    mean_b             "期間別β_tの時系列平均（Fama-MacBeth・ADR-0008）"
-        float    newey_west_se      "Newey-West補正済みSE"
-        float    t_stat             "t値"
-        float    p_value            "p値"
-        int      n_periods          "回帰に使った有効期間数"
-        string   preprocess_version "推定時の断面前処理の世代（NULL=#509以前の生スケール・ADR-0039）"
-        datetime computed_at        "計算日時"
+        int id PK
     }
 
     jpx_listing_snapshots {
-        string   source             PK "data_j"
-        date     as_of_date         PK "data_j の日付（月末時点）"
-        string   sec_code           PK "証券コード（4桁・英字入りはそのまま）"
-        string   edinet_code           "書き込み時点の企業表で解決（ETF 等は NULL）"
-        string   market_segment        "市場・商品区分（生値）"
-        string   industry33            "33業種区分（生値）"
-        string   size_code             "規模コード（生値）"
-        string   size_class            "規模区分（生値・TOPIX Core30 … / '-'）"
-        string   file_sha256           "取り込んだ data_j の sha256"
-        datetime first_seen_at         "初めて観測した時刻（可視判定はこれ）"
-        datetime last_seen_at          "最後に観測した時刻（同じ時点を見直すたびに進む）"
+        string source     PK
+        date   as_of_date PK
+        string sec_code   PK
     }
 
     prediction_snapshots {
-        string   snapshot_date      PK "写した日（JST・YYYY-MM-DD）"
-        string   source             PK "mu_source（プラグイン名）か sector_ols"
-        string   edinet_code        PK "EDINETコード"
-        float    mu                    "52週先の予測（*_scores.mu＝各モデルの mu_raw）。gap の行は NULL"
-        float    r1_prime              "コンフォーマル区間半幅（持つモデルだけ）"
-        float    gap_ratio             "乖離率 %（sector_ols の行だけ）"
-        string   data_asof             "予測が使ったデータの時点（μ̂ は源の代表 as-of・gap は決算期末）"
-        string   code_version          "写した夜の git HEAD"
-        string   preprocess_version    "断面前処理の世代"
-        datetime created_at            "登録日時（追記のみ）"
+        string snapshot_date PK
+        string source        PK
+        string edinet_code   PK
     }
 
     trade_ledger {
-        int      id                 PK "自動採番ID"
-        string   sec_code              "証券コード（4桁・英字入りも可）"
-        string   side                  "buy / sell / split / void"
-        string   trade_date            "約定日・分割の効力日（YYYY-MM-DD）"
-        float    price                 "約定単価（当時の生の値・buy / sell だけ）"
-        float    quantity              "株数（当時の生の値・buy / sell だけ）"
-        float    split_ratio           "1株が何株になったか（split だけ）"
-        float    fee                   "手数料（円・buy / sell だけ）"
-        int      voids_id              "取り消す行の id（void だけ）"
-        string   memo                  "メモ"
-        datetime created_at            "登録日時（追記のみ）"
+        int id PK
     }
 
     nightly_model_diagnostics {
-        int      id                 PK "自動採番ID"
-        string   run_id                "1回の nightly_scores 実行で共通（UTC 時刻）"
-        string   model                 "プラグイン名（sector_ols / macro_enet）"
-        string   snapshot_date         "断面の代表日（無ければ NULL）"
-        string   code_version          "git HEAD（+dirty = 未コミット変更あり / unknown）"
-        string   preprocess_version    "断面前処理の世代（plugins.utils.PREPROCESS_VERSION）"
-        json     diagnostics           "DIAG_EXTRACTORS が許可したキーだけ（α・OOF 成績・業種別の統計）"
-        datetime created_at            "登録日時（追記のみ）"
+        int id PK
     }
 
     plugin_tuned_params {
-        string   plugin_name    PK "プラグイン名（M-1/M-2/M-3等・最新1件のみ）"
-        json     params_json        "自動調整済みベストパラメータ（execute にそのまま渡せる形・ADR-0007）"
-        string   objective_name     "目的関数（rank_ic/ic_ir/long_short）"
-        float    objective_value    "目的関数の達成値（そのとき存在したパネルでの値・単体では月をまたいだ比較に使えない）"
-        json     leaderboard_json   "上位20件の探索結果（肥大化防止）"
-        int      n_combos           "実際に評価した候補数（#638 以後。完走した回は計画数と一致）"
-        int      n_combos_planned   "計画した候補数（`n_combos` を下回れば予算の手前で畳んだ回・ADR-0054）"
-        string   data_fingerprint   "探索データのハッシュ（鮮度警告用）"
-        datetime tuned_at           "調整実行日時"
-        float    prev_objective_value     "直前の保存値（水準低下の WARNING を出した根拠・#590）"
-        float    champion_objective_value "本番 params を今回のパネルで測り直した値（ADR-0047）"
-        int      n_periods                "best の OOF fold 数（比較可能性の根拠・#590）"
-        int      n_oof_samples            "best の OOF サンプル数"
+        string plugin_name PK
     }
 
     stock_price_daily {
-        string  edinet_code  PK "企業への紐付け（PK1）"
-        string  trade_date   PK "取引日 YYYY-MM-DD（PK2）"
-        float   close           "終値（NOT NULL）"
-        float   volume          "出来高（VWAP算出用・週次集約時に消費）"
+        string edinet_code PK, FK
+        string trade_date  PK
     }
 
     stock_price_weekly {
-        string  edinet_code  PK "企業への紐付け（PK1）"
-        string  week_start   PK "ISO週の月曜 YYYY-MM-DD（PK2）"
-        string  trade_date      "週内最終営業日の実日付"
-        float   close_last      "最終営業日終値（実約定・チャート/バックテスト）"
-        float   volume_sum      "週内出来高合計（VWAP分母・欠落週はNULL）"
-        float   turnover_sum    "週内売買代金合計 Σ(close×vol)（VWAP分子・流動性変量）"
-        int     n_days          "週内に集約した営業日数（祝日週の信頼度）"
+        string edinet_code PK, FK
+        string week_start  PK
     }
 
     collection_logs {
-        int      id                 PK "自動採番ID"
-        string   job_type              "収集種別（full/incremental/single）"
-        string   status                "状態（running/done/error/resolved）"
-        datetime started_at           "開始日時"
-        datetime finished_at          "終了日時"
-        int      companies_processed  "処理企業数"
-        int      records_saved        "保存レコード数"
-        int      errors_count         "エラー件数"
-        text     message              "補足メッセージ"
+        int id PK
     }
 
     app_settings {
-        string   key        PK "設定キー（例: APP_PASSWORD）"
-        text     value         "設定値"
-        datetime updated_at   "最終更新日時"
+        string key PK
     }
 
     macro_data {
-        int      id           PK "自動採番ID"
-        string   series_code     "系列コード（USDJPY/US10Y/JP10Y_MOF/NIKKEI225/JP_REAL_GDP/WTI/BCOM/COPPER 等）"
-        string   series_name     "表示名"
-        string   category        "fx / rate / equity / commodity / credit / inflation / real_economy / labor / production / trade"
-        string   trade_date      "取引日（YYYY-MM-DD）。FRED 低頻度系列は公表ラグ分シフト済（#250）"
-        float    open            "始値"
-        float    high            "高値"
-        float    low             "安値"
-        float    close           "終値（NOT NULL）"
-        float    volume          "出来高（FX/金利系は NULL）"
-        datetime created_at      "登録日時"
+        int id PK
     }
 
     xbrl_raw_documents {
-        int      id              PK "自動採番ID"
-        string   doc_id          UK "EDINET書類管理番号（UNIQUE）"
-        string   edinet_code        "EDINETコード（インデックス）"
-        string   period_end         "決算期末日（YYYY-MM-DD）"
-        bytes    elements_gz        "XBRL全行をgzip圧縮したJSON（BYTEA）"
-        string   elements_format    "圧縮方式（gzip+json）"
-        int      n_rows             "圧縮前の行数（健全性チェック用）"
-        datetime fetched_at         "raw保存日時"
+        int    id     PK
+        string doc_id UK
     }
 
     statement_disclosure {
-        string  disc_no      PK "DiscNo（J-Quants開示番号・グローバルに一意）"
-        string  edinet_code  FK "企業への紐付け"
-        string  sec_code         "証券コード"
-        string  disc_date        "DiscDate YYYY-MM-DD（point-in-timeキー）"
-        string  disc_time        "DiscTime HH:MM:SS"
-        string  doc_type          "DocType（FYFinancialStatements_Consolidated_IFRS等）"
-        string  cur_per_type      "当期区分 FY/1Q/2Q/3Q"
-        string  cur_per_st        "当期開始日"
-        string  cur_per_en        "当期終了日"
-        string  cur_fy_st         "当期年度開始日"
-        string  cur_fy_en         "当期年度終了日"
-        string  nxt_fy_st         "翌期年度開始日"
-        string  nxt_fy_en         "翌期年度終了日"
-        float   sales             "実績 売上高"
-        float   op                "実績 営業利益"
-        float   odp               "実績 経常利益（IFRS採用企業は概念なしで空）"
-        float   np                "実績 純利益"
-        float   eps               "実績 EPS"
-        float   deps              "実績 潜在調整後EPS"
-        float   div_ann           "実績 年間配当"
-        float   f_sales           "当期予想 売上高"
-        float   f_op              "当期予想 営業利益"
-        float   f_odp             "当期予想 経常利益"
-        float   f_np              "当期予想 純利益"
-        float   f_eps             "当期予想 EPS"
-        float   f_div_ann         "当期予想 年間配当"
-        float   nxf_sales         "翌期予想 売上高"
-        float   nxf_op            "翌期予想 営業利益"
-        float   nxf_odp           "翌期予想 経常利益"
-        float   nxf_np            "翌期予想 純利益"
-        float   nxf_eps           "翌期予想 EPS"
-        float   sh_out_fy         "期末発行済株式数（自己株含む・ShOutFY・#462）"
-        float   tr_sh_fy          "期末自己株式数（TrShFY・#462）"
-        datetime created_at       "登録日時"
+        string disc_no     PK
+        string edinet_code FK
     }
 
     companies         ||--o{  financial_records    : "1社 → 複数年度の財務データ"
@@ -679,6 +433,38 @@ erDiagram
     companies         ||--o{ jquants_adj_factor_coverage : "1社 → 公式バーを受け取った区間（#668・追記）"
     macro_beta_meta    ||--o{ macro_beta_loadings  : "1推論ラン(run_id) → 複数因子ローディング"
 ```
+
+**表と `database.py` のクラスの対応**（列の定義と説明は各クラスが正本。図には主キー・外部キー・単一列の一意キーだけを載せ、複数列の一意制約は載せない）:
+
+| 表 | クラス（[database.py](../database.py)） | 役割 |
+|---|---|---|
+| `companies` | `Company` | 企業マスタ（1社1行・上場状態と Yahoo のサフィックスを持つ） |
+| `financial_records` | `FinancialRecord` | XBRL 再分類の財務値と収集時点の市場スナップショット（通期・H1 は `period_type` で区別） |
+| `regression_results` | `RegressionResult` | 業種別回帰の予測時価総額と乖離率（`financial_metrics` VIEW が結合する） |
+| `split_adjustment_factors` | `SplitAdjustmentFactor` | バリュエーション列の分割補正係数 F と基準の遅れ（毎晩全置換・ADR-0055） |
+| `ttm_financial_records` | `TtmFinancialRecord` | 直近12か月（TTM）の合成行（毎晩全置換・ADR-0051） |
+| `jquants_adj_factor_events` | `JQuantsAdjFactorEvent` | J-Quants の公式 AdjFactor のイベント（最新年の分割倍率の出どころ） |
+| `jquants_adj_factor_coverage` | `JQuantsAdjFactorCoverage` | 公式の日次バーを受け取った区間（公式の不在を判定する根拠） |
+| `macro_gbdt_scores` | `MacroGbdtScore` | M-2 の μ̂（最新のみ・全置換） |
+| `macro_dlm_scores` | `MacroDlmScore` | M-3 の μ̂（最新のみ・全置換） |
+| `macro_ensemble_scores` | `MacroEnsembleScore` | 退役した M-4 の μ̂（ADR-0044） |
+| `macro_enet_scores` | `MacroEnetScore` | M-6 の μ̂（最新のみ・全置換） |
+| `sell_quantile_scores` | `SellQuantileScore` | 売り専用の予測 S2（52週先リターンの下側20%点・ADR-0076） |
+| `macro_beta_meta` | `MacroBetaMeta` | M-1 の推論ラン1回分のメタ情報（収束ゲートの結果 `status` を含む） |
+| `macro_beta_loadings` | `MacroBetaLoading` | M-1 の銘柄×因子の事後ローディング |
+| `recommend_factor_premia` | `RecommendFactorPremium` | 推奨の「統計的最適化」プリセットの因子プレミアム（ADR-0008） |
+| `jpx_listing_snapshots` | `JpxListingSnapshot` | 東証上場銘柄一覧の月次断面 |
+| `prediction_snapshots` | `PredictionSnapshot` | 予測の月次の写し（追記のみ・答え合わせ用） |
+| `trade_ledger` | `TradeLedgerEntry` | 売買の記録（追記のみ・訂正は取消の行） |
+| `nightly_model_diagnostics` | `NightlyModelDiagnostic` | 夜間の producer の診断値（追記のみ・ADR-0061） |
+| `plugin_tuned_params` | `PluginTunedParams` | 自動調整の最新のベストパラメータ（ADR-0007） |
+| `stock_price_daily` | `StockPriceDaily` | 直近6か月の日次終値と出来高 |
+| `stock_price_weekly` | `StockPriceWeekly` | 全履歴の週次集約（終値・出来高・売買代金） |
+| `collection_logs` | `CollectionLog` | 収集ジョブの実行記録 |
+| `app_settings` | `AppSetting` | アプリ設定のキーと値 |
+| `macro_data` | `MacroData` | マクロ系列の日次（企業に紐づかない） |
+| `xbrl_raw_documents` | `XbrlRawDocument` | XBRL の全行を gzip で保存した原本（再解析用） |
+| `statement_disclosure` | `StatementDisclosure` | J-Quants の決算短信サマリー（会社予想・期末株式数） |
 
 > **`financial_metrics`（VIEW・物理テーブルではない）**: `financial_records` をソースに、
 > `op_margin` / `net_margin` / `roe` / `roa` / `equity_ratio` / `interest_bearing_debt` / `de_ratio` / `cf_ratio` /
