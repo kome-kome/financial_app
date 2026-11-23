@@ -54,6 +54,8 @@
 | [`scripts/buy_lead_watch.py`](#scriptsbuy_lead_watchpy) | 検証（計測） |
 | [`scripts/measure_selection_optimism.py`](#scriptsmeasure_selection_optimismpy) | 検証（計測） |
 | [`scripts/measure_live_oos.py`](#scriptsmeasure_live_oospy) | 検証（計測） |
+| [`scripts/measure_transformer.py`](#scriptsmeasure_transformerpy) | 検証（計測） |
+| [`scripts/refresh_producer.py`](#scriptsrefresh_producerpy) | ユーティリティ |
 | [`scripts/experiment_pooled_rhat.py`](#scriptsexperiment_pooled_rhatpy) | 検証（実験） |
 | [`scripts/bench_macro_beta.py`](#scriptsbench_macro_betapy) | 検証（計測） |
 | [`scripts/bench_macro_beta_report.py`](#scriptsbench_macro_beta_reportpy) | 検証（計測） |
@@ -328,6 +330,27 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 **本番予測の月次の写しを、写した後に出た答えで採点する**（#1157・事前登録 `docs/prereg/live-oos.md`）: `python -m scripts.measure_live_oos --prereg docs/prereg/live-oos.md --prereg-sha <凍結値> [--today YYYY-MM-DD] [--out <json>]`。`prediction_snapshots` の全行（値は `prediction_snapshots.value_column`）を、社ごとの週次足の**写した日以前の最後の足**を起点にした 52 本先（13 本先）の終値との対数リターン（値上がりだけ・ADR-0073）で採点する。成熟（写した日 + 週数が計測した日と全社の最新の足の両方以前）していない写しは数えない。途中で上場廃止した社（`ended`）は最後の正の終値で手仕舞った答えで足す（#1195・[ADR-0075](adr/0075-delisted-rows-are-scored-only-in-the-live-check.md)。OOF の比較と学習は足さない）。主審は M-6 − M-2（写した時点の本番の設定）の上位10社超過の写し別系列の対比較で、両方に値がある写しを日付順に並べた**最初の 36 本だけ**を `model_stats.paired_ic_significance`（平均ブロック長 12＝52 週の答えが隣の 11 か月と重なるため・α 0.05）に掛ける。36 本未満は `accumulating`（2030-09 ごろまで）。参考は各源自身の母集団の指標・上位層の売り側spread（`in_layer_short_side`・源ごとに単独）・上場廃止した社を外した版（`delisted_excluded`）・起点を `data_asof` にした版（μ̂ の源だけ）・13 週の版（この 2 つも上場廃止した社を足す）。守ること: **起点は写した日にそろえる**（同じ写しの同じ社はどの源でも同じ答え。`data_asof` は月次のモデルほど古く、源ごとに窓がずれる）／**値が全部空の源の写し（μ̂ 無しで写された源）はその源だけ外す**（過去の写しは書き換えない）／**判定に使う写しは最初の 36 本に固定する**（後から何度回しても同じ判定）／**DB へは書かない**（書く関数を呼ばない。週次株価は `.weekly_cache/` を通る）。凍結値が合わなければ終了コード 2、写しか週次株価が空なら 3。成熟した写しが 0 本でも 0 で終わり、その実走は事前登録の「回した」に数えない。日中枠 `measure:live-oos`（並走に敏感・数分・積むのは #1157 を再開したセッション。13 週の中間点検は 2027-01-25 以降、52 週は毎年 10 月下旬）。結果は既定 `scripts/.cache/live_oos.json`
 
 種別: 検証（計測） ／ 依存先: prediction_snapshots.py、plugins/macro_snapshots.py（`oof_backtest`・`in_layer_short_side`・`load_weekly_prices_chunked`）、model_stats.py、scripts/measure_label_audit.py（`ENDED_MARGIN_DAYS`）、scripts/index_exposure.py（`MODEL_SOURCES`）、scripts/prereg.py ／ テスト: tests/test_live_oos.py
+
+## `scripts/measure_transformer.py`
+
+事前登録 `docs/prereg/m7-transformer.md` の計測（#1316）。M-7 を M-6・M-2（スキーマ既定）と比べ、値動きの系列の上乗せを測る。日中枠 `measure:m7-transformer`（単独で積む・`deps_smoke` つき）。結果は `scripts/.cache/m7_transformer.json`。
+
+- 主審は `model_comparison.run_comparison(only_models=[macro_gbdt, macro_enet, macro_transformer])` の `significance_matrix` を**そのまま読む**（3 組の Bonferroni・再計算しない＝ADR-0041）。対照は系列なしの M-7（`use_sequence=False`）との rank-IC の差（`paired_ic_significance`・α 0.05）。参考は上位10社超過の差（検定しない）・各モデルの要約・種 43／44 の M-7 の rank-IC
+- 比較の外の採点（系列なし・別の種）は `model_comparison.score_once`（比較の行と同じ objective_only・dry_run・display_scoring）で行い、1 つの `shared_snapshot_cache` で共有する（`run_comparison` は自分のキャッシュを持つので、パネルは合わせて 2 回作る）
+- 判定は `prereg_decision`（§4 を機械的に・M-7 が M-6 に有意に勝ち M-2 に有意に負けない＝昇格を検討／両方に有意に負ける＝退役／それ以外＝据え置き）。昇格でも系列の上乗せが有意でなければ `note` を付ける
+- 守ること: 凍結値の不一致は重い計算の前に終了コード 2（`prereg.stamp_from_args`）。採点できない行や、OOF の期数・行数が 4 行（M-2・M-6・M-7・系列なし）でそろわなければ終了コード 3 で判定しない（`check_alignment`）。日中キューの `--prereg-sha` は追記節の凍結値と一致する（テストが照合）
+
+種別: 検証（計測） ／ 依存先: model_comparison.py（`run_comparison`・`score_once`）、model_stats.py（`paired_ic_significance`）、plugins/macro_transformer.py、plugins/tuning.py（`seed_override`）、scripts/prereg.py ／ テスト: tests/test_measure_transformer.py
+
+## `scripts/refresh_producer.py`
+
+夜間に回さない producer を 1 つ既定パラメータで回し、今回の保存を確かめる CLI（#1317）。日中枠 `model:macro_transformer` が呼ぶ。
+
+- `nightly_scores.run_models` を共有する（`shared_snapshot_cache`・`VERIFIERS`・`failed_labels` を書き写さない）。**予測の写し（`snapshot_predictions`）はしない**——写しは暦を持つ本番の源だけのもの
+- 回せるのは `VERIFIERS` があり `NIGHTLY_MODELS` に無いモデルだけ（夜間のモデルは写しを飛ばすので拒む・終了コード 2）。失敗は終了コード 1
+- 名前を `run_` で始めないのは、`scripts/run_*.py` が定期バッチとして `batch_freshness.WATCHED` の照合対象になるため（これは暦を持たない）
+
+種別: ユーティリティ ／ 依存先: nightly_scores.py、database.py ／ テスト: tests/test_refresh_producer.py
 
 ## `scripts/experiment_pooled_rhat.py`
 

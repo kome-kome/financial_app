@@ -243,6 +243,10 @@ erDiagram
         string edinet_code PK
     }
 
+    macro_transformer_scores {
+        string edinet_code PK
+    }
+
     sell_quantile_scores {
         string edinet_code PK
     }
@@ -344,6 +348,7 @@ erDiagram
 | `macro_dlm_scores` | `MacroDlmScore` | M-3 の μ̂（最新のみ・全置換） |
 | `macro_ensemble_scores` | `MacroEnsembleScore` | 退役した M-4 の μ̂（ADR-0044） |
 | `macro_enet_scores` | `MacroEnetScore` | M-6 の μ̂（最新のみ・全置換） |
+| `macro_transformer_scores` | `MacroTransformerScore` | M-7（比較用）の μ̂（最新のみ・全置換）。分析画面の保存済み一覧だけが読む（#1317） |
 | `sell_quantile_scores` | `SellQuantileScore` | 売り専用の予測 S2（52週先リターンの下側20%点・ADR-0076） |
 | `macro_beta_meta` | `MacroBetaMeta` | M-1 の推論ラン1回分のメタ情報（収束ゲートの結果 `status` を含む） |
 | `macro_beta_loadings` | `MacroBetaLoading` | M-1 の銘柄×因子の事後ローディング |
@@ -992,6 +997,15 @@ classDiagram
         +execute() ElasticNet（build_interactions=False）で μ̂ 推定 → macro_enet_scores へ保存（売りの画面の参考表示と、S2 が使えない回の並び）。同じパネルで S2（下側20%点）も解き sell_quantile_scores へ（#1202・売りの並びの既定のキー・ADR-0076）
     }
 
+    class MacroTransformerPlugin {
+        +name = "macro_transformer"
+        +label = "時系列 Transformer（M-7）"
+        +depends_on = []
+        +heavy = True
+        +params_schema() fin_features/use_sequence/d_model/n_layers/dropout/learning_rate/max_epochs/patience 等（探索空間なし）
+        +execute() 直近52週の値動き・出来高の系列（weekly_sequences）＋財務を JAX の Transformer（seq_transformer）で学習 → macro_transformer_scores へ保存（比較用・ADR-0079）
+    }
+
     class MacroGbdtRankPlugin {
         +name = "macro_gbdt_rank"
         +label = "ランク学習（M-5）"
@@ -1031,6 +1045,7 @@ classDiagram
     AnalysisPlugin <|-- MacroDlmPlugin
     AnalysisPlugin <|-- MacroEnsemblePlugin
     AnalysisPlugin <|-- MacroEnetPlugin
+    AnalysisPlugin <|-- MacroTransformerPlugin
     MacroGbdtPlugin <|-- MacroGbdtRankPlugin
 
     PluginsInit --> AnalysisPlugin : 管理・呼び出し
@@ -1045,6 +1060,8 @@ classDiagram
     note for MacroRiskReturnPlugin "財務OLS+LassoLarsIC(BIC)選択+OLS再フィット+walk-forward CV+James-Stein縮小（μ 側のマクロ・交差項は use_macro で足せるが既定 OFF・#615。マクロ起因リスク r_macro は横軸として残る）\nリスク軸 R1/R2/R3 を risk_axis で切替（効用U/Pareto/top_nはクライアント側後処理＝即時切替）\n期待リターン基準は μ_raw（μ_shrunk は低シグナル時に全社セクター平均へ潰れるため表の参考列のみ）。散布図は全社描画＋効用上位N強調・両軸[p1,p99]固定（効用上位Nのみだとリスク方向に潰れるため）。軸外れ値は三角マーカーで端に境界表示・フロンティア線は実値描画（chartArea で切断）・対数X軸トグルあり（M-1/M-2/M-3/M-6共通・analysis.js の _mrrGeom/_mrrLogAxisRange。M-2 と M-6 は描画一式を共通ビュー _riskReturnView で共有・#807）\n（R3=セクター×サイズ別バケットの CV 残差 RMSE・サイズ代理 bs_total_assets）\nマクロ計算は日付メモ化で高速化（既定219s→29s）\nheavy=True / use_macro=False で純財務モデルにも縮退"
     note for MacroEnetPlugin "ADR-0021 の bake-off で M-2 に有意優位＝正式兄弟へ昇格\nproducer = macro_enet_scores・同じ実行で売りの並びのキー S2（sell_quantile_scores）も作る（ADR-0076）
 画面は M-2 と同じ散布図で縦軸は相対 μ̂（mu_rel＝今買える社の中央値との差・水準は未検証）・λ 既定 0・行クリックで線形の内訳（合計＝μ̂）・#807"
+    note for MacroTransformerPlugin "比較用（ADR-0079）。朝の買い候補・売り判定・mu_source には入らない
+パネルは M-6 のスキーマ既定・同じ fold。処遇は事前登録 docs/prereg/m7-transformer.md の判定で決める（#1316）"
     note for MacroGbdtRankPlugin "退役＝hidden=True（#570・ADR-0044）\n実測で M-2 に有意劣後（ADR-0017 の実測節）\nサイドバーから除外・実行経路と比較行は残す"
     note for MacroEnsemblePlugin "退役＝hidden=True（#570・ADR-0044）\n統合が M-6 単体を上回らない（ADR-0044）\nサイドバーと mu_source から除外・実行経路と比較行は残す"
     note for AnalysisPlugin "params_schema() はパラメータ契約（CONTEXT.md）:\ntype=ウィジェット / dtype=データ型 の2軸。\nexecute は coerce 済み typed params を受け取り、\n意味的 validation だけ持つ（型変換・default・\nbounds/membership は coerce_params が担う）"
@@ -1289,6 +1306,9 @@ graph TB
 | `plugins/macro_ensemble.py` | バックエンド | **M-4** 兄弟μ̂スタッキング（ADR-0015・基底 M-1+M-2+M-6 を `BASE_MODELS` 定数駆動・二段ウォークフォワード NNLS）。**退役＝`hidden=True`**（#570/ADR-0044・統合が M-6 単体を上回らない。サイドバーと `mu_source` から除外・実行経路と比較行は残す）。producer＝`macro_ensemble_scores`・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_ensemblepy) | plugins/macro_snapshots.py, plugins/macro_gbdt.py, plugins/macro_risk_return.py, scipy, xgboost |
 | `plugins/macro_gbdt_rank.py` | バックエンド | **M-5** マクロ×財務 ランク学習（ADR-0017・M-2 を継承し4フックのみ override）。**退役＝`hidden=True`**（#570/ADR-0044・実測で M-2 に有意劣後＝数値は ADR-0017 の実測節。サイドバーから除外・実行経路と比較行は残す）。**producer なし＝OOF 比較専用**・`heavy=True`。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_gbdt_rankpy) | plugins/macro_gbdt.py, plugins/utils.py, xgboost, shap |
 | `plugins/macro_enet.py` | バックエンド | **M-6** マクロ×財務の正則化線形（ElasticNet・ADR-0021）。producer＝`macro_enet_scores`・`heavy=True` で、同じパネルで売り専用の予測 S2 も解いて `sell_quantile_scores` へ保存する。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_enetpy) | plugins/model_candidates.py, plugins/macro_snapshots.py, plugins/utils.py, scikit-learn |
+| `plugins/macro_transformer.py` | バックエンド | **M-7** 時系列 Transformer（比較用・ADR-0079）。直近52週の値動き・出来高の系列と財務から52週先リターンを当てる。producer＝`macro_transformer_scores`・`heavy=True`・暦なし。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmacro_transformerpy) | plugins/seq_transformer.py, plugins/weekly_sequences.py, plugins/macro_snapshots.py, plugins/macro_enet.py |
+| `plugins/seq_transformer.py` | バックエンド | M-7 の JAX 実装（encoder・AdamW・early stopping・walk-forward へ渡す fit_predict）。jax は関数の中で読む。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsseq_transformerpy) | jax, jax_import_guard.py, plugins/utils.py, plugins/weekly_sequences.py |
+| `plugins/weekly_sequences.py` | バックエンド | M-7 の入力系列（numpy だけ）。週次株価を暦の週へ整列し、週内横断 z のリターン・出来高の外れ・観測の印を月末の週を末尾とする窓にする。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsweekly_sequencespy) | plugins/macro_snapshots.py, plugins/utils.py |
 | `plugins/model_candidates.py` | バックエンド | **兄弟モデル候補メニュー（探索枠・ADR-0021）**。`walk_forward_cv_monthly(fit_predict=…)` へ注入する候補ファクトリ集約。**プラグインではない**（レジストリ非登録・API 非公開）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsmodel_candidatespy) | plugins/utils.py, recommend_factor_premia.py, scikit-learn, (lightgbm/catboost 任意) |
 | `plugins/utils.py` | バックエンド | `coerce_params()`・`ols()`・`normalize()`・`winsorize()`・`walk_forward_cv_monthly()`・`get_macro_features()` 等の共通ユーティリティ。ベクトル化後も旧実装とビット単位で同一値。`get_macro_features` は `macro_data` を3列指定で引く（`_preload_macro_impl` と同一・#482）。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsutilspy) | — |
 | `plugins/progress.py` | バックエンド | heavy な分析の実行進捗と画面からの取消を流す唯一の経路（#545・#849）。sink 未設定なら no-op で、`PROGRESS_COVERAGE` を `tests/test_plugin_progress.py` が実体と照合する。詳細は [PLUGIN_REFERENCE.md](PLUGIN_REFERENCE.md#pluginsprogresspy) | — |
@@ -1347,6 +1367,8 @@ graph TB
 | [`scripts/buy_lead_watch.py`](SCRIPTS_REFERENCE.md#scriptsbuy_lead_watchpy) | 検証（計測） | 買いの主役（M-6）と M-2 の差を、OOF の期が増えるたびに点検する読むだけの CLI（#1225・事前登録 `docs/prereg/buy-lead-watch.md`）。`measure_delisting_redesign` の結果の `series` から全期と直近の窓の差を出し、事前に決めた条件に続けて当たったら買いの主役を見直す Issue を起票する合図を出す。DB を触らず、本番は切り替えない | model_stats.py, scripts/prereg.py |
 | [`scripts/measure_selection_optimism.py`](SCRIPTS_REFERENCE.md#scriptsmeasure_selection_optimismpy) | 検証（計測） | M-6 と本番の設定の M-2 を上位10社で公平に比べる（#1155・事前登録 `docs/prereg/selection-optimism.md`）。本番の探索と同じ 150 候補を 1 つのパネルで回し、各 test 期で 12 か月前までに答えが出そろった期だけを使って本番と同じ規則で設定を選び直した M-2（時間順）と、本番の設定の M-2（楽観込み）を、M-6 と上位10社超過の対比較で比べる。本番の探索の結果は変えない。日中枠 `measure:selection-optimism` | scripts/oof_portfolio_replay.py, plugins/tuning.py, scripts/ensemble_base_bakeoff.py, scripts/run_daytime.py, tuning_cycle.py, scripts/prereg.py |
 | [`scripts/measure_live_oos.py`](SCRIPTS_REFERENCE.md#scriptsmeasure_live_oospy) | 検証（計測） | 本番予測の月次の写しを、写した後に出た答えで採点する読むだけの CLI（#1157・事前登録 `docs/prereg/live-oos.md`）。起点は写した日以前の最後の週次足、答えは 52 週（13 週）先の値上がり。M-6 − M-2（写した時点の本番の設定）の上位10社超過を、共通の成熟した写しの最初の 36 本だけで対にして検定する（平均ブロック長 12）。DB へは書かない。日中枠 `measure:live-oos` | prediction_snapshots.py, plugins/macro_snapshots.py, model_stats.py, scripts/measure_label_audit.py, scripts/index_exposure.py, scripts/prereg.py |
+| [`scripts/measure_transformer.py`](SCRIPTS_REFERENCE.md#scriptsmeasure_transformerpy) | 検証（計測） | M-7 を M-6・M-2（スキーマ既定）と比べ、値動きの系列の上乗せを測る（#1316・事前登録 `docs/prereg/m7-transformer.md`）。主審は `run_comparison` の `significance_matrix`、対照は系列なしの M-7。判定を `prereg_decision` に機械的に出す。日中枠 `measure:m7-transformer` | model_comparison.py, model_stats.py, plugins/macro_transformer.py, plugins/tuning.py, scripts/prereg.py |
+| [`scripts/refresh_producer.py`](SCRIPTS_REFERENCE.md#scriptsrefresh_producerpy) | ユーティリティ | 夜間に回さない producer を 1 つ既定パラメータで回し、保存を確かめる（`nightly_scores.run_models` を共有・予測の写しはしない）。日中枠 `model:macro_transformer` | nightly_scores.py, database.py |
 | [`scripts/measure_top_k_veto.py`](SCRIPTS_REFERENCE.md#scriptsmeasure_top_k_vetopy) | 検証（計測） | 拒否権に使う K（上位何社で測るか）を事前登録 `docs/prereg/top-k-veto.md` の規則で決める（#1044・ADR-0069）。日中枠 `measure:top-k-veto` ほか | model_comparison.py, model_stats.py, scripts/prereg.py |
 | [`scripts/experiment_pooled_rhat.py`](SCRIPTS_REFERENCE.md#scriptsexperiment_pooled_rhatpy) | 検証（実験） | r_hat プール仮説の read-only 実験（Issue #341）。 | macro_beta_inference.py |
 | [`scripts/bench_macro_beta.py`](SCRIPTS_REFERENCE.md#scriptsbench_macro_betapy) | 検証（計測） | `macro_beta` の所要を段階別に測る計測ハーネス（Issue #512「ローカルが GHA の6.4倍以上遅い」の切り分け）。 | macro_beta_inference.py, scripts/experiment_pooled_rhat.py, scripts/_cache.py |

@@ -161,6 +161,7 @@ td code{background:var(--bg-sunken);border:1px solid var(--border-subtle);paddin
     <a href="#m13">スタッキング（M-4・退役）</a>
     <a href="#m14">ランク学習（M-5・退役）</a>
     <a href="#m16">正則化線形（M-6）</a>
+    <a href="#m17">時系列 Transformer（M-7・比較用）</a>
     <div class="toc-section-title">戦略を検証（メタ検証）</div>
     <a href="#m7">バックテスト</a>
     <div class="toc-section-title">保有を見直す（双対分析）</div>
@@ -892,6 +893,54 @@ conv_score₁₂ₘ = max(<span class="val">5</span>, min(<span class="val">95</
       <strong>Politis, D. N. &amp; Romano, J. P. (1994)</strong>. "The Stationary Bootstrap."
       <em>Journal of the American Statistical Association</em> 89(428), 1303-1313.（昇格判定に使った有意差検定）<br>
       <a href="https://doi.org/10.1080/01621459.1994.10476870" target="_blank" rel="noopener">https://doi.org/10.1080/01621459.1994.10476870</a>
+    </div>
+  </div>
+</div>
+
+<div class="model-section" id="m17">
+  <h2>時系列 Transformer（M-7） <span class="model-tag">将来リターンを予測</span></h2>
+  <span class="file-tag">plugins/macro_transformer.py（系列: plugins/weekly_sequences.py・学習: plugins/seq_transformer.py）— POST /api/plugins/macro_transformer/run</span>
+
+  <p>M-2・M-6 は「1 社×1 月末」の断面を 1 行として学習し、各社の過去の値動きの<strong>並び</strong>は読まない。M-7 は<strong>同じ答え（52 週先の対数リターン）・同じパネル・同じ fold</strong> のまま、直近の値動きと出来高の系列を Transformer（自己注意）で読み、財務の列と合わせて月内の順位を当てる。<strong>比較用のモデル</strong>で、朝の買い候補・売り判定・おすすめ銘柄の μ̂ の出所には使わない（ADR-0079）。</p>
+
+  <h3>入力</h3>
+  <ul>
+    <li><strong>系列</strong>: 月末の週を末尾とする直近の週。週ごとに、週次リターンを同じ週の全社で標準化した値（市場全体の上げ下げが消える）・出来高の自社の過去平均からの外れ（同じ週の全社で標準化）・観測の印の 3 つ。数週を 1 トークンにまとめ（PatchTST 型）、要約用のトークン（CLS）を置く</li>
+    <li><strong>上場して間もない社も行を落とさない</strong>（0 埋め＋観測なしの印）。M-2/M-6 と比べる母集団をそろえるため（ADR-0045）</li>
+    <li><strong>財務</strong>: M-2/M-6 と同じ既定の財務列を別の枝から入れる。前処理は学習 fold の中で fit する</li>
+  </ul>
+
+  <h3>構造と学習</h3>
+  <p>パッチの埋め込み → 学習する位置埋め込み → pre-LN の encoder（多頭の自己注意＋GELU の FFN）→ CLS の出力を、財務の枝と結合して 1 つの値を出す。浅い NN が最良だった Gu, Kelly &amp; Xiu (2020) にならい、パラメータは数万に留める。答えは fold の中で winsorize し、<strong>学習月ごとに平均を引いて</strong>から学ぶ（当てるのは月内の順位だけ）。損失は二乗誤差（順位で学習した M-5 が負けた・ADR-0017）、最適化は AdamW。学習回数は、学習期間の末尾の月を検証に回し学習との間に最大 12 か月の空白を置いた early stopping で決め、その回数で学習期間の全体を学習し直してから予想する。既定値はコード（<code>plugins/seq_transformer.py</code>）が正本。</p>
+
+  <h3>リーク対策と検証</h3>
+  <ul>
+    <li>週の横断統計はその週の値だけで作る。窓は月末の週より後を読まない。過去のサンプルの 52 週先の答えは入力にしない</li>
+    <li>既知の小さな漏れ: 同じ暦週で、ある社の最終足が木曜でも、他社の金曜の終値が横断の正規化に混ざる（1 日分）</li>
+    <li>交差検証の関数は学習の例外を黙って捨てるので、M-7 は例外を記録して CV の後に送出し、fold の数も照合する</li>
+    <li>テストラベルを差し替えても、月末より後の株価を書き換えても予測がビット一致すること、合成データで系列の信号を学べることをテストで縛る</li>
+  </ul>
+
+  <h3>処遇の決め方</h3>
+  <p>見立ては「差なし」が最有力（株価由来の特徴は共通域で効かず＝ADR-0045、木の M-2 も線形の M-6 を超えない）。事前登録（<code>docs/prereg/m7-transformer.md</code>）の計測が、M-6・M-2（スキーマ既定）との rank-IC の対比較と、系列を外した版との差を出し、<strong>昇格を検討／比較用で据え置き／退役（hidden）</strong>を機械的に決める。計測までは実データで回さない。暦は持たず、日中キューへ人が積んだときだけ回る。</p>
+
+  <div class="refs">
+    <h4>参考文献</h4>
+    <div class="ref-item">
+      <strong>Vaswani, A. et al. (2017)</strong>. "Attention Is All You Need." <em>Advances in Neural Information Processing Systems 30</em>.<br>
+      <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener">https://arxiv.org/abs/1706.03762</a>
+    </div>
+    <div class="ref-item">
+      <strong>Nie, Y. et al. (2023)</strong>. "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers." <em>ICLR 2023</em>.<br>
+      <a href="https://arxiv.org/abs/2211.14730" target="_blank" rel="noopener">https://arxiv.org/abs/2211.14730</a>
+    </div>
+    <div class="ref-item">
+      <strong>Loshchilov, I. &amp; Hutter, F. (2019)</strong>. "Decoupled Weight Decay Regularization." <em>ICLR 2019</em>.<br>
+      <a href="https://arxiv.org/abs/1711.05101" target="_blank" rel="noopener">https://arxiv.org/abs/1711.05101</a>
+    </div>
+    <div class="ref-item">
+      <strong>Gu, S., Kelly, B. &amp; Xiu, D. (2020)</strong>. "Empirical Asset Pricing via Machine Learning." <em>The Review of Financial Studies</em> 33(5), 2223-2273.<br>
+      <a href="https://doi.org/10.1093/rfs/hhaa009" target="_blank" rel="noopener">https://doi.org/10.1093/rfs/hhaa009</a>
     </div>
   </div>
 </div>
