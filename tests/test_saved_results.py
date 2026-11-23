@@ -239,7 +239,7 @@ class TestScreenWiring:
         code = "\n".join(line for line in js.splitlines() if not line.lstrip().startswith("//"))
         for old in ("μ_raw", ">μ</span>", "μ̂(年率)", "μ_shrunk"):
             assert old not in code, old
-        assert code.count("muHeadCell(MU_HEAD.forecast,") == 3   # M-1・M-2・M-6
+        assert code.count("muHeadCell(MU_HEAD.forecast,") == 4   # M-1・M-2・M-6・M-7
         assert code.count("muHeadCell(MU_HEAD.dlm,") == 1        # M-3
         with open(os.path.join(ROOT, "templates", "analysis.html"), encoding="utf-8") as f:
             assert "μ_raw" not in f.read()
