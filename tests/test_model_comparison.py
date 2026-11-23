@@ -276,7 +276,7 @@ class TestProductionVariant:
     def test_the_production_row_follows_the_default_row(self, monkeypatch):
         self._setup(monkeypatch)
         res = _run(include_production=True)
-        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-2（本番）", "M-3", "M-4", "M-5", "M-6"]
+        assert [m["short"] for m in res["models"]] == ["M-1", "M-2", "M-2（本番）", "M-3", "M-4", "M-5", "M-6", "M-7"]
         prod = res["models"][2]
         assert prod["name"] == "macro_gbdt" and prod["selection_optimism"] is True
         assert prod["available"] is True
@@ -294,7 +294,8 @@ class TestProductionVariant:
         with_prod = _run(include_production=True)["significance_matrix"]
         without = _run()["significance_matrix"]
         assert with_prod["models"] == without["models"] == _SHORTS
-        assert with_prod["n_tests"] == without["n_tests"] == 15
+        n_models = len(_SHORTS)
+        assert with_prod["n_tests"] == without["n_tests"] == n_models * (n_models - 1) // 2
 
     def test_without_a_tuned_row_only_the_reason_is_shown(self, monkeypatch):
         self._setup(monkeypatch, tuned=None)

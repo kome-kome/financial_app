@@ -39,6 +39,11 @@ logger = logging.getLogger("prediction_snapshots")
 # 写す源。永続化している全ての mu_source と sector_ols の gap と売り専用の候補 S2。macro_ensemble（M-4）は退役
 # （#570・ADR-0044）で 2026-08 から更新されないので写さない。
 MU_SOURCES: tuple = ("macro_enet", "macro_gbdt", "macro_dlm", "macro_risk_return")
+# μ̂ を保存する producer（`database._PRODUCER_SCORE_MODELS`）のうち、写さないもの。
+# - macro_ensemble: M-4 は退役（hidden・ADR-0044）
+# - macro_transformer: M-7 は比較用で暦が無い（#1317・ADR-0079）。人が積んだ回の古い μ̂ が毎月写され、
+#   live OOS（#1157）の起点が実際の予測日とずれる。昇格して暦が付いたら MU_SOURCES へ移す（#1316）
+NOT_SNAPSHOT_PRODUCERS: tuple = ("macro_ensemble", "macro_transformer")
 GAP_SOURCE = "sector_ols"
 # 売り専用の候補 S2（#1158 で採用・#1202 で M-6 と同じ夜に `sell_quantile_scores` へ保存・#1208 で写す）。値は 52 週先
 # リターンの下側 20% 点（q20）で平均ではないが、行の `mu` 列に入れる（列を足さない＝表の移行が要らない。源の名前で

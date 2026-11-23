@@ -598,6 +598,9 @@ PRODUCER_COVERAGE: dict[str, str] = {
         "exempt: #570 で退役（hidden・ADR-0044）＝回す相手が居らず、成果物も更新されない",
     "macro_gbdt_rank":
         "exempt: producer を持たない（produced_output=False）。永続化する μ̂ が無い（#362）",
+    "macro_transformer":
+        "exempt: 比較用のモデル（ADR-0079）で暦が無い＝鮮度の約束が無い。人が日中キューへ積んだときだけ回る。"
+        "暦を付けるなら PRODUCERS へ足して watched にする（#1316）",
 }
 
 PRODUCER_EXEMPT_PREFIX = "exempt:"

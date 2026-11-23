@@ -183,6 +183,9 @@ PROGRESS_COVERAGE: dict[str, str] = {
     "macro_enet":        "common",
     "macro_ensemble":    "common",
     "macro_dlm":         "common",
+    # M-7: 共通骨格に加えて「系列を組み立て」「最終モデルを学習」を自前で emit。CV の進捗は共通の
+    # walk_forward_cv_monthly が刻む
+    "macro_transformer": "common",
     "sector_ols":        "own",
     # `AnalysisPlugin` ではなく `routers/analysis.py::SPECIAL_ANALYSES` の特例エントリ（#593）。
     # 内部で heavy 3本を順に回すので**実行が最も長いのがここ**。共通骨格の進捗はそのまま

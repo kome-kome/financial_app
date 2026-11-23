@@ -35,6 +35,7 @@ SAVERS = {
     "macro_gbdt_scores": ("replace_macro_gbdt_scores",),
     "macro_dlm_scores": ("replace_macro_dlm_scores",),
     "macro_enet_scores": ("replace_macro_enet_scores",),
+    "macro_transformer_scores": ("replace_macro_transformer_scores",),
     "macro_ensemble_scores": ("replace_macro_ensemble_scores",),
     "sell_quantile_scores": ("replace_sell_quantile_scores",),   # M-6 が相乗りで書く S2（#1202）
 }

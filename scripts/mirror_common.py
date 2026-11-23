@@ -184,6 +184,7 @@ SYNC_PLAN: dict[str, TableSync] = {
     # 全置換（edinet_code 単独 PK の総入替。replace_macro_*_scores が DELETE -> INSERT する）
     "macro_dlm_scores": TableSync(MODE_FULL, note="全置換方式。増分キーが意味を持たない"),
     "macro_enet_scores": TableSync(MODE_FULL, note="同上"),
+    "macro_transformer_scores": TableSync(MODE_FULL, note="同上（M-7・#1317）"),
     "macro_ensemble_scores": TableSync(MODE_FULL, note="同上"),
     "macro_gbdt_scores": TableSync(MODE_FULL, note="同上"),
     "sell_quantile_scores": TableSync(

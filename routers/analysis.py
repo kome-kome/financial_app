@@ -121,7 +121,7 @@ SPECIAL_ANALYSES = [
     {
         "name": "model_comparison",
         "label": "モデル比較",
-        "description": "将来リターン予測モデル M-1〜M-6 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）。退役した M-4/M-5 もここには並びます",
+        "description": "将来リターン予測モデル M-1〜M-7 の予測力（rank-IC・ロングショート spread・hit-rate）を無リーク OOF で横並び比較します（/api/backtest の as-of 上位N とは別手法）。退役した M-4/M-5 もここには並びます",
         "depends_on": [],
         "heavy": True,   # 全モデル（heavy）を実行するため。Render では各モデルがスキップされる
         "writes": [],    # 各モデルを tuning_dry_run で回す＝保存済みの表は変えない（model_comparison.py）

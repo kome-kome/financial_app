@@ -196,6 +196,7 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
     <a href="#macro_gbdt">勾配ブースティング（M-2）</a>
     <a href="#macro_dlm">ベイズ状態空間（M-3）</a>
     <a href="#macro_enet">正則化線形（M-6）</a>
+    <a href="#macro_transformer">時系列 Transformer（M-7）</a>
     <div class="toc-group">戦略を検証</div>
     <a href="#backtest">バックテスト</a>
     <a href="#model_comparison">モデル比較</a>
@@ -596,6 +597,29 @@ td code,p code,li code,dd code{background:var(--bg-sunken);border:1px solid var(
   <div class="warn-box">売り候補ランキングは <strong>M-6 の期待リターンだけ</strong>を使います。「売り候補として当たっていたか」だけを測る指標（市場平均より、いちばん期待リターンが低いグループがどれだけ下回ったか）で、M-6 がほかのモデルより良かったためです。ほかのモデルに切り替える選択肢はありません。</div>
 
   <div class="more">→ もっと詳しく：<a href="/models#m16">モデル解説：正則化線形（M-6）</a></div>
+</div>
+
+<!-- 時系列 Transformer（M-7）─────────── -->
+<div class="model-section" id="macro_transformer">
+  <h2>時系列 Transformer（M-7） <span class="model-tag">将来リターンを予測</span></h2>
+
+  <h3>🟢 ひとことで言うと</h3>
+  <div class="analogy">
+    M-2・M-6 は、会社ごとに「その月末の財務の数字」を1行として見るだけで、<strong>株価がこれまでどう動いてきたかの並び</strong>は読んでいません。M-7 は、各社の<strong>直近52週の値動きと出来高の並び</strong>を、文章を読むAIと同じ仕組み（Transformer）で読み、財務の数字と合わせて約1年先のリターンを予想します。
+  </div>
+
+  <h3>📊 何が分かる？</h3>
+  <p>期待リターンの順位と、M-2・M-6 と<strong>同じデータ・同じ期間</strong>で答え合わせした成績（<a href="#term-rank-ic">rank-IC</a> など）が出ます。「値動きの系列を使う」を OFF にすると、同じ手順で財務の数字だけを使った版になり、<strong>値動きの並びを読んだことでどれだけ上乗せできたか</strong>を比べられます。</p>
+
+  <h3>🛠 どう使う？</h3>
+  <ul class="steps">
+    <li>分析画面の「モデル比較」で、M-6・M-2 と並べて当たり具合を見比べます。</li>
+    <li>このモデルは<strong>比較用</strong>です。朝の買い候補や売り候補ランキングには使いません。</li>
+  </ul>
+
+  <h3>⚠ 注意点・落とし穴</h3>
+  <div class="warn-box"><strong>当たるかどうかは、まだ測っていません。</strong>株価の動きから作った特徴（モメンタムなど）は、条件を揃えて比べると成績を良くしませんでした（<a href="#term-common-domain">共通域</a>）。M-7 が M-6 に勝つかは、測る前に決めた物差しで確かめます。それまでは<strong>画面から実行しないでください</strong>（一度実データで回すと、測り方を決め直せなくなります）。</div>
+  <div class="warn-box">学習に時間がかかります（数十分〜数時間の見積り）。また、Windows の Smart App Control が学習に使う部品（jax）を止めている日は、実行できずにエラーになります。</div>
 </div>
 
 <!-- ④ バックテスト ──────────────────────────── -->
