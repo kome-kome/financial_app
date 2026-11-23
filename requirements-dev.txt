@@ -7,3 +7,11 @@ pip-audit==2.10.1
 # 未定義名・import 漏れの静的検出（Issue #724・ruff.toml で F 系に限定・ci.yml で実行）。
 # 評価（2026-10-07）: Astral 管理・MIT / PyPI 月間 3.0億 DL / 0.16.10 自身の既知脆弱性なし（OSV 記録なし。CVE-2025-62518 は 0.14.2 で修正済み）
 ruff==0.16.10
+# M-7（時系列 Transformer・plugins/seq_transformer.py）のテストを CI で回すため（#1317）。本番 requirements.txt には
+# 入れない（Render では heavy の分析を回さない）。版は requirements-inference.txt と同じにする（tests/test_seq_transformer.py が照合）。
+# 評価（2026-11-23）: Google 管理・Apache-2.0 / GitHub 36.7k star / PyPI 月間約1,300万 DL / ほぼ毎月リリース /
+# 0.10.2 に既知 CVE・公式勧告なし（PyPI vulnerabilities 空・GitHub Security Advisories 0件・OSV 該当なし）/
+# cp313 manylinux x86_64 の wheel あり。jax.numpy.load・serialize_executable で信頼できない pickle を読む RCE の
+# 第三者 PoC（CVE なし）があるが M-7 はどちらも使わない。
+jax==0.10.2
+jaxlib==0.10.2
