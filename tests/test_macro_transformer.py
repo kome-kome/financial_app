@@ -204,9 +204,16 @@ class TestExpectedFolds:
 # ── jax が要る ───────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def smoke_result(jax_ok):
+def smoke_result(jax_ok, tmp_path_factory):
+    """smoke は 1 回だけ回して複数のテストで読む。モジュール単位の fixture には conftest の関数単位の
+    autouse（`fin_earnings_yield_off`・`weekly_cache_sandbox` ほか）が効かないので、同じ差し替えをここで当てる。"""
     import database
-    with patch.object(database, "non_tradable_codes", lambda db: set()):
+    import plugins.macro_snapshots as ms
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ms, "FIN_EARNINGS_YIELD", False)
+        mp.setenv("FINAPP_WEEKLY_CACHE", "0")
+        mp.setenv("FINAPP_WEEKLY_CACHE_DIR", str(tmp_path_factory.mktemp("weekly_cache")))
+        mp.setattr(database, "non_tradable_codes", lambda db: set())
         return _run(_params())
 
 
