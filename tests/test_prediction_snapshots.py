@@ -243,8 +243,11 @@ class TestReadS2:
 
 
 def test_sources_cover_every_live_mu_source():
-    """写す源は永続化している全ての mu_source と sector_ols と S2。退役した M-4 は入れない。"""
-    assert set(PS.MU_SOURCES) == set(database._PRODUCER_SCORE_MODELS) - {"macro_ensemble"} | {"macro_risk_return"}
+    """写す源は永続化している全ての mu_source と sector_ols と S2。退役した M-4・比較用の M-7 は入れない。"""
+    assert set(PS.NOT_SNAPSHOT_PRODUCERS) == {"macro_ensemble", "macro_transformer"}
+    assert set(PS.NOT_SNAPSHOT_PRODUCERS) <= set(database._PRODUCER_SCORE_MODELS)
+    assert set(PS.MU_SOURCES) == (set(database._PRODUCER_SCORE_MODELS) - set(PS.NOT_SNAPSHOT_PRODUCERS)
+                                  | {"macro_risk_return"})
     assert PS.GAP_SOURCE in PS.SOURCES
     assert PS.S2_SOURCE in PS.SOURCES and PS.S2_SOURCE not in PS.MU_SOURCES
 

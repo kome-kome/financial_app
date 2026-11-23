@@ -126,6 +126,11 @@ HEAVY_AUTOMATION: dict[str, str] = {
         "exempt: producer を持たない（produced_output=False）。スコアが順位で"
         "リターン単位ではないため永続化する μ̂ が無い（#362）。"
         "#570 で退役（hidden=True・ADR-0044）",
+    # M-7 は日中キューの JOB（`model:macro_transformer`）を人が積んだときだけ回る。`local:` にすると画面に
+    # 「日中バッチが更新します」と出るが、暦（`run_daytime.SCHEDULE`）は無いので事実と違う（#1317）。
+    "macro_transformer":
+        "exempt: 比較用のモデル（ADR-0079）。暦は事前登録の判定（#1316）の後に決める。"
+        "それまでは日中キューの model:macro_transformer を人が積んだときだけ回る",
 }
 
 # μ̂ を前進させるバッチが、プラグインを回すバッチ（上の `HEAVY_AUTOMATION`）と違う源だけを書く（#1179）。
@@ -220,11 +225,14 @@ def _make_score_table_verifier(model_cls_name: str, label: str):
 
 
 _verify_macro_enet = _make_score_table_verifier("MacroEnetScore", "macro_enet_scores")
+_verify_macro_transformer = _make_score_table_verifier("MacroTransformerScore", "macro_transformer_scores")
 
 
 VERIFIERS = {
     "sector_ols": _verify_sector_ols,
     "macro_enet": _verify_macro_enet,
+    # 夜間では回さない。日中キューの `scripts.refresh_producer`（`run_models` を共有）が今回の保存を確かめる
+    "macro_transformer": _verify_macro_transformer,
 }
 
 

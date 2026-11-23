@@ -1,4 +1,4 @@
-"""将来リターン予測モデル（M-1〜M-6）の OOF バックテスト横並び比較。
+"""将来リターン予測モデル（M-1〜M-7）の OOF バックテスト横並び比較。
 
 `/api/backtest`（as-of 上位 N 社の実現リターン）とは**別手法**。各モデルの execute() が
 既に返す `oof_backtest`（無リーク walk-forward・rank-IC / 分位リターン / ロングショート
@@ -40,6 +40,8 @@ COMPARISON_MODELS = [
     ("macro_ensemble",    "M-4"),   # 兄弟μ̂スタッキング（#367・ADR-0015）
     ("macro_gbdt_rank",   "M-5"),   # M-2 の rank-IC 整合版・learning-to-rank（#362・ADR-0017）
     ("macro_enet",        "M-6"),   # 正則化線形（ElasticNet）・候補メニューから昇格（#372・ADR-0021）
+    # 時系列 Transformer（比較用・#1317・ADR-0079）。組が 15→21 になり、▲▼ の Bonferroni 基準が 0.05/21 へ締まる
+    ("macro_transformer", "M-7"),
 ]
 
 # 本番の設定の行を足すモデル（#1115）。本番で探索の 1 位の設定が動いていて、実際に買っているのは M-2 だけ

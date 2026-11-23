@@ -1035,6 +1035,23 @@ JOBS: dict[str, Job] = {
         # 書く値は EDINET の書類だけで決まる＝裏で何が動いていても同じ。所要の大半は応答待ち。
         parallel_sensitive=False,
     ),
+
+    # ── M-7 時系列 Transformer（比較用・#1317・ADR-0079）──────────────────────────
+    # **積むのは人**。暦は無い（`HEAVY_AUTOMATION` は exempt）。事前登録の計測（#1316）より前に積まない
+    # ＝実データで M-7 を一度回すと、事前登録を凍結し直せなくなる（docs/prereg/m7-transformer.md §6）。
+    "model:macro_transformer": Job(
+        name="model_macro_transformer",
+        argv=("{python}", "-m", "scripts.refresh_producer", "--model", "macro_transformer"),
+        why="M-7 を既定の設定で回し、分析画面の保存済み μ̂（macro_transformer_scores）を作り直す（#1317）。"
+            "比較用で、朝の推奨・売り判定には使わない。保存は nightly_scores.VERIFIERS で確かめる。",
+        # 見積り（未実測）: パネル構築（M-6 と同じ）＋ CV 約 20 fold ×（early stopping ＋ 全行で学習し直し）＋
+        # 最終学習。計算量からの見積りは 35〜100 分。4 倍ほどの余裕を見て 240 にした（2 件目は付かない）。
+        # **初回の実走ログの `END model_macro_transformer: exit=0 (N.N分)` で差し替える。**
+        measured_min=240.0,
+        # 学習は数値のわずかな揺れで μ̂ の順位が入れ替わりうる（所要ではなく保存する値が変わる）
+        parallel_sensitive=True,
+        needs_deps_smoke=True,     # jax を使う（Smart App Control の遮断を学習の前に検出する）
+    ),
 }
 
 # ── 窓の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）────────────────────────

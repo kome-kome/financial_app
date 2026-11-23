@@ -1266,6 +1266,66 @@ def get_macro_enet_producer(db) -> dict:
         return {}
 
 
+# ── 5f-1a. M-7 時系列 Transformer の μ̂（#1317・ADR-0079）──────────────────────────
+# M-7（macro_transformer・比較用のモデル）が execute() 末尾で全置換する。列は macro_enet_scores と同型。
+# 読むのは分析画面の保存済み一覧（`get_producer_saved`）だけで、朝の推奨・売り判定・おすすめ銘柄・
+# 予測の写し（`prediction_snapshots`）は読まない（昇格は事前登録の判定の後・#1316）。
+
+class MacroTransformerScore(Base):
+    """M-7 の per-stock 期待リターン μ̂（最新実行スナップショット）。"""
+    __tablename__ = "macro_transformer_scores"
+
+    edinet_code   = Column(String(10), primary_key=True)
+    mu            = Column(Float, nullable=False)   # Transformer 予測 52週先対数リターン（無次元・水準は検証の外）
+    r1_prime      = Column(Float)                    # コンフォーマル区間半幅（ADR-0020・None 可）
+    snapshot_date = Column(String(10))              # "YYYY-MM-DD"（銘柄別スナップ日の中央値・Issue #417）
+    snapshot_date_min = Column(String(10))          # 最古の銘柄のスナップ日（Issue #417）
+    n_stale       = Column(Integer)                  # 代表値より古い銘柄数（Issue #417）
+    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+def replace_macro_transformer_scores(db, rows: list, snapshot_date: str | None = None,
+                                     snapshot_date_min: str | None = None,
+                                     n_stale: int | None = None) -> int:
+    """M-7 producer μ̂ を全置換する（契約は `replace_macro_enet_scores` と同じ）。
+
+    `tuning_dry_run()` 内では no-op（0 を返す）＝モデル比較・計測の中では本番の表を書かない。
+    """
+    if _tuning_dry_run.get():
+        return 0
+    db.query(MacroTransformerScore).delete()
+    objs = [
+        MacroTransformerScore(
+            edinet_code=r["edinet_code"], mu=float(r["mu"]),
+            r1_prime=(float(r["r1_prime"]) if r.get("r1_prime") is not None else None),
+            snapshot_date=snapshot_date, snapshot_date_min=snapshot_date_min,
+            n_stale=n_stale,
+        )
+        for r in rows
+        if r.get("edinet_code") and r.get("mu") is not None
+    ]
+    if objs:
+        db.add_all(objs)
+    db.commit()
+    return len(objs)
+
+
+def get_macro_transformer_scores(db) -> dict:
+    """M-7 producer μ̂ を {edinet_code: mu} で返す（未蓄積なら {}）。"""
+    try:
+        return _producer_score_map(db, MacroTransformerScore)
+    except Exception:
+        return {}
+
+
+def get_macro_transformer_producer(db) -> dict:
+    """M-7 producer を {edinet_code: {"mu": float, "r1_prime": float|None}} で返す（未蓄積なら {}）。"""
+    try:
+        return _producer_score_map(db, MacroTransformerScore, with_r1=True)
+    except Exception:
+        return {}
+
+
 # ── 5f-1b. 売り専用の候補 S2 の現断面予測（#1202）──────────────────────────────
 # S2 = 52 週先リターンの下側 20% 点の L1+L2 分位回帰（#1158 の事前登録で採用）。M-6（macro_enet）の
 # execute が**同じパネル**で S2 の最終学習も行い、ここへ全置換で書く。sell_ranking の既定の並びのキー
@@ -1337,6 +1397,7 @@ _PRODUCER_SCORE_MODELS = {
     "macro_dlm":      MacroDlmScore,
     "macro_ensemble": MacroEnsembleScore,
     "macro_enet":     MacroEnetScore,
+    "macro_transformer": MacroTransformerScore,   # M-7（比較用・分析画面の保存済み一覧だけが読む）
 }
 
 
