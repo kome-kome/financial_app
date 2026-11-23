@@ -24,6 +24,7 @@
 14. [M-5 マクロ×財務 ランク学習（learning-to-rank・macro_gbdt_rank）](#14-m-5-マクロ財務-ランク学習learning-to-rankmacro_gbdt_rank) **（退役・ADR-0044）**
 15. [兄弟モデル候補メニュー（探索枠・model_candidates）](#15-兄弟モデル候補メニュー探索枠model_candidates)
 16. [M-6 マクロ×財務 正則化線形（ElasticNet・macro_enet）](#16-m-6-マクロ財務-正則化線形elasticnetmacro_enet)
+17. [M-7 時系列 Transformer（値動きの系列＋財務・macro_transformer）](#17-m-7-時系列-transformer値動きの系列財務macro_transformer) **（比較用）**
 
 ---
 
@@ -1958,6 +1959,72 @@ M-1 はマクロ込みだと BIC が財務列をほとんど選ばない点が M
   *JRSS-B* 67(2), 301-320. DOI:10.1111/j.1467-9868.2005.00503.x
 - **Politis, D. N. & Romano, J. P. (1994)**. "The Stationary Bootstrap." *JASA* 89(428), 1303-1313.
   DOI:10.1080/01621459.1994.10476870（昇格判定に使った有意差検定）
+
+---
+
+## 17. M-7 時系列 Transformer（値動きの系列＋財務・macro_transformer）
+
+> 実装: [`plugins/macro_transformer.py`](../plugins/macro_transformer.py)（プラグイン）・[`plugins/seq_transformer.py`](../plugins/seq_transformer.py)（JAX の Transformer・AdamW・学習）・[`plugins/weekly_sequences.py`](../plugins/weekly_sequences.py)（系列の組み立て）。決定は [ADR-0079](adr/0079-transformer-sequence-model-joins-as-comparison.md)、処遇の判定は事前登録 [`docs/prereg/m7-transformer.md`](prereg/m7-transformer.md)。**比較用のモデル**で、朝の買い候補・売り判定・おすすめ銘柄の μ̂ の出所には使わない。既定値・定数はコードが正本（ここへ書き写さない）。
+
+### 17.1 目的と位置づけ
+
+M-2/M-6 は「1 社×1 月末」の断面を 1 行として学習し、各社の過去の値動きの**並び**を読まない（時間の情報は yoy・zscore・delta 系の特徴量の窓だけ）。銘柄ごとの時系列を読むのは M-3 だけで、M-3 は週次の 1 期先を当てるので M-2/M-6 と同じ物差しでは比べにくい。M-7 は**同じ答え（52 週先の対数リターン）・同じパネル・同じ fold** のまま、入力に直近の値動きと出来高の系列を足し、系列が月内の順位の予想に上乗せするかを測る。
+
+前例からの見立ては「差なし」が最有力で、事前登録の判定で処遇を決める（§17.5）:
+
+- 12-1 モメンタムは、母集団をそろえると M-2/M-6 の成績を良くしなかった（ADR-0045）
+- 木の M-2 も線形の M-6 を超えなかった（§15・§16）
+- 柔軟なモデルほど未来の情報の混入を吸う（M-2 は purge で rank-IC 0.348 → 0.141・ADR-0014）
+
+### 17.2 入力
+
+**系列**（`weekly_sequences`）: 各サンプル（社, 月末）について、月末の週を末尾とする直近の週を並べる。月末の位置は `month_end_indices`（`build_snapshots` と同じ関数）で決めるので、パネルの行と系列は同じ週を指す。週ごとのチャネルは次の 3 つ。
+
+| チャネル | 中身 |
+|---|---|
+| `ret_z` | 週次対数リターン（前週も観測されているときだけ）を、**同じ週の全社の中で** p1-p99 winsorize → z → 上下限で切る。市場全体の上げ下げはここで消える（M-7 が当てるのは月内の順位だけ） |
+| `vol_z` | `log1p(週の出来高)` から**自社の直前の週**の平均を引いた外れを、同じ週の全社で winsorize → z |
+| `obs` | その週の `ret_z` が観測されていれば 1（Transformer の mask の元） |
+
+数週ずつを 1 トークン（パッチ）にまとめ、先頭に要約用のトークン（CLS）を置く（PatchTST 型・Nie et al. 2023）。上場して間もない社や系列の先頭より前は 0 埋めにして観測なしの印を付け、**行は落とさない**——M-2/M-6 と比べる母集団を同じにするため（行を落とす側は必ず有利に見える・ADR-0045）。
+
+出来高は `load_weekly_prices_chunked(with_volume=True)` で別に読む（パネルは M-6 と同じ `with_volume=False` で作り、キャッシュと母集団を共有する）。2 回の読み込みで社ごとの日付列が一致しなければ止める。
+
+**財務**: M-2/M-6 と同じ既定の財務列（`M2_M6_DEFAULT_FIN_FEATURES`）を、系列とは別の枝から入れる。パネルの引数（マクロ・充足率など）は M-6 のスキーマ既定から読み、モデルに渡すのは先頭の財務列だけ（マクロ列は同じ月の全社で同じ値なので、月内の順位を直接は動かさない）。前処理は学習 fold の中で fit する（`fit_feature_columns` / `transform_feature_row`）。
+
+### 17.3 構造と学習
+
+- **系列の枝**: パッチを Linear で埋め込み、学習する位置埋め込みを足し、pre-LN の encoder（多頭の自己注意＋GELU の FFN・Vaswani et al. 2017）を重ねて CLS の出力を取る。観測の無いパッチは注意の対象から外す。CLS は常に見えるので、全部欠けても注意の対象は空にならない
+- **財務の枝**: Linear → GELU。両方を結合して Linear → GELU → Linear(1)
+- **小さく作る**: 浅い NN が最良だった Gu, Kelly & Xiu (2020) にならい、パラメータは数万に留める
+- **答え**: fold の中で p1-p99 winsorize → 学習月ごとに平均を引く → z。M-7 はマクロを入れず系列も市場中立なので、月に共通の成分は説明できない雑音になる。予想の水準は飾りで、順位だけを OOF で検証する（M-6 と同じく「水準は検証の外」）
+- **損失**: 二乗誤差（順位で学習した M-5 が二乗誤差の M-2 に負けた・ADR-0017）
+- **最適化**: AdamW（Loshchilov & Hutter 2019）を手で書き、global norm で clip する
+- **学習回数**: 学習期間の末尾の月を塊で検証に回し、学習との間に最大 `LABEL_HORIZON_MONTHS` の空白を置いた early stopping で決める。決めた回数で**学習期間の全体を学習し直してから**予想する（空白と検証の分だけ古いモデルで予想しないため）。最終モデルの回数は fold ごとの回数の中央値
+- **再現性**: 種は `tuning.seeded` の既定。fold の種は test 月から作る（落ちた fold があっても同じ月は同じ種）。shape を固定して再コンパイルを避ける。同じプロセスで 2 回回すとビット一致することをテストで縛る。別のプロセスで一致するかは、結果の `env`（jax の版・devices・`XLA_FLAGS`）で切り分ける
+- **系列なしの対照**（`use_sequence=False`）: 系列の枝を外し、同じ手順・同じ行で財務の枝だけを学習する
+
+### 17.4 評価とリーク対策
+
+- walk-forward は M-2/M-6 と同値（最低学習・刻み・embargo `LABEL_HORIZON_MONTHS`）→ `oof_backtest`。`model_comparison` に `M-7` として並ぶ
+- 週の横断統計は**その週の値だけ**で作る。出来高の基準は過去の週だけ（累積和の差）。窓は月末の週より後を読まない。過去のサンプルの 52 週先の答えは入力にしない（時間で重なってリークする）
+- **既知の小さな漏れ**: 同じ暦週で、ある社の週の最終足が木曜（金曜に売買停止）でも、他社の金曜の終値がその週の横断の正規化にだけ混ざる（1 日分）
+- `walk_forward_cv_monthly` は fit_predict の例外を黙って捨てるので、M-7 は例外を記録して CV の後に送出し、fold の数も期待と照合する（黙って縮んだ OOF では比べない）
+- 検証: テストラベルだけ差し替えても予測がビット一致・月末より後の株価を全社書き換えても予測がビット一致・合成データ（系列に信号）で OOF の rank-IC が出て系列なしの対照を上回る（`tests/test_seq_transformer.py`・`tests/test_weekly_sequences.py`）
+
+### 17.5 運用と判定
+
+- **実行**: 日中キューの `model:macro_transformer`（`scripts/refresh_producer.py`）を人が積んだときだけ回る。暦は無い（`HEAVY_AUTOMATION`・`PRODUCER_COVERAGE` は exempt）。jax を使うので `deps_smoke` を先に回す。Smart App Control が jaxlib の部品を止める日は、データを読む前に止まる（docs/GOTCHAS.md）
+- **保存**: `macro_transformer_scores`（`macro_enet_scores` と同型）へ全置換。読むのは分析画面の保存済み一覧だけで、予測の写し（`prediction_snapshots`）には入れない
+- **判定**: 事前登録の計測（`measure:m7-transformer`・`scripts/measure_transformer.py`）が、M-6・M-2（スキーマ既定）との rank-IC の対比較（`run_comparison` の `significance_matrix`）と、系列なしとの差を出し、§4 の規則で「昇格を検討／比較用で据え置き／退役（`hidden=True`・ADR-0044）」を機械的に決める。計測までは実データで M-7 を回さない
+- 規模の中立化（M-6 の `_SIZE_NEUTRAL`）はしない（M-6 で測って採ったもので、M-7 では測っていない）。探索空間も持たない
+
+### 17.6 参考文献
+
+- **Vaswani, A. et al. (2017)**. "Attention Is All You Need." *NeurIPS 30*. https://arxiv.org/abs/1706.03762
+- **Nie, Y. et al. (2023)**. "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers." *ICLR 2023*. https://arxiv.org/abs/2211.14730
+- **Loshchilov, I. & Hutter, F. (2019)**. "Decoupled Weight Decay Regularization." *ICLR 2019*. https://arxiv.org/abs/1711.05101
+- **Gu, S., Kelly, B. & Xiu, D. (2020)**. "Empirical Asset Pricing via Machine Learning." *RFS* 33(5), 2223-2273. DOI:10.1093/rfs/hhaa009
 
 ---
 

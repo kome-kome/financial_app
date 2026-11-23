@@ -129,6 +129,17 @@ async def _score_into(entry: dict, plugin, params: dict, db) -> None:
         _safe_rollback(db)
 
 
+async def score_once(plugin, params: dict, db) -> dict:
+    """比較の行と同じ手続き（objective_only・dry_run・display_scoring）で 1 回だけ採点した行を返す。
+
+    計測の道具が、比較の表の外で設定を変えた行（M-7 の系列なし・別の種など）を採点するための入口。
+    手続きを書き写すと、比較の行と別物を測る（ADR-0041）。
+    """
+    entry: dict = {"name": plugin.name, "label": plugin.label}
+    await _score_into(entry, plugin, params, db)
+    return entry
+
+
 async def _run_production(db, plugin, name: str, short: str, render_light_mode: bool, fp_cache: dict) -> dict:
     """本番の設定の行（#1115）。既定の行と同じ採点（`_score_into`）を、射影した本番の設定で回す。"""
     entry: dict = {"name": name, "short": f"{short}（本番）", "variant": VARIANT_PRODUCTION,

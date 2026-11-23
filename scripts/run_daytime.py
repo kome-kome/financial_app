@@ -1052,6 +1052,21 @@ JOBS: dict[str, Job] = {
         parallel_sensitive=True,
         needs_deps_smoke=True,     # jax を使う（Smart App Control の遮断を学習の前に検出する）
     ),
+    # 事前登録の計測（#1316）。**単独で積む**。凍結値は docs/prereg/m7-transformer.md の追記節と同じ（テストが照合）。
+    "measure:m7-transformer": Job(
+        name="m7_transformer",
+        argv=("{python}", "-m", "scripts.measure_transformer",
+              "--prereg", "docs/prereg/m7-transformer.md",
+              "--prereg-sha", "66585b6dbaf653242995e0c79b19fb136d4b8ae981cb49538eca2b3ce831a421"),
+        why="M-7 を M-6・M-2（スキーマ既定）と同じパネル・同じ fold で比べ（run_comparison の significance_matrix・"
+            "3 組 Bonferroni）、系列なしの M-7 との差で値動きの系列の上乗せを測る（#1316）。凍結値が合わなければ exit 2、"
+            "モデルの失敗や期数・行数の食い違いは exit 3（判定しない）。結果は scripts/.cache/m7_transformer.json。",
+        # 見積り（未実測）: M-2 約 7 分＋M-6 約 4 分＋M-7（35〜100 分）＋パネルの作り直し＋系列なし（数分）＋
+        # 種 2 つの M-7（70〜200 分）。上側で約 320 分なので 2 件目は付かない。**次の実走で差し替える。**
+        measured_min=330.0,
+        parallel_sensitive=True,   # 他の計測と同じ理由（数値の揺れが判定そのものを変える）
+        needs_deps_smoke=True,     # jax を使う
+    ),
 }
 
 # ── 窓の残りで回す探索の周回（#1114・ADR-0070 決定 4・5）────────────────────────

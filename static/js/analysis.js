@@ -2175,6 +2175,7 @@ const RESULT_RENDERERS = {
   'macro_risk_return': renderMacroRiskReturn,
   'macro_gbdt':        renderMacroGbdt,
   'macro_enet':        renderMacroEnet,
+  'macro_transformer': renderMacroTransformer,
   'macro_dlm':         renderMacroDlm,
   // M-4 は退役（hidden=True・ADR-0044）でサイドバーにタブが生えないため、現状このレンダラは
   // 使われない。復帰時に書き直さずに済むよう残す（退役は削除ではない）。
@@ -3266,6 +3267,70 @@ const _enetView = _riskReturnView({
 
 function renderMacroEnet(data) {
   return _rrRender(_enetView, data);
+}
+
+// ── M-7 時系列 Transformer（比較用・#1317・ADR-0079）──────────────────────────
+// 縦軸は M-6 と同じ相対 μ̂。M-7 も順位だけを OOF で答え合わせし、水準は検証の外。
+// 予測の内訳は出さない（注意機構の重みは寄与の和にならない）＝行クリックのパネルは開かない。
+const _tfView = _riskReturnView({
+  tabId: 'macro_transformer', prefix: 'tf', yKey: 'mu_rel', defaultLambda: 0.0,
+  yLabel: '相対 μ̂（今買える社の μ̂ 中央値との差・52週先対数リターン）',
+  headerHTML: _tfHeaderHTML,
+  tableNote: (v, data) => `
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">※ μ̂ は52週（1年）先の年率対数リターン予測。相対 μ̂ = μ̂ − 今買える社の μ̂ 中央値（${_rrPct(data.mu_rel_center)}）。水準は未検証・順位は OOF で答え合わせ。</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">比較用のモデルです。朝の買い候補・売り候補ランキングには使いません。銘柄名は企業詳細を新しいタブで開きます</div>`,
+  headCells: v => `${_rrLeadHead()}<th><span class="gloss" tabindex="0" data-tip="今買える社の μ̂ 中央値との差。全社を同じ量だけずらした値なので、順位は μ̂ と同じ。">相対μ̂</span></th><th>${muHeadCell(MU_HEAD.forecast, '時系列 Transformer の予測値。順位は OOF で答え合わせするが、水準は検証していない。')}</th>${_rrTailHead(v.axis)}`,
+  rowCells: (r, i, v, c) => `${_rrLeadCells(r, i, c)}
+      <td class="${r.mu_rel>0?'text-green':''}">${_rrPct(r.mu_rel, true)}</td>
+      <td>${_rrPct(r.mu_raw)}</td>
+      ${_rrTailCells(r, v.axis)}`,
+  tooltipLines: (p, axisKey) => [
+    `相対μ̂=${_rrPct(p.mu_rel, true)}  μ̂=${_rrPct(p.mu_raw)}`,
+    `R=${p[axisKey]!=null?p[axisKey].toFixed(3):'-'}  U=${p._u!=null?p._u.toFixed(3):'-'}`,
+  ],
+  detailHTML: () => null,
+});
+
+function renderMacroTransformer(data) {
+  return _rrRender(_tfView, data);
+}
+
+// CV（fold 数・各 fold の学習回数）・最終モデル・系列の観測・OOF
+function _tfHeaderHTML(data) {
+  const cv = (data.cv_metrics || {}).transformer || {};
+  const dg = data.cv_diagnostics || {};
+  const fm = data.final_model || {};
+  const sq = data.sequence || {};
+  const epochs = Array.isArray(dg.epochs) ? dg.epochs.join(' / ') : '-';
+  const seqLine = sq.used
+    ? `値動きの系列: ${sq.n_weeks ?? '-'} 週分を整列 ／ 1 行あたり観測のあるパッチ 平均 ${sq.mean_observed_patches ?? '-'}/13 ／ 観測の無い行 ${(sq.rows_without_observation ?? 0).toLocaleString()} 件`
+    : '値動きの系列: 使っていません（「値動きの系列を使う」が OFF＝財務の列だけの対照）';
+  return `
+  <div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-sunken);border-radius:8px;border:1px solid var(--border-muted)">
+    <div style="font-size:12px;color:var(--accent-text);font-weight:600;margin-bottom:10px">Walk-Forward CV（M-7 時系列 Transformer）</div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 8px;color:var(--text-muted)">モデル</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean R²</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">Mean RMSE</th>
+        <th style="text-align:right;padding:4px 8px;color:var(--text-muted)">フォールド数</th>
+      </tr></thead>
+      <tbody><tr>
+        <td style="padding:4px 8px;color:var(--accent-text);font-weight:600">Transformer（M-7）</td>
+        <td style="padding:4px 8px;text-align:right;color:${(cv.mean_r2||0)>0?cssVar('--val-up-text'):cssVar('--val-down-text')}">${cv.mean_r2!=null?cv.mean_r2.toFixed(3):'-'}</td>
+        <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.mean_rmse!=null?cv.mean_rmse.toFixed(4):'-'}</td>
+        <td style="padding:4px 8px;text-align:right;color:var(--text-secondary)">${cv.n_folds||0}</td>
+      </tr></tbody>
+    </table>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
+      fold ごとの学習回数（early stopping）: ${esc(epochs)} ／ 最終モデル: ${fm.epochs ?? '-'} 回・d_model ${fm.d_model ?? '-'}・${fm.n_layers ?? '-'} 層 ／ 学習サンプル: ${(data.n_train_samples||0).toLocaleString()}件
+    </div>
+    <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">${esc(seqLine)}</div>
+  </div>
+  <div style="margin-bottom:16px">${_mrrOofHTML(data)}</div>
+  <div style="margin-bottom:8px;padding:8px 12px;border-radius:6px;font-size:11px;background:var(--status-warn-bg);color:var(--status-warn-text)">
+    M-7 が M-6・M-2 より当たるかは、事前に決めた物差しで測るまで分かりません。それまでは比較用として見てください。
+  </div>`;
 }
 
 // CV・最終モデル・符号付き係数・OOF・相対 μ̂ の注記

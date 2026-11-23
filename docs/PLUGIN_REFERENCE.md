@@ -32,6 +32,9 @@
 | [`plugins/macro_ensemble.py`](#pluginsmacro_ensemblepy) | M-4 **（退役）** | ✅ | `macro_ensemble_scores` |
 | [`plugins/macro_gbdt_rank.py`](#pluginsmacro_gbdt_rankpy) | M-5 **（退役）** | ✅ | **なし**（OOF 比較専用） |
 | [`plugins/macro_enet.py`](#pluginsmacro_enetpy) | M-6 | ✅ | `macro_enet_scores`・`sell_quantile_scores`（S2・#1202） |
+| [`plugins/macro_transformer.py`](#pluginsmacro_transformerpy) | M-7（比較用） | ✅ | `macro_transformer_scores` |
+| [`plugins/seq_transformer.py`](#pluginsseq_transformerpy) | M-7 の学習 | — | — |
+| [`plugins/weekly_sequences.py`](#pluginsweekly_sequencespy) | M-7 の入力 | — | — |
 | [`plugins/sell_ranking.py`](#pluginssell_rankingpy) | — | | — |
 | [`plugins/macro_snapshots.py`](#pluginsmacro_snapshotspy) | 共有基盤 | — | — |
 | [`plugins/tuning.py`](#pluginstuningpy) | 共有基盤 | — | — |
@@ -271,6 +274,44 @@ producer は共有 `macro_beta`（`read_producer_scores` は `macro_snapshots.ge
 - **射影は探索空間の形しか見ないので、パネルの世代は `panel_changed` が別に見る**（#711・ADR-0047）。`current_panel_fingerprint()`（規則の唯一の源は `hyperparameter_search._data_fingerprint()`・TTL 60秒キャッシュ）と保存時の `data_fingerprint` を比べ、`True`=違う / `False`=同じ / `None`=判定不能を返す。画面は **`False` と積極的に言えたときだけ**自動プリフィルし、それ以外はバッジの文言を「前回の探索結果」に落として理由を注記する（ボタンからの手動適用は残す）。**パネルは毎晩伸びるので自動適用は事実上探索当日しか働かない**——これが無いと、いま探索中の軸に残った古い値が素通りする（M-1 の `max_features=5` が実際にそうで、rank-IC +0.0052・fold 間 std 0＝予測値が月内で全銘柄同じだった）。
 
 依存先: `plugins/model_candidates.py`, `plugins/macro_snapshots.py`, `plugins/utils.py`, scikit-learn
+
+## `plugins/macro_transformer.py`
+
+**M-7 時系列 Transformer（比較用・#1317・[ADR-0079](adr/0079-transformer-sequence-model-joins-as-comparison.md)）**。`heavy=True`・category「比較用のモデル」。理論と既定の考え方は [MODELS.md](MODELS.md) §17。
+
+- **パネルは M-6 のスキーマ既定から読む**（`_m6_panel_args`・書き写さない）。`build_snapshots` の引数が M-6 と同じになり、`shared_snapshot_cache` の構築物と母集団を共有する。モデルに渡すのは先頭の財務列だけで、`all_feat_names[:n_fin] == fin_features` を確かめる。M-6 の既定を変えれば M-7 も追随する（`tests/test_macro_transformer.py::TestPanelArgs`）
+- **jax を先に確かめる**: `execute` の冒頭で `_jax_env()`（`seq_transformer.require_jax`）を呼び、読めなければ `load_data` より前に `JaxUnavailable` で止まる（Smart App Control の遮断で重い読み込みを無駄にしない）。応答の `env` に jax の版・devices・`XLA_FLAGS` を残す
+- **系列**: `use_sequence` が真のときだけ `load_weekly_prices_chunked(with_volume=True)` を読み、`weekly_sequences.check_same_dates` でパネル用の読み込みと日付列が一致することを確かめてから窓を作る（偽なら出来高を読まない）。CV のサンプルは `(財務列, 答え, 行番号)` で、行番号から `SampleBank` の系列を引く
+- **失敗を隠さない**: `walk_forward_cv_monthly` は fit_predict の例外を握るので、`seq_transformer.raise_fold_errors` で CV の後に送出し、fold 数を `_expected_folds` と照合する（違えば RuntimeError）
+- **保存**: `macro_transformer_scores` へ全置換（`_persist_producer`・`tuning_dry_run` 中は no-op）。`produced_output`／`read_producer_scores` は M-6 と同形。`objective_only` なら OOF の後に早期 return（モデル比較・計測）。表示は M-6 と同じ相対 μ̂（`mu_rel`）で、λ・横軸・R3 ゲート・件数は表示だけのパラメータ
+- **しないこと**: 規模の中立化（M-6 で測って採ったもので M-7 では未測定）・探索空間（`tuning_search_space` 無し）・`prediction_snapshots` への写し（`NOT_SNAPSHOT_PRODUCERS`）・`MU_SOURCE_OPTIONS`
+- **自動実行**: 暦は無い（`HEAVY_AUTOMATION`・`PRODUCER_COVERAGE` は exempt）。日中キューの `model:macro_transformer`（`scripts/refresh_producer.py`）を人が積んだときだけ回る。事前登録の計測（#1316）までは実データで回さない
+
+依存先: `plugins/seq_transformer.py`, `plugins/weekly_sequences.py`, `plugins/macro_snapshots.py`, `plugins/macro_enet.py`（パネルの既定）, `plugins/macro_risk_return.py`（R3）
+
+## `plugins/seq_transformer.py`
+
+**M-7 の JAX 実装**。plugin 属性を持たない部品（前例は `model_candidates.py`）。
+
+- **jax はモジュールの import 時に読まない**（`plugins` の自動検出は Render でも走る）。`require_jax()` が `jax_import_guard.install()` の後に読み、失敗は `JaxUnavailable`（`RuntimeError`）に包む。`import plugins` で jax が `sys.modules` に入らないことを subprocess のテストで縛る
+- `TFConfig`（frozen＝hash 可能）ごとに `_program` を 1 回だけ作る（`lru_cache`・`jax.jit`）。batch の shape を固定し、末尾の不足分は 0 番の行で埋めて重み 0 を付ける（再コンパイルしない）。float32 を明示する（x64 の設定に依存しない）
+- 構造・学習の定数（head 数・batch・weight decay・clip・検証の割合・空白の上限・固定回数）はファイル冒頭。**変えるなら事前登録をやり直す**（`docs/prereg/m7-transformer.md` §2 に凍結してある）
+- `fit_model`: 財務列の fold 内前処理（`fit_static`／`transform_static`＝`fit_feature_columns`／`transform_feature_row`）→ 答えの前処理（`prepare_target`＝winsorize → 学習月ごとに平均を引く → z）→ `es_month_split` で early stopping の回数を決める → **その回数で全行を学習し直す**。`epochs` を渡すとその回数だけ回す（最終モデル）
+- `make_fit_predict`: `walk_forward_cv_monthly(pass_train_groups=True)` へ渡す。例外は `errors` へ積んでから送出する。fold の種は `fold_seed(seed, test 月)`
+- テスト: `tests/test_seq_transformer.py`（jax が要るものは CI で必ず走らせる＝jax が無ければ fail・DLL の遮断も fail・#792 の skip 化を繰り返さない）
+
+依存先: jax, `jax_import_guard.py`, `plugins/utils.py`, `plugins/weekly_sequences.py`, `plugins/macro_snapshots.py`（`LABEL_HORIZON_MONTHS`）
+
+## `plugins/weekly_sequences.py`
+
+**M-7 の入力系列**（numpy だけ・jax 不要）。
+
+- `build_weekly_store`: 週次株価（`_WeeklyPX`・出来高つき）を暦の週（月曜＝`week_key`）へ整列し、`ret_z`（週内横断 z）・`vol_z`（自社の過去の週に対する外れの週内横断 z）・`obs` の密配列を作る。先頭に窓の長さ − 1 週の 0 を足しておき、`gather_windows` は添字の計算だけで窓を取る。出来高を読まずに作った行（`_VOLUME_NOT_LOADED`）は ValueError
+- **リークしない**: 週の横断統計はその週の値だけ、出来高の基準は累積和の差で過去だけ。月末より後の値（全社・他社とも）を書き換えても窓はビット一致する（`tests/test_weekly_sequences.py::TestNoLeak`）
+- `snap_dates_by_ym`: `build_snapshots(return_stock_ids=True)` の行の並びどおりに月末の日付を返す（`month_end_indices` を共有＝build_snapshots を変えない）。ラベルの終値の位置で一致を確かめるテストがある
+- `to_patches`: 窓をパッチと観測の mask へ。`check_same_dates`: 2 回の読み込みの日付列の一致
+
+依存先: `plugins/macro_snapshots.py`（`month_end_indices`・`_VOLUME_NOT_LOADED`）, `plugins/utils.py`（`winsorize`）
 
 ## `plugins/model_candidates.py`
 
