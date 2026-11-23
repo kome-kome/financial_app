@@ -116,7 +116,10 @@ class TestPluginMeta:
         assert plugin.writes == ("macro_transformer_scores",)
         assert plugin.writes_impact and "朝" in plugin.writes_impact
 
-    def test_not_a_production_or_mu_source_model(self):
+    def test_not_a_production_or_mu_source_model(self, monkeypatch):
+        # routers.analysis を単独で import すると循環する。api を先に読む（test_analysis_meta と同じ）
+        monkeypatch.setenv("APP_SECRET_KEY", os.environ.get("APP_SECRET_KEY", "test-secret-key"))
+        import api  # noqa: F401
         from plugins.recommend import MU_SOURCE_OPTIONS
         from plugins.sell_ranking import MU_SOURCE
         from routers.analysis import PRODUCTION_MODELS
