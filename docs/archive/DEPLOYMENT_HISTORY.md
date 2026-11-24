@@ -418,6 +418,30 @@ pg_restore --clean --no-acl --no-owner \
   API を起動し、`/health` と全9画面が 200・`/api/stats` が `companies 4,438 / records 50,490 /
   stock_price 1,293,208` を返すことまで確認した（**戻せたことの本体は「サービスが再開できる」こと**）。
 
+## バックアップ: 四半期の復元予行（2026-11-24）
+
+9/4 は 17 表だったが、その後 8 表が範囲へ入って 25 表になり、**増えた表を含む世代が戻せるかは
+確かめていなかった**ので、四半期の予行として流した。夜間バッチの終了後・日中キューが空の時間に行った。
+
+- **手順**: 上の案B と同じ使い捨てクラスタ（`initdb`・port 5433・パスワードは pwfile 経由）へ、
+  `python -m scripts.backup_restore --source storage --apply --create-schema --dest-url ...5433/postgres`。
+  終わったらクラスタを止めてディレクトリごと消し、`.backups/_from_storage/` の複製も消した。
+- **結果**: 世代 `20261122T120010Z`（48.7MB・25 表）を落としてサイズ照合 → FK 依存順に復元 →
+  **25 表すべて行数一致**。復元 1.6 分・全体 1.9 分。Egress は download の約 49MB だけ。
+- **VIEW**: 復元直後は `financial_metrics` / `financial_metrics_interim` / `financial_metrics_with_ttm` が無く、
+  `init_db()` が実在確認で作り直した（0.4 秒）。件数は `companies` 4,455・`financial_metrics` 30,633。
+- **正本との突き合わせ**: 正本の `financial_records` を世代の作成時刻で切ると 56,785 件で、復元した件数と一致。
+  正本の `financial_metrics`（30,658）との差 25 件は、世代の後の夜間収集で増えた `financial_records` の件数と同じ。
+  `financial_metrics_with_ttm` は正本 49,649・復元先 30,633 で、差は TTM 行（`ttm_financial_records` は範囲外で、
+  夜間に作り直す派生表）。
+- **バックアップに入らない表**（正本の 29 表のうち）: `legacy_stock_price_history_2026_02`（478MB・ORM 外・
+  消費者なし）、`ttm_financial_records`（派生）、`xbrl_raw_documents`（0 行）。いずれも理由が書かれた除外
+  （`scripts/mirror_common.py` の `MIRROR_EXCLUDED` と、DEPLOYMENT.md の「`legacy_stock_price_history_2026_02`
+  （温存した旧日次 OHLCV）」の節）。**旧日次 OHLCV は
+  この PC にしか無い**ので、PC を失うとこれだけは戻らない。
+- **新しい表**: `macro_transformer_scores`（M-7・#1319）は 11/22 の世代より後に足されたので、この世代には
+  無い。範囲（`mirror_tables()`）には入っているので、次の週次バックアップから含まれる。
+
 ## 通知: 手動キャンセルが high で起票された件（#453・2026-08-04）
 
 2026-11-22（#1291）に DEPLOYMENT.md「データ収集の仕組み」の「ワークフロー失敗の通知」から移した。

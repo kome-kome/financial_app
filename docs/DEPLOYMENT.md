@@ -154,7 +154,11 @@ python -m scripts.backup_restore --source storage --apply --create-schema `
   復元へ進まない（マニフェストにチェックサムは無いのでサイズまで。中身の担保は行数一致側）。
 - **四半期に1度、空の DB へ実際に流す**。`edinet` は `createdb` 権限を持たないので、予行には
   `initdb` の使い捨てクラスタ（port 5433）を使う——正本のインスタンス（5432）に触れないことが要点。
+- **戻した直後は VIEW と TTM 行が無い**。`--create-schema` が作るのは表だけで、VIEW は API の起動（lifespan の
+  `init_db()`）が実在確認で作り直す（ADR-0048）。`ttm_financial_records` はバックアップの範囲外（派生表・
+  `MIRROR_EXCLUDED`）なので、`financial_metrics_with_ttm` は次の夜間バッチが作り直すまで通期の行だけになる。
 - Storage から使い捨てクラスタへ戻して API が再開できることは 2026-09-04 に確かめた（記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#バックアップ-storage-経路の初回の復元2026-09-04)）。
+  最後の四半期予行は **2026-11-24**（25 表すべて行数一致・所要 1.9 分。記録は [DEPLOYMENT_HISTORY.md](archive/DEPLOYMENT_HISTORY.md#バックアップ-四半期の復元予行2026-11-24)）。
 
 ### GitHub Actions の workflow（手動の口）
 
