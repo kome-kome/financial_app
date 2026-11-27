@@ -161,6 +161,10 @@ JST = timezone(timedelta(hours=9))
 DEPS_SMOKE_MIN = 5
 MARGIN_MIN = 30
 JOB_BUDGET_MIN = WINDOW_MIN - DEPS_SMOKE_MIN - MARGIN_MIN   # = 445
+# WSL2 で回す仕事（`Job.runner`・#1316）の依存の確認。Windows 側の `deps_smoke` では Linux 側の venv を
+# 確かめられない（しかも Windows では jax が SAC に止められている）ので別のステップにする。両方が並ぶ日は
+# `DEPS_SMOKE_MIN` を等分する＝窓から引いた枠を増やさない。
+DEPS_SMOKE_WSL = "deps_smoke_wsl"
 
 # 2件目以降を足すかを判断するときの余裕（#707・ADR-0060）。「**所要が倍に伸びても
 # 打ち切られない**」という約束であって、実測から逆算した値ではない。
@@ -189,6 +193,12 @@ class Job:
     parallel_sensitive: bool
 
     needs_deps_smoke: bool = False
+
+    # どこで起動するか（#1316・ADR-0080）。`bc.RUNNER_WSL` は WSL2 の中の venv で起動する＝Smart App Control に
+    # jaxlib を止められても回る。WSL の仕事の `argv` は `{python}` で始め、他に `{python}` を置かない（`steps_for_many`
+    # が先頭を Linux 側の python へ差し替える）。Windows と Linux では数値の結果がわずかに変わりうるので、過去の
+    # 結果と比べる仕事（macro_beta 等）は差を測ってから移す。
+    runner: str = bc.RUNNER_NATIVE
 
 
 # 下の「**積むのは人**」は「暦（SCHEDULE）が自動では積まない」の意味。計画の承認を得た
@@ -1051,6 +1061,9 @@ JOBS: dict[str, Job] = {
         # 学習は数値のわずかな揺れで μ̂ の順位が入れ替わりうる（所要ではなく保存する値が変わる）
         parallel_sensitive=True,
         needs_deps_smoke=True,     # jax を使う（Smart App Control の遮断を学習の前に検出する）
+        # Windows では jaxlib が SAC に止められ続けた（2026-11-23〜）ので WSL2 で回す（#1316・ADR-0080）。
+        # 実データの結果がまだ無い＝Linux へ移しても比べる相手が変わらない。
+        runner=bc.RUNNER_WSL,
     ),
     # 事前登録の計測（#1316）。**単独で積む**。凍結値は docs/prereg/m7-transformer.md の追記節と同じ（テストが照合）。
     "measure:m7-transformer": Job(
@@ -1066,6 +1079,20 @@ JOBS: dict[str, Job] = {
         measured_min=330.0,
         parallel_sensitive=True,   # 他の計測と同じ理由（数値の揺れが判定そのものを変える）
         needs_deps_smoke=True,     # jax を使う
+        runner=bc.RUNNER_WSL,      # model:macro_transformer と同じ理由（#1316・ADR-0080）
+    ),
+    # WSL の経路そのものの確認（#1316・ADR-0080）。日中枠はセッション0（S4U）で走るので、対話の画面から WSL が
+    # 動いても、タスクから動くとは限らない。WSL や venv を作り直した後に、これだけを積んで `-Now` で叩く。
+    "check:wsl": Job(
+        name="check_wsl",
+        argv=("{python}", "-m", "scripts.check_heavy_imports"),
+        why="WSL2 の venv で重い依存（jax / numpyro 等）が読めるかを、日中枠のタスク（セッション0）から確かめる"
+            "（#1316）。WSL・venv を作り直した後に単独で積み、`run_daytime.ps1 -Now` で叩く。",
+        # 2026-11-27 対話セッションの実測 0.2 分（deps_smoke_wsl と同じ中身）。
+        measured_min=0.5,
+        # import できるかを見るだけ＝裏で何が動いていても答えは変わらない（-Now を -Force なしで叩ける）。
+        parallel_sensitive=False,
+        runner=bc.RUNNER_WSL,
     ),
 }
 
@@ -1834,6 +1861,8 @@ def steps_for_many(python: str, job_keys: Sequence[str],
 
     `deps_smoke` は**必要な仕事が1つでもあれば先頭に1本だけ**置く（件数ぶん並べない）。
     予算は `JOB_BUDGET_MIN` の等分で、`DEPS_SMOKE_MIN` は走るかによらず窓から引いてある。
+    WSL で回す仕事（`Job.runner`・#1316）が要るときは `DEPS_SMOKE_WSL` を置き、Windows の仕事と並ぶ日は
+    `DEPS_SMOKE_MIN` を2本で等分する（窓から引いた枠を増やさない）。
     """
     if not job_keys:
         return (), {}
@@ -1841,13 +1870,21 @@ def steps_for_many(python: str, job_keys: Sequence[str],
     share = budget_share(len(job_keys))
     steps: list[Step] = []
     owner: dict[str, str] = {}
-    if any(getattr(JOBS.get(k), "needs_deps_smoke", False) for k in job_keys):
+    smoke_on = {JOBS[k].runner for k in job_keys if k in JOBS and JOBS[k].needs_deps_smoke}
+    smoke_min = DEPS_SMOKE_MIN / len(smoke_on) if smoke_on else 0.0
+    if bc.RUNNER_NATIVE in smoke_on:
         steps.append(Step(
             "deps_smoke", (python, "-m", "scripts.check_heavy_imports"),
             why="重い依存（pymc / jax / numpyro 等）が実際に import できるかを確かめる。"
                 "未評価 DLL の初回ロードをここが引き受ける（2026-09-01 に Smart App Control が"
                 "jaxlib の DLL を弾いて macro_beta が exit=1 で落ちた）",
-            budget_min=DEPS_SMOKE_MIN))
+            budget_min=smoke_min))
+    if bc.RUNNER_WSL in smoke_on:
+        steps.append(Step(
+            DEPS_SMOKE_WSL, bc.wsl_argv(("-m", "scripts.check_heavy_imports")),
+            why="WSL2 の venv で重い依存（jax / numpyro 等）が import できるかを確かめる（#1316）。"
+                "WSL・Ubuntu・venv のどれかが無い、または版が壊れていれば、学習の前にここで落ちる",
+            budget_min=smoke_min, runner=bc.RUNNER_WSL))
     for key in job_keys:
         job = JOBS.get(key)
         if job is None:
@@ -1855,6 +1892,10 @@ def steps_for_many(python: str, job_keys: Sequence[str],
             step = Step(f"unknown:{key}", (python, "-c", "raise SystemExit(2)"),
                         why=f"キューにある {key!r} が JOBS に無い（定義が消えたか typo）",
                         budget_min=1)
+        elif job.runner == bc.RUNNER_WSL:
+            # 先頭の `{python}` を Linux 側の venv の python へ差し替える（`Job.runner` の約束）。
+            step = Step(job.name, bc.wsl_argv(job.argv[1:]), why=job.why, budget_min=share,
+                        runner=bc.RUNNER_WSL)
         else:
             argv = tuple(python if a == "{python}" else a for a in job.argv)
             step = Step(job.name, argv, why=job.why, budget_min=share)
@@ -1951,7 +1992,7 @@ def build_parser():
     `--steps` のヘルプに並べる名前は JOBS 全体から作る。検証は今日取り出す件数が決まってから、
     `take` の前に実際のステップ列に対して行う（`main` 参照）。
     """
-    names = ["deps_smoke"] + [j.name for j in JOBS.values()] + [CYCLE_STEP]
+    names = ["deps_smoke", DEPS_SMOKE_WSL] + [j.name for j in JOBS.values()] + [CYCLE_STEP]
     ap = bc.build_parser(SPEC, list(dict.fromkeys(names)))
     # 2つ渡したときに片方が黙って勝たないよう、互いに排他にする。
     ops = ap.add_mutually_exclusive_group()

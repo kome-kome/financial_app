@@ -74,5 +74,6 @@ def test_daytime_job_runs_this_cli_with_the_deps_smoke():
     job = rd.JOBS["model:macro_transformer"]
     assert job.argv[1:] == ("-m", "scripts.refresh_producer", "--model", "macro_transformer")
     assert job.parallel_sensitive is True and job.needs_deps_smoke is True
-    assert [s.name for s in rd.steps_for("py", "model:macro_transformer")] == ["deps_smoke", job.name]
+    # jax を使うので WSL2 で起動し、依存の確認も Linux 側で行う（#1316・ADR-0080）
+    assert [s.name for s in rd.steps_for("py", "model:macro_transformer")] == [rd.DEPS_SMOKE_WSL, job.name]
     assert "macro_transformer" in rd.heavy_models()

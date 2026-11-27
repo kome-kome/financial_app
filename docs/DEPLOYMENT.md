@@ -356,6 +356,8 @@ Supabase が restricted になると**アプリも分析も一切動かせない
 | encoding | **UTF8**（collate は `Japanese_Japan.932`＝並び順のみ OS 依存。Supabase と並び順が違う点は text の `ORDER BY` にのみ影響） |
 | `edinet` の権限 | **superuser でも createdb でもない**。所有する `financial_db` 内の CREATE は可 |
 
+**WSL2 からの接続（2026-11-27・#1316・[ADR-0080](adr/0080-jax-jobs-run-in-wsl2-while-smart-app-control-stays-on.md)）**: jax を使う日中枠の仕事（M-7）は WSL2（`Ubuntu-24.04`）の venv で走り、この DB を `127.0.0.1:5432` で読み書きする。`%USERPROFILE%\.wslconfig` の `networkingMode=mirrored` で Linux 側の `127.0.0.1` が Windows の loopback に届くので、上の `listen_addresses` と `pg_hba.conf` は**変えていない**（サーバから見た接続元も `127.0.0.1`）。接続文字列は Linux 側でも同じ `.env` から読む。作り直しの手順は [GOTCHAS.md「ローカルバッチの実行環境」](GOTCHAS.md#ローカルバッチの実行環境windowsタスクスケジューラ)。
+
 **pg_dump のバージョン整合**: クライアントはサーバ以上である必要がある。PG18 クライアントで Supabase（15/17）を dump するのは正方向なので問題ない（逆は不可）。
 
 #### セットアップ（`scripts/setup_local_db.py`）

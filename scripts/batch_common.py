@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -71,6 +72,75 @@ WINDOW_MARGIN_MIN = 30.0
 # 「今日は測れない」と判断するだけの間に締切を踏み、打ち切り（＝失敗）として起票されうる。
 DEADLINE_MIN_START_MIN = 5.0
 
+# ── WSL2（Linux 側）で起動するステップ（#1316・ADR-0080）──────────────────────────
+# Smart App Control（SAC）が jaxlib の `.pyd` を評判で遮断し続けた（2026-11-23〜・部品は毎回変わる）ので、
+# jax を使う仕事は WSL2 で回す。SAC は Windows の部品を見る仕組みで、WSL の中の Linux の部品は止めない
+# （2026-11-27 に WSL では `check_heavy_imports` が exit 0）。コードは元のフォルダ（`/mnt/c/...`）を
+# そのまま読み、venv だけ Linux のホームに置く。作り方は docs/GOTCHAS.md「ローカルバッチの実行環境」。
+RUNNER_NATIVE = "native"
+RUNNER_WSL = "wsl"
+WSL_DISTRO = "Ubuntu-24.04"
+# Linux のホームからの相対パス。ユーザー名をリポジトリへ書かない（公開）ので `$HOME` で解く。
+WSL_VENV = "finapp-venv"
+# Linux の既定の時刻帯は UTC。08:00 JST は前日の 23:00 UTC なので、「今日」を使うコードが期を取り違えうる。
+WSL_TZ = "Asia/Tokyo"
+# Linux 側へ渡す環境変数（`WSLENV`）。締切（`ENV_DEADLINE`）が届かないと子が自分で畳めない（ADR-0054）。
+# `FINAPP_DB_TARGET` / `FINAPP_JOB` も `FINAPP_` で拾う。
+WSL_PASS_PREFIXES = ("FINAPP_",)
+WSL_PASS_NAMES = ("PYTHONUNBUFFERED", "PYTHONIOENCODING", "TZ")
+
+
+def to_wsl_path(path) -> str:
+    """Windows の絶対パス（`C:\\a\\b`）を WSL の `/mnt/c/a/b` へ直す純関数。ドライブ名の無いパスは区切りだけ直す。"""
+    s = str(path)
+    m = re.match(r"^([A-Za-z]):[\\/]*(.*)$", s)
+    if not m:
+        return s.replace("\\", "/")
+    rest = m.group(2).replace("\\", "/").rstrip("/")
+    return f"/mnt/{m.group(1).lower()}" + (f"/{rest}" if rest else "")
+
+
+def wsl_argv(args: Sequence[str], root: Path = ROOT) -> tuple[str, ...]:
+    """venv の python へ渡す引数 `args` を、WSL の中でリポジトリ直下を cwd にして起動する argv にする（純関数）。
+
+    `--exec` はシェルを通さないので `~` も `$HOME` も展開されない。`sh -c 'exec "$HOME/..." "$@"'` で
+    venv の python を解き、引数は `"$@"` でそのまま渡す（引数の中身をシェルに解釈させない）。`finapp` は `$0`。
+    """
+    return ("wsl.exe", "-d", WSL_DISTRO, "--cd", to_wsl_path(root), "--exec",
+            "sh", "-c", f'exec "$HOME/{WSL_VENV}/bin/python" "$@"', "finapp", *args)
+
+
+def wsl_env(env: dict) -> dict:
+    """WSL のステップへ渡す環境変数（純関数）。`TZ` を足し、Linux 側へ渡す名前を `WSLENV` に並べる。
+
+    `WSLENV` に無い変数は Linux 側へ届かない。`/u` は「Windows から WSL を起動するときだけ渡す」の印。
+    既に `WSLENV` にある名前は重ねない（人が足した設定を消さない）。
+    """
+    out = dict(env)
+    out["TZ"] = WSL_TZ
+    names = sorted(k for k in out if k.startswith(WSL_PASS_PREFIXES) or k in WSL_PASS_NAMES)
+    existing = [x for x in out.get("WSLENV", "").split(":") if x]
+    have = {x.split("/")[0] for x in existing}
+    out["WSLENV"] = ":".join(existing + [f"{k}/u" for k in names if k not in have])
+    return out
+
+
+def terminate_wsl(echo=None, run=None) -> None:
+    """WSL のディストリビューションごと止める（予算超過の打ち切りの後・#1316）。例外は投げない。
+
+    `wsl.exe` を `taskkill /T` で落としても、Linux 側のプロセスは残りうる（消えるのは Windows 側の中継だけ）。
+    残ると、予算で切ったはずの計算が翌日の仕事と並走する（#618 で発散が 0 → 344 回に増えた種類の事故）。
+    `--terminate` はそのディストリビューションの全プロセスを止める——日中枠の仕事のほかに Linux 側で
+    走らせるものは無い前提で、人が開いた WSL の画面も閉じる。
+    """
+    run = run or subprocess.run
+    try:
+        run(["wsl.exe", "--terminate", WSL_DISTRO],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=KILL_GRACE_SEC)
+    except Exception as e:      # noqa: BLE001 — 止められなくてもバッチは続ける。黙らせず1行で出す
+        if echo:
+            echo(f"[warn] wsl --terminate に失敗（{e}）。Linux 側の計算が残っているかもしれない")
+
 
 def _mem_line(root_pid: Optional[int] = None) -> str:
     """heartbeat / env 行へ載せるメモリ実測。**測れなくてもバッチを止めない**。
@@ -108,12 +178,17 @@ class Step:
     ステップは「残りが無ければ今日はやらない」が正常で、起動して即打ち切れば失敗として起票されてしまう。
     `window_problem` は `deadline_at` だけのステップを Σ予算に数えない（締切が窓の内側なら、はみ出しようが無い）ので、
     **締切を窓の終わり（起動時刻 + 窓 − マージン）より後へ置かないのは呼び出し側の責任**。
+
+    `runner` は `RUNNER_WSL` なら WSL2 の中で走るステップ（#1316）。`argv` は呼び出し側が `wsl_argv` で
+    組み立てる。ここで変わるのは子へ渡す環境変数（`wsl_env`）、heartbeat のメモリ表示、打ち切りの後の
+    `terminate_wsl` の3つ。
     """
     name: str
     argv: tuple[str, ...]
     why: str
     budget_min: Optional[float] = None
     deadline_at: Optional[datetime] = None
+    runner: str = RUNNER_NATIVE
 
 
 @dataclass(frozen=True)
@@ -315,6 +390,10 @@ class Runner:
             env.pop(ENV_DEADLINE, None)
         else:
             env[ENV_DEADLINE] = deadline.isoformat()
+        wsl = step.runner == RUNNER_WSL
+        if wsl:
+            # 締切を決めた**後**に組む。`WSLENV` に載らない変数は Linux 側へ届かない。
+            env = wsl_env(env)
         try:
             proc = subprocess.Popen(step.argv, cwd=str(ROOT), env=env,
                                     stdout=self._fh, stderr=subprocess.STDOUT)
@@ -343,14 +422,19 @@ class Runner:
                     # `_tail_since` がそれを拾い、END 行の要約が「打ち切った」になって
                     # **子がどこまで進んでいたか**が消える——一番知りたいのはそちら。
                     kill_tree(proc, echo=self.write)
+                    if wsl:
+                        terminate_wsl(echo=self.write)
                     killed = True
                     try:
                         returncode = proc.wait(timeout=KILL_GRACE_SEC)
                     except Exception:      # noqa: BLE001 — 反応しない子で END 行を落とさない
                         returncode = TIMEOUT_EXIT
                     break
+                # WSL の子は Linux の VM の中にいて、Windows 側のプロセスツリーには中継しか見えない。
+                # その小さい値を出すと黙って誤る（sysmem「測るのはプロセスツリーの合計」と同じ理由）。
+                mem = "mem WSL 内（Windows 側からは測れない）" if wsl else _mem_line(proc.pid)
                 self.write(f"{HEARTBEAT_MARK} {step.name} 継続中: 経過 {waited / 60.0:.0f}分"
-                           f" | {_mem_line(proc.pid)}")
+                           f" | {mem}")
                 self._beat(step.name)
         tail = self._tail_since(pos) or _proc_tail(proc)
         if killed:

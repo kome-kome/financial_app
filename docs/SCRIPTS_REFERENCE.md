@@ -333,7 +333,7 @@ M-4 の**基底構成**（M-1+M-2 vs M-1+M-2+M-6）の OOF 横並び実測（#39
 
 ## `scripts/measure_transformer.py`
 
-事前登録 `docs/prereg/m7-transformer.md` の計測（#1316）。M-7 を M-6・M-2（スキーマ既定）と比べ、値動きの系列の上乗せを測る。日中枠 `measure:m7-transformer`（単独で積む・`deps_smoke` つき）。結果は `scripts/.cache/m7_transformer.json`。
+事前登録 `docs/prereg/m7-transformer.md` の計測（#1316）。M-7 を M-6・M-2（スキーマ既定）と比べ、値動きの系列の上乗せを測る。日中枠 `measure:m7-transformer`（単独で積む・WSL2 で起動し `deps_smoke_wsl` つき・ADR-0080）。結果は `scripts/.cache/m7_transformer.json`。
 
 - 主審は `model_comparison.run_comparison(only_models=[macro_gbdt, macro_enet, macro_transformer])` の `significance_matrix` を**そのまま読む**（3 組の Bonferroni・再計算しない＝ADR-0041）。対照は系列なしの M-7（`use_sequence=False`）との rank-IC の差（`paired_ic_significance`・α 0.05）。参考は上位10社超過の差（検定しない）・各モデルの要約・種 43／44 の M-7 の rank-IC
 - 比較の外の採点（系列なし・別の種）は `model_comparison.score_once`（比較の行と同じ objective_only・dry_run・display_scoring）で行い、1 つの `shared_snapshot_cache` で共有する（`run_comparison` は自分のキャッシュを持つので、パネルは合わせて 2 回作る）
@@ -544,6 +544,12 @@ watchdog をタスクスケジューラへ登録する（毎日 JST 20:00・上�
   - 読む側は `hyperparameter_search.resolve_deadline()`。定数名が root 側と2箇所に分かれる（root から `scripts/` を import しない）ので `tests/test_hyperparameter_search.py` が照合する
 - **絶対時刻の締切 `Step.deadline_at`**（#1114）: 「前のステップが早く終わった残り」を使うステップのためのもの（分数の予算は残りの長さを表せない）。`budget_min` と併せれば早い方で切り、子へ渡す締切も同じ。**始まる時点で残りが `DEADLINE_MIN_START_MIN`(5分) 未満なら走らせずに 0 を返す**（`SKIP` 行を残す。残りを使うステップは「残りが無ければやらない」が正常で、起動して即打ち切ると失敗として起票されるため）。`window_problem()` は締切だけのステップを Σ予算に数えないので、**締切を窓の終わりより後へ置かないのは呼び出し側の責任**（日中枠は `tests/test_run_daytime.py::TestTuningCycleStep` が照合）
 
+- **WSL2 で起動するステップ `Step.runner="wsl"`**（#1316・[ADR-0080](adr/0080-jax-jobs-run-in-wsl2-while-smart-app-control-stays-on.md)）: Smart App Control が Windows の jaxlib を止め続けたので、jax を使う仕事は WSL2（`WSL_DISTRO`）の venv（`$HOME/WSL_VENV`）で回す。`argv` は `wsl_argv()` が組む（リポジトリ直下を cwd にし、`sh -c 'exec "$HOME/.../python" "$@"'` で引数をそのまま渡す＝**Linux のユーザー名をリポジトリへ書かない**）
+  - **子の環境変数は `wsl_env()`**: `TZ=Asia/Tokyo` を足し、`FINAPP_*`・`PYTHONUNBUFFERED`・`PYTHONIOENCODING`・`TZ` を `WSLENV` に並べる。**`WSLENV` に無い変数は Linux 側へ届かない**（締切が届かないと子が畳めない）。締切を決めた後に組む
+  - **打ち切りは `kill_tree` の後に `terminate_wsl()`**（`wsl --terminate`）。`wsl.exe` を落としても Linux 側の計算は残りうる。Linux 側の全プロセス（人が開いた WSL の画面を含む）を止める
+  - heartbeat のメモリは WSL のステップでは出さない（Windows 側のツリーには中継しか見えず、黙って誤る）
+  - 純関数と Runner の経路は `tests/test_batch_common_wsl.py`（`wsl.exe` は差し替え）。本物の WSL での確認手順は GOTCHAS.md「ローカルバッチの実行環境」
+
 種別: ユーティリティ ／ 依存先: database, sysmem
 
 ## `scripts/check_heavy_imports.py`
@@ -653,6 +659,8 @@ M-1 探索専用タスクの登録（既定 毎月3日 JST 01:00・16時間）�
   - **キューの仕事ではない**（積まない・取り除かない・in-flight に載せない）。中断されても周回の状態（`app_settings.tuning_cycle:macro_gbdt`）が束の続きを持ち、次の日に同じ束をその日のデータで測り直す
   - 周回が付く日は `--peek` の `sensitive` が true（`cycle` も出す）＝`-Force` の無い `-Now` では起動しない。`--queue` は周回の段と進み具合を出す
   - 測り方（勝ち抜き戦・決勝候補・周回の終わりに 1 回だけ反映）は `tuning_cycle.py` と `hyperparameter_search.run_cycle` の docstring
+
+- **`Job.runner`**（#1316・[ADR-0080](adr/0080-jax-jobs-run-in-wsl2-while-smart-app-control-stays-on.md)）: `bc.RUNNER_WSL` の仕事は WSL2 の venv で起動する（今は `measure:m7-transformer`・`model:macro_transformer`）。`argv` は `{python}` で始め、他に `{python}` を置かない（`steps_for_many` が先頭を `bc.wsl_argv` へ差し替える）。依存の確認は `DEPS_SMOKE_WSL`（Linux 側の `check_heavy_imports`）で、Windows の仕事と並ぶ日は `DEPS_SMOKE_MIN` を 2 本で等分する（窓から引いた枠を増やさない）。**過去の Windows の結果と比べる仕事（`beta`・`bench:rhat-scale`）は差を測るまで移さない**。`check:wsl` は WSL の経路そのものの確認（日中枠はセッション0・S4U で走るので、対話の画面で動いてもタスクから動くとは限らない）で、WSL・venv を作り直した後に単独で積んで `-Now` で叩く
 
 **経緯と実測（ADR に無いもの）**
 
