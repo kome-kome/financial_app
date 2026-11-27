@@ -86,7 +86,7 @@ python -m scripts.macro_beta_gate_history --threshold 1.01  # strict 基準で�
 # Windows の jaxlib が Smart App Control に止められても回る。依存の確認は deps_smoke_wsl。作り直しは GOTCHAS.md「ローカルバッチの実行環境」
 $env:WSL_UTF8 = '1'; wsl.exe -l -v       # Ubuntu-24.04 が VERSION 2 で載っているか（WSL_UTF8 が無いと表示が化ける）
 wsl.exe -d Ubuntu-24.04 --exec sh -c 'exec "$HOME/finapp-venv/bin/python" "$@"' finapp -m scripts.check_heavy_imports   # リポジトリ直下で叩く（wsl.exe は今のフォルダを /mnt/c/... として引き継ぐ）。WSL の venv で jax が読めるか
-# 依存の版を上げたら WSL の venv も入れ直す（同じ形で -m pip install -r requirements-inference.txt）
+# 依存の版を上げたら WSL の venv も入れ直す（同じ形で -m pip install -r requirements-inference.txt）。版のずれは同じ形で -m scripts.check_heavy_imports --pins requirements-inference.txt が出す（deps_smoke_wsl も照合する・#1324）
 ./run_daytime.ps1 -Enqueue check:wsl; ./run_daytime.ps1 -Now   # 日中枠のタスク（セッション0）から WSL が動くか。WSL・venv を作り直した後に
 
 # バックアップ（週次バッチ・毎週日曜 JST 21:00。Storage は 50MB/ファイル・1GB。実測 38.1MB/世代）
