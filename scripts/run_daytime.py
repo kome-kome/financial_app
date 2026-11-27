@@ -165,6 +165,9 @@ JOB_BUDGET_MIN = WINDOW_MIN - DEPS_SMOKE_MIN - MARGIN_MIN   # = 445
 # 確かめられない（しかも Windows では jax が SAC に止められている）ので別のステップにする。両方が並ぶ日は
 # `DEPS_SMOKE_MIN` を等分する＝窓から引いた枠を増やさない。
 DEPS_SMOKE_WSL = "deps_smoke_wsl"
+# WSL の venv の版を照合する固定値（`check_heavy_imports --pins`・#1324）。WSL の venv は Windows とは別に
+# 入れてあり、依存の版を上げても import は通るので、ずれが失敗として現れない。Windows の deps_smoke には付けない。
+WSL_PINS = "requirements-inference.txt"
 
 # 2件目以降を足すかを判断するときの余裕（#707・ADR-0060）。「**所要が倍に伸びても
 # 打ち切られない**」という約束であって、実測から逆算した値ではない。
@@ -1085,8 +1088,8 @@ JOBS: dict[str, Job] = {
     # 動いても、タスクから動くとは限らない。WSL や venv を作り直した後に、これだけを積んで `-Now` で叩く。
     "check:wsl": Job(
         name="check_wsl",
-        argv=("{python}", "-m", "scripts.check_heavy_imports"),
-        why="WSL2 の venv で重い依存（jax / numpyro 等）が読めるかを、日中枠のタスク（セッション0）から確かめる"
+        argv=("{python}", "-m", "scripts.check_heavy_imports", "--pins", WSL_PINS),
+        why="WSL2 の venv で重い依存（jax / numpyro 等）が読めるか・版が固定値どおりかを、日中枠のタスク（セッション0）から確かめる"
             "（#1316）。WSL・venv を作り直した後に単独で積み、`run_daytime.ps1 -Now` で叩く。",
         # 2026-11-27 対話セッションの実測 0.2 分（deps_smoke_wsl と同じ中身）。
         measured_min=0.5,
@@ -1881,9 +1884,9 @@ def steps_for_many(python: str, job_keys: Sequence[str],
             budget_min=smoke_min))
     if bc.RUNNER_WSL in smoke_on:
         steps.append(Step(
-            DEPS_SMOKE_WSL, bc.wsl_argv(("-m", "scripts.check_heavy_imports")),
-            why="WSL2 の venv で重い依存（jax / numpyro 等）が import できるかを確かめる（#1316）。"
-                "WSL・Ubuntu・venv のどれかが無い、または版が壊れていれば、学習の前にここで落ちる",
+            DEPS_SMOKE_WSL, bc.wsl_argv(("-m", "scripts.check_heavy_imports", "--pins", WSL_PINS)),
+            why="WSL2 の venv で重い依存（jax / numpyro 等）が import できるか（#1316）と、版が固定値どおりか"
+                "（#1324）を確かめる。WSL・Ubuntu・venv のどれかが無い、版がずれている・壊れていれば、学習の前にここで落ちる",
             budget_min=smoke_min, runner=bc.RUNNER_WSL))
     for key in job_keys:
         job = JOBS.get(key)

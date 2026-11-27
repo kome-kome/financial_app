@@ -197,9 +197,23 @@ class TestWslJobs:
 
     def test_the_wsl_smoke_checks_the_inference_stack_in_linux(self):
         smoke = rd.steps_for("py.exe", "measure:m7-transformer")[0]
-        assert smoke.argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports"))
+        assert smoke.argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports", "--pins", rd.WSL_PINS))
         assert "base" not in smoke.argv
         assert smoke.budget_min == rd.DEPS_SMOKE_MIN
+
+    def test_wsl_checks_compare_versions_with_the_pins(self):
+        """WSL の venv は Windows とは別に入れてある。版を上げても import は通るので、照合しないとずれが現れない（#1324）。"""
+        assert rd.WSL_PINS == "requirements-inference.txt"
+        assert (ROOT / rd.WSL_PINS).is_file()
+        smoke = rd.steps_for("py.exe", "measure:m7-transformer")[0]
+        check = rd.steps_for("py.exe", "check:wsl")[0]
+        for step in (smoke, check):
+            assert step.argv[step.argv.index("--pins") + 1] == rd.WSL_PINS
+
+    def test_the_windows_smoke_does_not_compare_versions(self):
+        """Windows の venv の運用は変えない（#1324 の範囲外）。"""
+        smoke = rd.steps_for("py.exe", "beta")[0]
+        assert smoke.name == "deps_smoke" and "--pins" not in smoke.argv
 
     def test_a_mixed_day_splits_the_smoke_budget_and_fits_the_window(self):
         """Windows の仕事と WSL の仕事が並ぶ日は確認が 2 本。窓から引いた枠（`DEPS_SMOKE_MIN`）は増やさない。"""
@@ -223,7 +237,7 @@ class TestWslJobs:
         assert job.runner == bc.RUNNER_WSL and job.parallel_sensitive is False
         steps = rd.steps_for("py.exe", "check:wsl")
         assert [s.name for s in steps] == ["check_wsl"], "中身が確認そのものなので deps_smoke_wsl を重ねない"
-        assert steps[0].argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports"))
+        assert steps[0].argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports", "--pins", rd.WSL_PINS))
 
     def test_the_wsl_smoke_is_a_known_step_name(self):
         """`--steps` で名指しできる＝手で再実行できる。"""

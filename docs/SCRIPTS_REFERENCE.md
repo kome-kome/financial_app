@@ -556,6 +556,8 @@ watchdog をタスクスケジューラへ登録する（毎日 JST 20:00・上�
 
 **重い依存が実際に import できるかの smoke**（`python -m scripts.check_heavy_imports`・月次の `deps_smoke` ステップ）。numpy/scipy/pandas/sklearn/statsmodels と pymc/pytensor/arviz/jax/numpyro を**1つずつ**読み、`jax.devices()` まで踏み込む。**未導入（`ModuleNotFoundError`）は skip、導入済みで import 失敗は error**——同一視すると Smart App Control のブロックが「入っていないだけ」に見えて黙って通る（`ModuleNotFoundError` は `ImportError` のサブクラスなので捕捉順が効く）。2026-09-01 の初実走で SAC が 8/21 の jaxlib 更新で入った未評価の `_ifrt_proxy.pyd` を初回ロードでブロックし `macro_beta` が exit=1／1か月ぶんの `macro_beta_loadings` が固着した。**未評価 DLL の初回ロードをここが引き受ける**ので本番ステップは通り、それでも落ちるなら数百分の予算を待たず起票される。SAC は OFF にしない（不可逆）。**本番の推論と同じ条件で測るため冒頭で `jax_import_guard.install()` を呼び、拡張を代替したら `[warn ]` 行で残す（失敗に数えない・#782）**——判定の反転は CodeIntegrity ログ（約4時間で上書き）に残らず、このログが唯一の時系列になる。**`--profile base` は基盤5つだけ（M-1・月次本体＝jax 系を import しないバッチ）、既定の `inference` は推論系＋`jax.devices()` まで（月次 beta・日中枠の beta / bench）**——M-1 が使わない `jaxlib/cpu/_sparse.pyd` の遮断で M-1 が失敗扱いになった（#789）
 
+- **`--pins <requirements>` で版も照合する**（#1324）: 入っている版（`importlib.metadata`）を `==` の固定値と突き合わせ、ずれ・未導入を失敗にする。`-r` の入れ子をたどり、名前は PEP 503 で正規化、版は文字列の完全一致。固定値が 1 件も取れないファイルも失敗（取り違えを「ずれ 0 件」で通さない）。**WSL の venv は Windows とは別に入れてあり、版を上げても import は通る**ので、日中枠の `deps_smoke_wsl` と `check:wsl` だけが `--pins requirements-inference.txt` を付ける（Windows の `deps_smoke`・月次には付けない）
+
 種別: ユーティリティ ／ 依存先: jax_import_guard
 
 ## `scripts/run_monthly.py`
