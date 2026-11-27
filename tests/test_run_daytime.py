@@ -159,6 +159,78 @@ class TestSteps:
         assert "{python}" not in argv
 
 
+class TestWslJobs:
+    """WSL2 で回す仕事（`Job.runner`・#1316・ADR-0080）。
+
+    Windows では jaxlib が Smart App Control に止められ続けた（2026-11-23〜）ので、M-7 の 2 ジョブは WSL2 の
+    venv で起動する。依存の確認も Linux 側で行う（Windows の `deps_smoke` では Linux の venv を確かめられない）。
+    """
+
+    M7 = ("measure:m7-transformer", "model:macro_transformer")
+
+    @pytest.mark.parametrize("key", M7)
+    def test_m7_jobs_run_in_wsl(self, key):
+        assert rd.JOBS[key].runner == bc.RUNNER_WSL
+
+    def test_jobs_compared_against_past_windows_results_stay_native(self):
+        """macro_beta 等は過去の結果と比べる計算。Linux へ移すのは差を測ってから。"""
+        for key in ("beta", "bench:rhat-scale"):
+            assert rd.JOBS[key].runner == bc.RUNNER_NATIVE
+
+    def test_every_wsl_job_starts_with_the_python_placeholder_only_once(self):
+        """`steps_for_many` は先頭の `{python}` だけを Linux 側の python へ差し替える（`Job.runner` の約束）。"""
+        for key, job in rd.JOBS.items():
+            if job.runner == bc.RUNNER_WSL:
+                assert job.argv[0] == "{python}" and "{python}" not in job.argv[1:], key
+
+    def test_runner_values_are_known(self):
+        assert {j.runner for j in rd.JOBS.values()} <= {bc.RUNNER_NATIVE, bc.RUNNER_WSL}
+
+    @pytest.mark.parametrize("key", M7)
+    def test_wsl_job_gets_the_wsl_smoke_then_runs_through_wsl(self, key):
+        job = rd.JOBS[key]
+        smoke, step = rd.steps_for("py.exe", key)
+        assert (smoke.name, step.name) == (rd.DEPS_SMOKE_WSL, job.name)
+        assert smoke.runner == step.runner == bc.RUNNER_WSL
+        assert step.argv == bc.wsl_argv(job.argv[1:])
+        assert "py.exe" not in step.argv and "{python}" not in step.argv
+
+    def test_the_wsl_smoke_checks_the_inference_stack_in_linux(self):
+        smoke = rd.steps_for("py.exe", "measure:m7-transformer")[0]
+        assert smoke.argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports"))
+        assert "base" not in smoke.argv
+        assert smoke.budget_min == rd.DEPS_SMOKE_MIN
+
+    def test_a_mixed_day_splits_the_smoke_budget_and_fits_the_window(self):
+        """Windows の仕事と WSL の仕事が並ぶ日は確認が 2 本。窓から引いた枠（`DEPS_SMOKE_MIN`）は増やさない。"""
+        steps, owner = rd.steps_for_many("py", ["gate:macro", "measure:m7-transformer", "beta"])
+        smokes = {s.name: s for s in steps if s.name in ("deps_smoke", rd.DEPS_SMOKE_WSL)}
+        assert set(smokes) == {"deps_smoke", rd.DEPS_SMOKE_WSL}
+        assert sum(s.budget_min for s in smokes.values()) == pytest.approx(rd.DEPS_SMOKE_MIN)
+        assert smokes["deps_smoke"].runner == bc.RUNNER_NATIVE
+        assert bc.window_problem(steps, rd.WINDOW_MIN) is None
+        # 仕事のステップは従来どおり owner に載る（確認のステップは載らない）
+        assert set(owner.values()) == {"gate:macro", "measure:m7-transformer", "beta"}
+
+    def test_native_jobs_are_unchanged(self):
+        steps = rd.steps_for("py.exe", "beta")
+        assert [s.name for s in steps] == ["deps_smoke", "macro_beta"]
+        assert all(s.runner == bc.RUNNER_NATIVE and s.argv[0] == "py.exe" for s in steps)
+
+    def test_the_session_zero_check_runs_alone_in_wsl(self):
+        """`check:wsl` は日中枠のタスク（セッション0）から WSL が動くかを見るだけ＝`-Now` を -Force なしで叩ける。"""
+        job = rd.JOBS["check:wsl"]
+        assert job.runner == bc.RUNNER_WSL and job.parallel_sensitive is False
+        steps = rd.steps_for("py.exe", "check:wsl")
+        assert [s.name for s in steps] == ["check_wsl"], "中身が確認そのものなので deps_smoke_wsl を重ねない"
+        assert steps[0].argv == bc.wsl_argv(("-m", "scripts.check_heavy_imports"))
+
+    def test_the_wsl_smoke_is_a_known_step_name(self):
+        """`--steps` で名指しできる＝手で再実行できる。"""
+        ns = rd.build_parser().parse_args(["--steps", rd.DEPS_SMOKE_WSL, "--dry-run"])
+        assert rd.DEPS_SMOKE_WSL in str(ns.steps)
+
+
 class TestArgumentsMatchTheExistingBatches:
     """**同じ名前の別物を測らない。** 片方の引数だけ動かすと比較が成立しなくなる。"""
 

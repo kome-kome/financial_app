@@ -88,6 +88,7 @@
 | [0077](0077-replay-ties-break-by-hash.md) | **OOF 運用再現の同点は、コード順でなく (期, 社) のハッシュの順で割る** | #1259, #1227 | accepted（2026-11-18） |
 | [0078](0078-portfolio-construction-stays-merged-equal-weight.md) | **保有の組み方は今のまま——2 モデルの上位の合算を等金額で持ち、業種・銘柄の上限は置かない** | #1227, #1223 | accepted（2026-11-19） |
 | [0079](0079-transformer-sequence-model-joins-as-comparison.md) | **時系列 Transformer（M-7）を比較用のモデルとして足し、事前登録の判定で処遇を決める** | #1317, #1316 | accepted（2026-11-23） |
+| [0080](0080-jax-jobs-run-in-wsl2-while-smart-app-control-stays-on.md) | **jax を使う M-7 の仕事は WSL2 で回し、Smart App Control はオンのままにする** | #1316 | accepted（2026-11-27） |
 
 ## 運用
 
